@@ -36,5 +36,9 @@ pub fn router_with_engine(engine: Arc<StrataEngine>) -> Router {
             "/api/v1/state/{agent_id}/{key}",
             axum::routing::get(handlers::state_get).put(handlers::state_set),
         )
+        .route(
+            "/mcp",
+            axum::routing::post(crate::mcp::transport::handle_mcp),
+        )
         .with_state(engine)
 }

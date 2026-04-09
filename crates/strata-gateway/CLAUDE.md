@@ -9,20 +9,21 @@ LLM proxy) into calls on `strata_core::StrataEngine`. Also handles authenticatio
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| REST API | **Working** | axum router, health/query/ingest/search/state endpoints |
+| REST API | **Working** | axum router with health/query/ingest/search/state endpoints |
 | HTTP Server | **Working** | Binds port, graceful shutdown via oneshot channel |
-| MCP definitions | Defined | Tools/resources/prompts listed, transport stub |
-| PG wire | Stub | pgwire handler skeleton |
+| PG Wire | **Working** | pgwire SimpleQuery + ExtendedQuery, routes SQL to engine DuckDB |
+| MCP Server | **Working** | JSON-RPC at /mcp: initialize, tools/list, tools/call, resources/list |
+| MCP tools | **Working** | query, ingest, get_state, set_state callable via tools/call |
 | gRPC | Stub | tonic service skeleton |
 | LLM proxy | Stub | Router/providers/cache skeletons |
-| Auth | Stub | API key/JWT validation, middleware types defined |
+| Auth | Stub | API key/JWT types defined, middleware not wired |
 
 ## Public API
 
-- `GatewayServer::start(engine, config)` — binds HTTP port, starts serving
+- `GatewayServer::start(engine, config)` — binds HTTP + PG wire ports, starts serving
 - `GatewayServer::shutdown()` — graceful shutdown
 - `rest::router()` — stateless router for testing
-- `rest::router_with_engine(engine)` — full router with engine state
+- `rest::router_with_engine(engine)` — full router with engine state + MCP endpoint
 
 ## REST Routes
 
@@ -31,12 +32,28 @@ LLM proxy) into calls on `strata_core::StrataEngine`. Also handles authenticatio
 | GET | `/health` | health check | **Working** |
 | POST | `/api/v1/query` | SQL query via DuckDB | **Working** |
 | POST | `/api/v1/ingest` | event ingestion | **Working** |
-| POST | `/api/v1/search` | semantic search | Stub |
+| POST | `/api/v1/search` | semantic vector search | **Working** |
 | GET | `/api/v1/state/{agent_id}/{key}` | get state | **Working** |
 | PUT | `/api/v1/state/{agent_id}/{key}` | set state | **Working** |
+| POST | `/mcp` | MCP JSON-RPC endpoint | **Working** |
+
+## PG Wire Protocol
+
+Clients connect with `psql -h localhost -p 5432` (no auth required).
+SQL is routed to the engine's DuckDB. Results returned as VARCHAR columns.
+
+## MCP Protocol
+
+POST JSON-RPC to `/mcp`. Supported methods:
+- `initialize` — server capabilities
+- `tools/list` — list available tools with schemas
+- `tools/call` — execute a tool (query, ingest, get_state, set_state)
+- `resources/list` — list memory resources
+- `prompts/list` — list prompt templates
+- `ping` — health check
 
 ## Testing
 
 - `cargo test -p strata-gateway` (32 tests)
-- Integration tests in `tests/integration/` test full router with tower::ServiceExt::oneshot
+- Integration tests in `tests/integration/` test full router
 - Gateway lifecycle tests verify start/shutdown with port 0

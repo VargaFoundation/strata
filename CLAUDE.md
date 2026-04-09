@@ -120,10 +120,10 @@ All prefixed with `STRATA_`. Nested keys use `__`. Examples:
 | **Ollama embedding** | Working | HTTP client to /api/embed |
 | **OpenAI embedding** | Working | HTTP client to /v1/embeddings |
 | **Config loading** | Working | TOML + env vars layered |
-| SemanticStore | Stub | USearch HNSW pending |
-| PG wire protocol | Stub | pgwire handler pending |
+| **SemanticStore** | Working | USearch HNSW index, upsert/search/delete with cosine similarity |
+| **PG wire protocol** | Working | pgwire SimpleQuery+ExtendedQuery, routes SQL to DuckDB |
+| **MCP server** | Working | JSON-RPC at /mcp, tools/call for query/ingest/state, resources/list |
 | gRPC | Stub | tonic service pending |
-| MCP server | Stub | Transport pending, tools/resources defined |
 | LLM proxy | Stub | Router/providers pending |
 | S3 storage | Stub | aws-sdk-s3 pending |
 | Cluster/Raft | Stub | openraft pending (Phase 3) |

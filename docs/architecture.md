@@ -2,10 +2,10 @@
 
 This document describes Strata's internal architecture, crate structure, data model, and key design decisions.
 
-> **Current status**: The core engine is functional — DuckDB-backed episodic store,
-> SQLite+DashMap state store, real HTTP server with axum, working ingestion pipeline,
-> and Ollama/OpenAI embedding providers. See each crate's CLAUDE.md for detailed
-> implementation status.
+> **Current status**: All three memory stores are functional — DuckDB-backed episodic store,
+> USearch HNSW semantic store, SQLite+DashMap state store. The gateway serves REST API,
+> PostgreSQL wire protocol (psql-compatible), and MCP JSON-RPC (tools/call for query/ingest/state).
+> Embedding providers (Ollama, OpenAI) are implemented. See each crate's CLAUDE.md for details.
 
 ## System Overview
 

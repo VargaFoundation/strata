@@ -72,9 +72,7 @@ impl GatewayServer {
 
         // Start PG wire protocol server
         let pg_addr = config.pg_listen.clone();
-        if let Err(e) =
-            crate::pg_wire::handler::start_pg_wire(&pg_addr, engine.clone()).await
-        {
+        if let Err(e) = crate::pg_wire::handler::start_pg_wire(&pg_addr, engine.clone()).await {
             tracing::warn!(%pg_addr, error = %e, "failed to start PG wire server (non-fatal)");
         }
 

@@ -19,7 +19,7 @@ use pgwire::error::{PgWireError, PgWireResult};
 use strata_core::StrataEngine;
 
 /// No-auth startup handler.
-struct StrataStartupHandler;
+pub struct StrataStartupHandler;
 impl NoopStartupHandler for StrataStartupHandler {}
 
 /// PG wire handler backed by the Strata engine.
@@ -52,7 +52,7 @@ impl SimpleQueryHandler for PgWireHandler {
             Ok(rows) => {
                 if rows.is_empty() {
                     // Could be a DDL/DML statement
-                    return Ok(vec![Response::Execution(Tag::new("OK").into())]);
+                    return Ok(vec![Response::Execution(Tag::new("OK"))]);
                 }
 
                 // Build field info from first row's keys
@@ -138,9 +138,7 @@ impl ExtendedQueryHandler for PgWireHandler {
     {
         let query = &portal.statement.statement;
         match self.engine.query_sql(query) {
-            Ok(rows) if rows.is_empty() => {
-                Ok(Response::Execution(Tag::new("OK").into()))
-            }
+            Ok(rows) if rows.is_empty() => Ok(Response::Execution(Tag::new("OK"))),
             Ok(rows) => {
                 let field_names: Vec<String> = rows
                     .first()
@@ -275,7 +273,7 @@ pub async fn start_pg_wire(
                 Ok((socket, _)) => {
                     let factory_ref = factory.clone();
                     tokio::spawn(async move {
-                        pgwire::tokio::process_socket(socket, None, factory_ref).await;
+                        let _ = pgwire::tokio::process_socket(socket, None, factory_ref).await;
                     });
                 }
                 Err(e) => {

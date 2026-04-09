@@ -202,11 +202,17 @@ mod tests {
     async fn engine_semantic_search() {
         let engine = StrataEngine::new(CoreConfig::default()).await.unwrap();
 
-        // Insert entries
+        // Use distinct vectors so cosine similarity clearly differentiates them
+        let mut rust_vec = vec![0.0f32; 768];
+        rust_vec[0] = 1.0; // points strongly in dimension 0
+
+        let mut python_vec = vec![0.0f32; 768];
+        python_vec[1] = 1.0; // points strongly in dimension 1
+
         let entry1 = SemanticEntry {
             id: uuid::Uuid::new_v4(),
             content: "Rust programming language".into(),
-            embedding: vec![1.0; 768],
+            embedding: rust_vec.clone(),
             metadata: serde_json::json!({}),
         };
         engine.semantic_upsert(&entry1).await.unwrap();
@@ -214,15 +220,15 @@ mod tests {
         let entry2 = SemanticEntry {
             id: uuid::Uuid::new_v4(),
             content: "Python scripting".into(),
-            embedding: vec![0.5; 768],
+            embedding: python_vec,
             metadata: serde_json::json!({}),
         };
         engine.semantic_upsert(&entry2).await.unwrap();
 
         assert_eq!(engine.semantic_count(), 2);
 
-        // Search
-        let results = engine.semantic_search(&vec![1.0; 768], 1).await.unwrap();
+        // Search for vector close to "Rust"
+        let results = engine.semantic_search(&rust_vec, 1).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entry.content, "Rust programming language");
     }
