@@ -1,0 +1,101 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/strata-core",
+    "crates/strata-gateway",
+    "crates/strata-cluster",
+    "crates/strata-cli",
+    "strata-server",
+    "tests/integration",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/VargaFoundation/strata"
+description = "The open-source context lake for AI agents"
+
+[workspace.dependencies]
+# Internal crates
+strata-core = { path = "crates/strata-core" }
+strata-gateway = { path = "crates/strata-gateway" }
+strata-cluster = { path = "crates/strata-cluster" }
+strata-cli = { path = "crates/strata-cli" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP / Web
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "timeout"] }
+hyper = { version = "1" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# gRPC
+tonic = { version = "0.12" }
+prost = { version = "0.13" }
+tonic-build = { version = "0.12" }
+
+# PostgreSQL wire protocol
+pgwire = { version = "0.28" }
+
+# Database / Storage
+duckdb = { version = "1", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Vector search
+usearch = { version = "2" }
+
+# Object storage (S3/MinIO)
+aws-sdk-s3 = { version = "1" }
+aws-config = { version = "1" }
+
+# Consensus
+openraft = { version = "0.9" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+rmp-serde = { version = "1" }
+toml = { version = "0.8" }
+
+# Configuration
+config = { version = "0.14" }
+
+# Error handling
+thiserror = { version = "2" }
+anyhow = { version = "1" }
+
+# Observability
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = { version = "0.24" }
+metrics-exporter-prometheus = { version = "0.16" }
+
+# Auth
+jsonwebtoken = { version = "9" }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = { version = "1" }
+futures = { version = "0.3" }
+async-trait = { version = "0.1" }
+parking_lot = { version = "0.12" }
+dashmap = { version = "6" }
+rand = { version = "0.9" }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

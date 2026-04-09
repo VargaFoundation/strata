@@ -1,0 +1,3 @@
+[target.x86_64-unknown-linux-gnu]
+# Uncomment if lld is installed for faster link times:
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]

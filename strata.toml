@@ -1,0 +1,52 @@
+# Strata Context Lake — Default Configuration
+# Override any setting with STRATA_ prefixed environment variables.
+# Nested keys use double underscore: STRATA_STORAGE__ENGINE=s3
+
+[storage]
+data_dir = "./data"
+engine = "local"               # "local" | "s3"
+
+[storage.s3]
+endpoint = ""
+bucket = "strata"
+access_key = ""
+secret_key = ""
+region = "us-east-1"
+
+[memory.episodic]
+wal_dir = "./data/wal"
+default_retention_days = 365
+
+[memory.semantic]
+index_dir = "./data/vectors"
+default_dimension = 768
+metric = "cosine"              # "cosine" | "l2" | "ip"
+
+[memory.state]
+db_path = "./data/state.db"
+
+[embedding]
+provider = "ollama"            # "ollama" | "openai"
+model = "nomic-embed-text"
+dimension = 768
+batch_size = 64
+ollama_url = "http://localhost:11434"
+openai_api_key = ""
+
+[query]
+max_rows = 10000
+timeout_ms = 30000
+
+[gateway]
+listen = "0.0.0.0:8432"
+pg_listen = "0.0.0.0:5432"
+grpc_listen = "0.0.0.0:9432"
+mcp_enabled = true
+llm_proxy_enabled = false
+auth_enabled = false
+
+[cluster]
+enabled = false
+node_id = 1
+listen = "0.0.0.0:9433"
+peers = []

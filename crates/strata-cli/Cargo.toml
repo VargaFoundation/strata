@@ -1,0 +1,29 @@
+[package]
+name = "strata-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "CLI administration tool for Strata"
+
+[[bin]]
+name = "strata"
+path = "src/main.rs"
+
+[dependencies]
+strata-core.workspace = true
+
+tokio.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+anyhow.workspace = true
+uuid.workspace = true
+chrono.workspace = true

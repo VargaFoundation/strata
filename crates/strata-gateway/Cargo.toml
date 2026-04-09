@@ -1,0 +1,51 @@
+[package]
+name = "strata-gateway"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Protocol gateway for the Strata context lake"
+
+[dependencies]
+strata-core.workspace = true
+
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+axum.workspace = true
+axum-extra.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper.workspace = true
+reqwest.workspace = true
+
+tonic.workspace = true
+prost.workspace = true
+
+pgwire.workspace = true
+
+jsonwebtoken.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+uuid.workspace = true
+chrono.workspace = true
+bytes.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+toml.workspace = true
+tower = { workspace = true, features = ["util"] }

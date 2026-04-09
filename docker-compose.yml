@@ -1,0 +1,66 @@
+services:
+  strata:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5432:5432"
+      - "8432:8432"
+    environment:
+      STRATA_STORAGE__DATA_DIR: /data
+      STRATA_STORAGE__ENGINE: s3
+      STRATA_STORAGE__S3__ENDPOINT: http://minio:9000
+      STRATA_STORAGE__S3__BUCKET: strata
+      STRATA_STORAGE__S3__ACCESS_KEY: minioadmin
+      STRATA_STORAGE__S3__SECRET_KEY: minioadmin
+      STRATA_EMBEDDING__PROVIDER: ollama
+      STRATA_EMBEDDING__MODEL: nomic-embed-text
+      STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
+    volumes:
+      - strata-data:/data
+    depends_on:
+      minio:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/strata --ignore-existing;
+      exit 0;
+      "
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  strata-data:
+  minio-data:
+  ollama-data:

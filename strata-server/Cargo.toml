@@ -1,0 +1,28 @@
+[package]
+name = "strata-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Main server binary for the Strata context lake"
+
+[[bin]]
+name = "strata-server"
+path = "src/main.rs"
+
+[dependencies]
+strata-core.workspace = true
+strata-gateway.workspace = true
+strata-cluster.workspace = true
+
+tokio.workspace = true
+config.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
