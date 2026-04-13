@@ -63,6 +63,15 @@ impl StateStore {
         }
         .map_err(|e| crate::Error::State(format!("failed to open state db: {e}")))?;
 
+        // Durability: WAL mode survives process crashes, NORMAL sync is safe with WAL,
+        // busy_timeout avoids SQLITE_BUSY under concurrent access.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;",
+        )
+        .map_err(|e| crate::Error::State(format!("failed to set pragmas: {e}")))?;
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS state (
                 agent_id   TEXT NOT NULL,

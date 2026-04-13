@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use crate::Result;
 
 /// Configuration for the gateway.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct GatewayConfig {
     pub listen: String,
@@ -31,6 +31,24 @@ pub struct GatewayConfig {
     /// Maximum requests per second per API key (token bucket). 0 = unlimited.
     #[serde(default)]
     pub rate_limit_per_key: u32,
+}
+
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayConfig")
+            .field("listen", &self.listen)
+            .field("pg_listen", &self.pg_listen)
+            .field("grpc_listen", &self.grpc_listen)
+            .field("mcp_enabled", &self.mcp_enabled)
+            .field("llm_proxy_enabled", &self.llm_proxy_enabled)
+            .field("auth_enabled", &self.auth_enabled)
+            .field("max_pg_connections", &self.max_pg_connections)
+            .field("api_keys", &format!("[{} keys]", self.api_keys.len()))
+            .field("jwt_secret", &self.jwt_secret.as_ref().map(|_| "***"))
+            .field("cors_origins", &self.cors_origins)
+            .field("rate_limit_per_key", &self.rate_limit_per_key)
+            .finish()
+    }
 }
 
 impl Default for GatewayConfig {

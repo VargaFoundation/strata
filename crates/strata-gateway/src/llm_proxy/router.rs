@@ -75,48 +75,80 @@ pub async fn chat_completions(
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
-    // 2. Search semantic memory for relevant context (if we have entries)
+    // 2. Build context from both semantic and episodic memory
+    let mut context_sections: Vec<String> = Vec::new();
+
+    // 2a. Semantic search: embed the user query and find relevant knowledge
     if engine.semantic_count() > 0 && !user_query.is_empty() {
-        // We'd need an embedding to search — for now, skip auto-RAG
-        // In production: embed(user_query) → semantic_search(vector, 5) → build context
-        // This would require an EmbeddingProvider on the engine
+        if let Ok(results) = engine.embed_and_search(&user_query, 5, None, None).await {
+            let semantic_lines: Vec<String> = results
+                .iter()
+                .filter(|r| r.score >= 0.3)
+                .map(|r| {
+                    let source = r
+                        .entry
+                        .metadata
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    format!(
+                        "- [{}] (score: {:.2}) {}",
+                        source,
+                        r.score,
+                        r.entry.content.chars().take(300).collect::<String>()
+                    )
+                })
+                .collect();
+            if !semantic_lines.is_empty() {
+                context_sections.push(format!(
+                    "### Relevant knowledge (semantic search)\n{}",
+                    semantic_lines.join("\n")
+                ));
+            }
+        }
     }
 
-    // 3. Search episodic memory for recent relevant events
+    // 2b. Episodic memory: recent events for temporal context
     let recent_events = engine
         .query_sql("SELECT source, event_type, payload, ts FROM episodic ORDER BY ts DESC LIMIT 5")
         .await
         .unwrap_or_default();
 
     if !recent_events.is_empty() {
-        // Build context from recent events
-        let context_lines: Vec<String> = recent_events
+        let event_lines: Vec<String> = recent_events
             .iter()
             .filter_map(|row| {
                 let source = row.get("source")?.as_str()?;
                 let event_type = row.get("event_type")?.as_str()?;
-                Some(format!("- [{source}] {event_type}"))
+                let ts = row.get("ts").and_then(|v| v.as_str()).unwrap_or("unknown");
+                Some(format!("- [{source}] {event_type} (at {ts})"))
             })
             .collect();
+        if !event_lines.is_empty() {
+            context_sections.push(format!(
+                "### Recent events (episodic memory)\n{}",
+                event_lines.join("\n")
+            ));
+        }
+    }
 
-        if !context_lines.is_empty() {
-            let context_block = format!(
-                "## Context from Strata (recent events)\n{}",
-                context_lines.join("\n")
+    // 2c. Inject combined context into the conversation
+    if !context_sections.is_empty() {
+        let context_block = format!(
+            "## Context from Strata\nThe following context was automatically retrieved from Strata's memory stores.\n\n{}",
+            context_sections.join("\n\n")
+        );
+
+        if let Some(sys_msg) = req.messages.iter_mut().find(|m| m.role == "system") {
+            sys_msg.content = format!("{}\n\n{}", context_block, sys_msg.content);
+        } else {
+            req.messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".into(),
+                    content: context_block,
+                },
             );
-
-            // Prepend context to system message or create one
-            if let Some(sys_msg) = req.messages.iter_mut().find(|m| m.role == "system") {
-                sys_msg.content = format!("{}\n\n{}", context_block, sys_msg.content);
-            } else {
-                req.messages.insert(
-                    0,
-                    ChatMessage {
-                        role: "system".into(),
-                        content: context_block,
-                    },
-                );
-            }
         }
     }
 
@@ -183,12 +215,114 @@ async fn forward_to_ollama(
 }
 
 async fn forward_to_anthropic(
-    _http: &Client,
-    _req: &ChatCompletionRequest,
+    http: &Client,
+    req: &ChatCompletionRequest,
 ) -> Json<serde_json::Value> {
-    // Anthropic uses a different API format — would need translation
-    // For now, return an informative error
-    error_response("Anthropic provider requires API translation (use OpenAI or Ollama)")
+    // Translate OpenAI format to Anthropic Messages API format
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return error_response("ANTHROPIC_API_KEY environment variable not set");
+    }
+
+    // Separate system message from conversation messages
+    let system = req
+        .messages
+        .iter()
+        .find(|m| m.role == "system")
+        .map(|m| m.content.clone());
+
+    let messages: Vec<serde_json::Value> = req
+        .messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| {
+            serde_json::json!({
+                "role": m.role,
+                "content": m.content,
+            })
+        })
+        .collect();
+
+    let mut body = serde_json::json!({
+        "model": req.model,
+        "messages": messages,
+        "max_tokens": req.max_tokens.unwrap_or(4096),
+    });
+
+    if let Some(sys) = system {
+        body["system"] = serde_json::Value::String(sys);
+    }
+    if let Some(temp) = req.temperature {
+        body["temperature"] = serde_json::json!(temp);
+    }
+
+    match http
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(anthropic_resp) => {
+                // Translate Anthropic response back to OpenAI format
+                let content = anthropic_resp
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|block| block.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+
+                let usage_in = anthropic_resp
+                    .get("usage")
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let usage_out = anthropic_resp
+                    .get("usage")
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                // Check for API error
+                if let Some(err) = anthropic_resp.get("error") {
+                    return error_response(
+                        err.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Anthropic API error"),
+                    );
+                }
+
+                Json(serde_json::json!({
+                    "id": anthropic_resp.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "object": "chat.completion",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": req.model,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": content,
+                        },
+                        "finish_reason": anthropic_resp
+                            .get("stop_reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("stop"),
+                    }],
+                    "usage": {
+                        "prompt_tokens": usage_in,
+                        "completion_tokens": usage_out,
+                        "total_tokens": usage_in + usage_out,
+                    }
+                }))
+            }
+            Err(e) => error_response(&format!("failed to parse Anthropic response: {e}")),
+        },
+        Err(e) => error_response(&format!("Anthropic request failed: {e}")),
+    }
 }
 
 fn error_response(message: &str) -> Json<serde_json::Value> {

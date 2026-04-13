@@ -209,6 +209,14 @@ impl MemStore {
         let conn =
             Connection::open(path).map_err(|e| crate::Error::Raft(format!("open raft db: {e}")))?;
 
+        // Durability: WAL mode survives process crashes without corruption.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;",
+        )
+        .map_err(|e| crate::Error::Raft(format!("set pragmas: {e}")))?;
+
         StoreInner::init_schema(&conn);
 
         let mut inner = StoreInner {
@@ -327,12 +335,23 @@ impl RaftLogReader<TypeConfig> for MemStore {
 
 impl RaftSnapshotBuilder<TypeConfig> for MemStore {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
-        let inner = self.inner.lock();
+        let (last_applied, membership) = {
+            let inner = self.inner.lock();
+            (inner.last_applied, inner.last_membership.clone())
+        };
 
-        let last_applied = inner.last_applied;
-        let membership = inner.last_membership.clone();
-
-        let data = serde_json::to_vec(&"snapshot").unwrap_or_default();
+        // Build a real snapshot from the engine state
+        let data = if let Some(engine) = &self.engine {
+            match crate::replication::snapshot::SnapshotManager::build(engine).await {
+                Ok(snapshot_data) => snapshot_data,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to build snapshot, using empty");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
 
         let snapshot_id = format!(
             "{}-{}",
@@ -347,6 +366,15 @@ impl RaftSnapshotBuilder<TypeConfig> for MemStore {
             last_membership: membership,
             snapshot_id,
         };
+
+        // Store snapshot locally
+        {
+            let mut inner = self.inner.lock();
+            inner.snapshot = Some(StoredSnapshot {
+                meta: meta.clone(),
+                data: data.clone(),
+            });
+        }
 
         Ok(Snapshot {
             meta,
@@ -509,6 +537,18 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<NodeId>> {
         let data = snapshot.into_inner();
+
+        // Restore engine state from the snapshot data
+        if !data.is_empty() {
+            if let Some(engine) = &self.engine {
+                if let Err(e) =
+                    crate::replication::snapshot::SnapshotManager::restore(engine, &data).await
+                {
+                    tracing::error!(error = %e, "failed to restore snapshot to engine");
+                }
+            }
+        }
+
         let mut inner = self.inner.lock();
         inner.last_applied = meta.last_log_id;
         inner.last_membership = meta.last_membership.clone();

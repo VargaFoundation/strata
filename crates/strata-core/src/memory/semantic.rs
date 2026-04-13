@@ -349,6 +349,55 @@ impl SemanticStore {
             dimension: meta.dimension,
         })
     }
+
+    /// Reload this store's contents from a saved directory on disk.
+    ///
+    /// This replaces the current in-memory index and metadata with the
+    /// contents from disk, used for Raft snapshot restore.
+    pub fn load_from(&self, dir: &Path) -> crate::Result<()> {
+        let meta_path = dir.join("metadata.json");
+        let meta_json = std::fs::read_to_string(&meta_path)
+            .map_err(|e| crate::Error::Storage(format!("read metadata: {e}")))?;
+        let meta: SerializedMetadata = serde_json::from_str(&meta_json)
+            .map_err(|e| crate::Error::Storage(format!("parse metadata: {e}")))?;
+
+        let index_path = dir.join("index.usearch");
+        let index_str = index_path.to_string_lossy();
+        let options = usearch::ffi::IndexOptions {
+            dimensions: meta.dimension,
+            metric: usearch::ffi::MetricKind::Cos,
+            quantization: usearch::ffi::ScalarKind::F32,
+            connectivity: 16,
+            expansion_add: 128,
+            expansion_search: 64,
+            multi: false,
+        };
+        let new_index = usearch::Index::new(&options)
+            .map_err(|e| crate::Error::Storage(format!("create index: {e}")))?;
+        new_index
+            .load(&index_str)
+            .map_err(|e| crate::Error::Storage(format!("load index: {e}")))?;
+
+        // Replace the current index
+        {
+            let mut index = self.index.lock();
+            *index = new_index;
+        }
+
+        // Replace metadata
+        self.entries.clear();
+        for (k, v) in meta.entries {
+            self.entries.insert(k, v);
+        }
+        self.uuid_to_key.clear();
+        for (k, v) in meta.uuid_to_key {
+            self.uuid_to_key.insert(k, v);
+        }
+        self.next_key.store(meta.next_key, Ordering::Relaxed);
+
+        tracing::info!(entries = self.entries.len(), path = %dir.display(), "semantic store reloaded from snapshot");
+        Ok(())
+    }
 }
 
 /// Serialization format for semantic store metadata.

@@ -143,6 +143,9 @@ pub async fn query(
     result
 }
 
+/// Maximum number of events per ingest batch.
+const MAX_INGEST_EVENTS: usize = 10_000;
+
 /// Ingest events into the engine.
 pub async fn ingest(
     State(engine): State<Arc<StrataEngine>>,
@@ -150,6 +153,18 @@ pub async fn ingest(
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "ingest").increment(1);
     let start = std::time::Instant::now();
+
+    if req.events.len() > MAX_INGEST_EVENTS {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "BATCH_TOO_LARGE",
+            format!(
+                "batch contains {} events, maximum is {}",
+                req.events.len(),
+                MAX_INGEST_EVENTS
+            ),
+        );
+    }
 
     let events: Vec<strata_core::memory::episodic::Event> = req
         .events
@@ -458,6 +473,104 @@ pub async fn embed_and_search(
     metrics::histogram!("strata_rest_request_duration_seconds", "endpoint" => "embed_and_search")
         .record(start.elapsed().as_secs_f64());
     result
+}
+
+// ── Session Management ─────────────────────────────────────────────
+
+/// Start a new conversation session.
+///
+/// POST /api/v1/sessions { "session_id": "...", "agent_id": "...", "parent_session_id": "..." }
+pub async fn session_start(
+    State(engine): State<Arc<StrataEngine>>,
+    Json(req): Json<serde_json::Value>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "session_start").increment(1);
+
+    let session_id = req
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let agent_id = req
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    if session_id.is_empty() || agent_id.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "MISSING_FIELD",
+            "session_id and agent_id are required".into(),
+        );
+    }
+
+    let parent = req.get("parent_session_id").and_then(|v| v.as_str());
+    let metadata = req.get("metadata").cloned();
+
+    match engine
+        .session_start(session_id, agent_id, parent, metadata)
+        .await
+    {
+        Ok(()) => api_ok(serde_json::json!({
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "status": "started"
+        })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SESSION_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// End a session.
+///
+/// POST /api/v1/sessions/{session_id}/end { "summary": "..." }
+pub async fn session_end(
+    State(engine): State<Arc<StrataEngine>>,
+    Path(session_id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "session_end").increment(1);
+
+    let summary = req.get("summary").and_then(|v| v.as_str());
+    match engine.session_end(&session_id, summary).await {
+        Ok(()) => api_ok(serde_json::json!({
+            "session_id": session_id,
+            "status": "ended"
+        })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SESSION_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// Recall all events in a session.
+///
+/// GET /api/v1/sessions/{session_id}/recall
+pub async fn session_recall(
+    State(engine): State<Arc<StrataEngine>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "session_recall").increment(1);
+
+    match engine.session_recall(&session_id).await {
+        Ok(events) => {
+            let count = events.len();
+            api_ok(serde_json::json!({
+                "session_id": session_id,
+                "events": events,
+                "count": count
+            }))
+        }
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SESSION_ERROR",
+            e.to_string(),
+        ),
+    }
 }
 
 // ── Schema Introspection ────────────────────────────────────────────

@@ -95,6 +95,7 @@ sqlparser = { version = "0.53" }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+rustyline = { version = "15" }
 
 # Testing
 tempfile = { version = "3" }

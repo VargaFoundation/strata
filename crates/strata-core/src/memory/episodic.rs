@@ -166,6 +166,23 @@ impl EpisodicStore {
              CREATE INDEX IF NOT EXISTS idx_episodic_trace ON episodic(trace_id);",
         );
 
+        // Sessions table for conversation threading
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                session_id       VARCHAR PRIMARY KEY,
+                parent_session_id VARCHAR,
+                agent_id         VARCHAR NOT NULL,
+                started_at       TIMESTAMPTZ NOT NULL,
+                ended_at         TIMESTAMPTZ,
+                summary          VARCHAR,
+                metadata         JSON DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+            ALTER TABLE episodic ADD COLUMN IF NOT EXISTS session_id VARCHAR;
+            CREATE INDEX IF NOT EXISTS idx_episodic_session ON episodic(session_id);",
+        )
+        .map_err(|e| crate::Error::Storage(format!("failed to create sessions table: {e}")))?;
+
         Ok(())
     }
 
@@ -410,6 +427,122 @@ impl EpisodicStore {
             .query_row("SELECT count(*) FROM episodic", [], |row| row.get(0))
             .map_err(|e| crate::Error::Query(e.to_string()))?;
         Ok(count as u64)
+    }
+
+    // ── Session Management ──────────────────────────────────────────
+
+    /// Start a new conversation session.
+    pub async fn start_session(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        parent_session_id: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> crate::Result<()> {
+        let db = self.write_db.lock();
+        let meta_str = serde_json::to_string(&metadata.unwrap_or(serde_json::json!({})))
+            .unwrap_or_else(|_| "{}".to_string());
+        db.execute(
+            "INSERT INTO sessions (session_id, parent_session_id, agent_id, started_at, metadata)
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?::JSON)",
+            duckdb::params![session_id, parent_session_id, agent_id, meta_str],
+        )
+        .map_err(|e| crate::Error::Ingest(format!("start session: {e}")))?;
+        Ok(())
+    }
+
+    /// End a session, optionally setting a summary.
+    pub async fn end_session(&self, session_id: &str, summary: Option<&str>) -> crate::Result<()> {
+        let db = self.write_db.lock();
+        db.execute(
+            "UPDATE sessions SET ended_at = CURRENT_TIMESTAMP, summary = ?
+             WHERE session_id = ?",
+            duckdb::params![summary, session_id],
+        )
+        .map_err(|e| crate::Error::Ingest(format!("end session: {e}")))?;
+        Ok(())
+    }
+
+    /// Get session details.
+    pub async fn get_session(&self, session_id: &str) -> crate::Result<Option<serde_json::Value>> {
+        let db = self.read_conn();
+        let result = db
+            .query_row(
+                "SELECT session_id, parent_session_id, agent_id,
+                        started_at::VARCHAR, ended_at::VARCHAR, summary, metadata::VARCHAR
+                 FROM sessions WHERE session_id = ?",
+                duckdb::params![session_id],
+                |row| {
+                    let meta_str: String = row.get(6)?;
+                    Ok(serde_json::json!({
+                        "session_id": row.get::<_, String>(0)?,
+                        "parent_session_id": row.get::<_, Option<String>>(1)?,
+                        "agent_id": row.get::<_, String>(2)?,
+                        "started_at": row.get::<_, String>(3)?,
+                        "ended_at": row.get::<_, Option<String>>(4)?,
+                        "summary": row.get::<_, Option<String>>(5)?,
+                        "metadata": serde_json::from_str::<serde_json::Value>(&meta_str).unwrap_or_default(),
+                    }))
+                },
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// List sessions for an agent.
+    pub async fn list_sessions(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> crate::Result<Vec<serde_json::Value>> {
+        let db = self.read_conn();
+        let mut stmt = db
+            .prepare(
+                "SELECT session_id, started_at::VARCHAR, ended_at::VARCHAR, summary
+                 FROM sessions WHERE agent_id = ?
+                 ORDER BY started_at DESC LIMIT ?",
+            )
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map(duckdb::params![agent_id, limit as i64], |row| {
+                Ok(serde_json::json!({
+                    "session_id": row.get::<_, String>(0)?,
+                    "started_at": row.get::<_, String>(1)?,
+                    "ended_at": row.get::<_, Option<String>>(2)?,
+                    "summary": row.get::<_, Option<String>>(3)?,
+                }))
+            })
+            .map_err(|e| crate::Error::Query(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Recall all events in a session.
+    pub async fn recall_session(&self, session_id: &str) -> crate::Result<Vec<serde_json::Value>> {
+        let db = self.read_conn();
+        let mut stmt = db
+            .prepare(
+                "SELECT id, source, event_type, payload::VARCHAR, ts::VARCHAR
+                 FROM episodic WHERE session_id = ?
+                 ORDER BY ts ASC",
+            )
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map(duckdb::params![session_id], |row| {
+                let payload_str: String = row.get(3)?;
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "source": row.get::<_, String>(1)?,
+                    "event_type": row.get::<_, String>(2)?,
+                    "payload": serde_json::from_str::<serde_json::Value>(&payload_str).unwrap_or_default(),
+                    "ts": row.get::<_, String>(4)?,
+                }))
+            })
+            .map_err(|e| crate::Error::Query(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
     }
 }
 

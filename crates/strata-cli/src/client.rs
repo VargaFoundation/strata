@@ -54,6 +54,43 @@ impl StrataClient {
         Ok(resp)
     }
 
+    /// GET /api/v1/schema/sources
+    pub async fn schema_sources(&self) -> anyhow::Result<serde_json::Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/schema/sources", self.base_url))
+            .send()
+            .await?
+            .json()
+            .await?;
+        Ok(resp)
+    }
+
+    /// GET /api/v1/schema/agents
+    pub async fn schema_agents(&self) -> anyhow::Result<serde_json::Value> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/schema/agents", self.base_url))
+            .send()
+            .await?
+            .json()
+            .await?;
+        Ok(resp)
+    }
+
+    /// POST /api/v1/embed-and-search
+    pub async fn search(&self, text: &str, k: usize) -> anyhow::Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(format!("{}/api/v1/embed-and-search", self.base_url))
+            .json(&serde_json::json!({ "text": text, "k": k }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        Ok(resp)
+    }
+
     /// Return the base URL (for testing/display).
     #[cfg(test)]
     pub fn base_url(&self) -> &str {

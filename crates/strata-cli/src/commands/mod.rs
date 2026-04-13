@@ -3,6 +3,9 @@ pub mod export;
 pub mod ingest;
 pub mod query;
 pub mod restore;
+pub mod schema;
+pub mod search;
+pub mod shell;
 pub mod status;
 
 use clap::Subcommand;
@@ -43,6 +46,18 @@ pub enum Command {
         #[arg(long)]
         from: String,
     },
+    /// Interactive SQL shell (REPL)
+    Shell,
+    /// Show available tables, event sources, and agent IDs
+    Schema,
+    /// Semantic search across stored events
+    Search {
+        /// Search text
+        text: String,
+        /// Number of results to return
+        #[arg(short, long, default_value = "5")]
+        k: usize,
+    },
 }
 
 pub async fn execute(cmd: Command, url: &str) -> anyhow::Result<()> {
@@ -53,5 +68,8 @@ pub async fn execute(cmd: Command, url: &str) -> anyhow::Result<()> {
         Command::Export { entity } => export::run(url, &entity).await,
         Command::Backup { target } => backup::run(url, &target).await,
         Command::Restore { from } => restore::run(url, &from).await,
+        Command::Shell => shell::run(url).await,
+        Command::Schema => schema::run(url).await,
+        Command::Search { text, k } => search::run(url, &text, k).await,
     }
 }

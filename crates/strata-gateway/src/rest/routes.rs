@@ -4,12 +4,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::handlers;
+use axum::extract::{DefaultBodyLimit, Request};
+use axum::http::header::HeaderName;
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::Router;
 use strata_cluster::ClusterCoordinator;
 use strata_core::StrataEngine;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+
+/// Maximum request body size (16 MB).
+const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+
+static X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 /// Shared handle for cluster coordinator access from health/ready endpoints.
 #[derive(Clone)]
@@ -96,6 +105,15 @@ pub fn router_with_engine_and_auth(
             "/state/{agent_id}/watch",
             axum::routing::get(handlers::state_watch),
         )
+        .route("/sessions", axum::routing::post(handlers::session_start))
+        .route(
+            "/sessions/{session_id}/end",
+            axum::routing::post(handlers::session_end),
+        )
+        .route(
+            "/sessions/{session_id}/recall",
+            axum::routing::get(handlers::session_recall),
+        )
         .with_state(engine.clone());
 
     // Apply auth middleware if configured
@@ -134,10 +152,8 @@ pub fn router_with_engine_and_auth(
 
     app = app.merge(protocol_routes);
 
-    // CORS: explicit origins if configured, otherwise permissive (dev only)
-    let cors = if config.cors_origins.is_empty() {
-        CorsLayer::permissive()
-    } else {
+    // CORS: explicit origins if configured, restrictive when auth enabled, otherwise permissive (dev only)
+    let cors = if !config.cors_origins.is_empty() {
         let origins: Vec<axum::http::HeaderValue> = config
             .cors_origins
             .iter()
@@ -158,13 +174,56 @@ pub fn router_with_engine_and_auth(
                 axum::http::header::ACCEPT,
             ])
             .allow_credentials(true)
+    } else if config.auth_enabled {
+        // Auth enabled but no explicit origins: restrict to same-origin for safety
+        tracing::warn!(
+            "auth_enabled=true but no cors_origins configured — CORS restricted to same-origin"
+        );
+        CorsLayer::new()
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+                axum::http::Method::OPTIONS,
+            ])
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::ACCEPT,
+            ])
+    } else {
+        CorsLayer::permissive()
     };
 
     // Global middleware stack (applied bottom-up)
-    app.layer(tower_http::timeout::TimeoutLayer::with_status_code(
-        axum::http::StatusCode::GATEWAY_TIMEOUT,
-        Duration::from_secs(30),
-    ))
-    .layer(TraceLayer::new_for_http())
-    .layer(cors)
+    app.layer(axum::middleware::from_fn(request_id_middleware))
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::GATEWAY_TIMEOUT,
+            Duration::from_secs(30),
+        ))
+        .layer(TraceLayer::new_for_http())
+        .layer(cors)
+}
+
+/// Middleware that reads or generates an `X-Request-Id` header and includes it in the response.
+///
+/// If the client sends an `X-Request-Id`, it is preserved. Otherwise a UUID v4 is generated.
+/// The request ID is also injected into the current tracing span for log correlation.
+async fn request_id_middleware(req: Request, next: Next) -> Response {
+    let request_id = req
+        .headers()
+        .get(&X_REQUEST_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    tracing::Span::current().record("request_id", &request_id);
+
+    let mut response = next.run(req).await;
+    if let Ok(val) = request_id.parse() {
+        response.headers_mut().insert(X_REQUEST_ID.clone(), val);
+    }
+    response
 }

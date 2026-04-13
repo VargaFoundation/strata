@@ -184,7 +184,10 @@ pub async fn start_grpc(
 
     tokio::spawn(async move {
         if let Err(e) = tonic::transport::Server::builder()
-            .add_service(proto::strata_server::StrataServer::new(service))
+            .add_service(
+                proto::strata_server::StrataServer::new(service)
+                    .max_decoding_message_size(16 * 1024 * 1024),
+            )
             .serve_with_shutdown(parsed_addr, async {
                 let _ = shutdown_rx.await;
                 tracing::info!("gRPC server draining");

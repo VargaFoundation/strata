@@ -258,6 +258,45 @@ impl StrataEngine {
         self.state.list_keys(agent_id).await
     }
 
+    // ── Sessions ─────────────────────────────────────────────────────
+
+    /// Start a new conversation session.
+    pub async fn session_start(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        parent_session_id: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.episodic
+            .start_session(session_id, agent_id, parent_session_id, metadata)
+            .await
+    }
+
+    /// End a conversation session with an optional summary.
+    pub async fn session_end(&self, session_id: &str, summary: Option<&str>) -> Result<()> {
+        self.episodic.end_session(session_id, summary).await
+    }
+
+    /// Get details of a session.
+    pub async fn session_get(&self, session_id: &str) -> Result<Option<serde_json::Value>> {
+        self.episodic.get_session(session_id).await
+    }
+
+    /// List sessions for an agent.
+    pub async fn session_list(
+        &self,
+        agent_id: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.episodic.list_sessions(agent_id, limit).await
+    }
+
+    /// Recall all events in a session.
+    pub async fn session_recall(&self, session_id: &str) -> Result<Vec<serde_json::Value>> {
+        self.episodic.recall_session(session_id).await
+    }
+
     // ── Embed & Search ────────────────────────────────────────────────
 
     /// Embed a text string using the configured embedding provider.
@@ -468,6 +507,18 @@ impl StrataEngine {
             }
         }
         Ok(())
+    }
+
+    // ── Store Accessors (for snapshot/restore) ────────────────────────
+
+    /// Access the episodic store directly (for snapshot operations).
+    pub fn episodic_store(&self) -> Arc<EpisodicStore> {
+        self.episodic.clone()
+    }
+
+    /// Access the semantic store directly (for snapshot operations).
+    pub fn semantic_store(&self) -> Arc<SemanticStore> {
+        self.semantic.clone()
     }
 
     // ── Health Checks ────────────────────────────────────────────────

@@ -35,6 +35,12 @@ impl ClusterCoordinator {
             heartbeat_interval: 500,
             election_timeout_min: 1500,
             election_timeout_max: 3000,
+            // Log compaction: trigger snapshot after 5000 committed entries,
+            // retain 500 entries after snapshot for slow followers.
+            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(5000),
+            max_in_snapshot_log_to_keep: 500,
+            // Batch size for AppendEntries RPCs
+            max_payload_entries: 100,
             ..Default::default()
         };
 
@@ -93,6 +99,50 @@ impl ClusterCoordinator {
 
             tracing::info!("single-node cluster initialized");
         }
+
+        // Spawn background task to publish Raft metrics to Prometheus
+        let metrics_raft = raft.clone();
+        let metrics_node_id = self.config.node_id;
+        tokio::spawn(async move {
+            let mut watch = metrics_raft.metrics();
+            let mut prev_leader: Option<NodeId> = None;
+            loop {
+                // Wait for metrics to change (watch channel)
+                if watch.changed().await.is_err() {
+                    break; // Raft shut down
+                }
+                let m = watch.borrow().clone();
+
+                metrics::gauge!("strata_raft_term").set(m.current_term as f64);
+                metrics::gauge!("strata_raft_is_leader").set(
+                    if m.current_leader == Some(metrics_node_id) {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                );
+
+                if let Some(last_applied) = m.last_applied {
+                    metrics::gauge!("strata_raft_last_applied_index")
+                        .set(last_applied.index as f64);
+                }
+                if let Some(last_log) = m.last_log_index {
+                    metrics::gauge!("strata_raft_last_log_index").set(last_log as f64);
+                    if let Some(last_applied) = m.last_applied {
+                        metrics::gauge!("strata_raft_replication_lag")
+                            .set((last_log.saturating_sub(last_applied.index)) as f64);
+                    }
+                }
+
+                // Track leader changes
+                if m.current_leader != prev_leader {
+                    if prev_leader.is_some() {
+                        metrics::counter!("strata_raft_leader_changes_total").increment(1);
+                    }
+                    prev_leader = m.current_leader;
+                }
+            }
+        });
 
         self.raft = Some(raft);
         Ok(())

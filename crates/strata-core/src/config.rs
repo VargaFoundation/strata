@@ -1,6 +1,33 @@
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Read a secret value, supporting the `_FILE` convention for Docker/K8s secrets.
+///
+/// If the env var `{name}_FILE` is set, reads the secret from that file path.
+/// Otherwise falls back to reading the env var `{name}` directly.
+/// Returns empty string if neither is set.
+pub fn resolve_secret(name: &str) -> String {
+    let file_key = format!("{name}_FILE");
+    if let Ok(path) = std::env::var(&file_key) {
+        match std::fs::read_to_string(path.trim()) {
+            Ok(secret) => return secret.trim().to_string(),
+            Err(e) => {
+                tracing::warn!(%file_key, error = %e, "failed to read secret file");
+            }
+        }
+    }
+    std::env::var(name).unwrap_or_default()
+}
+
+/// Format helper: redact secret strings in Debug output.
+fn redact(s: &str) -> &str {
+    if s.is_empty() {
+        ""
+    } else {
+        "***"
+    }
+}
+
+#[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct CoreConfig {
     pub storage: StorageConfig,
@@ -8,6 +35,18 @@ pub struct CoreConfig {
     pub embedding: EmbeddingConfig,
     pub query: QueryConfig,
     pub backup: BackupConfig,
+}
+
+impl std::fmt::Debug for CoreConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoreConfig")
+            .field("storage", &self.storage)
+            .field("memory", &self.memory)
+            .field("embedding", &self.embedding)
+            .field("query", &self.query)
+            .field("backup", &self.backup)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,7 +67,7 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct S3Config {
     pub endpoint: String,
@@ -36,6 +75,18 @@ pub struct S3Config {
     pub access_key: String,
     pub secret_key: String,
     pub region: String,
+}
+
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("access_key", &redact(&self.access_key))
+            .field("secret_key", &redact(&self.secret_key))
+            .field("region", &self.region)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -96,7 +147,7 @@ impl Default for StateConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct EmbeddingConfig {
     pub provider: String,
@@ -105,6 +156,19 @@ pub struct EmbeddingConfig {
     pub batch_size: usize,
     pub ollama_url: String,
     pub openai_api_key: String,
+}
+
+impl std::fmt::Debug for EmbeddingConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingConfig")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("dimension", &self.dimension)
+            .field("batch_size", &self.batch_size)
+            .field("ollama_url", &self.ollama_url)
+            .field("openai_api_key", &redact(&self.openai_api_key))
+            .finish()
+    }
 }
 
 impl Default for EmbeddingConfig {
