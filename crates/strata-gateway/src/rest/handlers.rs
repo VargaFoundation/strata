@@ -337,6 +337,77 @@ pub async fn state_set(
 
 // ── Admin endpoints ─────────────────────────────────────────────────
 
+/// Get or set per-source retention policies.
+///
+/// GET /api/v1/admin/retention/policies — list all policies
+/// PUT /api/v1/admin/retention/policies — set a policy { "source": "...", "retention_days": N }
+pub async fn retention_policies(
+    State(engine): State<Arc<StrataEngine>>,
+    method: axum::http::Method,
+    body: Option<Json<serde_json::Value>>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "retention_policies")
+        .increment(1);
+
+    if method == axum::http::Method::GET {
+        match engine.retention_policies().await {
+            Ok(policies) => {
+                let items: Vec<serde_json::Value> = policies
+                    .iter()
+                    .map(|(source, days)| {
+                        serde_json::json!({"source": source, "retention_days": days})
+                    })
+                    .collect();
+                api_ok(serde_json::json!({
+                    "policies": items,
+                    "default_retention_days": engine.config().memory.episodic.default_retention_days,
+                }))
+            }
+            Err(e) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RETENTION_ERROR",
+                e.to_string(),
+            ),
+        }
+    } else if let Some(Json(body)) = body {
+        let source = body
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let days = body
+            .get("retention_days")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        if source.is_empty() {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "MISSING_FIELD",
+                "source is required".into(),
+            );
+        }
+
+        match engine.set_retention_policy(source, days).await {
+            Ok(()) => api_ok(serde_json::json!({
+                "source": source,
+                "retention_days": days,
+                "status": "set"
+            })),
+            Err(e) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RETENTION_ERROR",
+                e.to_string(),
+            ),
+        }
+    } else {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "MISSING_BODY",
+            "request body required for PUT".into(),
+        )
+    }
+}
+
 /// Enforce data retention policy — delete events older than configured retention period.
 pub async fn enforce_retention(State(engine): State<Arc<StrataEngine>>) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "retention").increment(1);

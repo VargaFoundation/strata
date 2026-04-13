@@ -125,6 +125,43 @@ impl StrataEngine {
         self.ingest.ingest(events).await
     }
 
+    /// Ingest events scoped to a specific tenant.
+    ///
+    /// Sets the tenant_id on all events before ingestion so that
+    /// tenant-scoped queries only see their own data.
+    pub async fn ingest_for_tenant(
+        &self,
+        mut events: Vec<Event>,
+        tenant: &crate::config::TenantContext,
+    ) -> Result<u64> {
+        // Tag each event's payload with the tenant_id
+        for event in &mut events {
+            if let serde_json::Value::Object(ref mut map) = event.payload {
+                map.insert(
+                    "_tenant_id".to_string(),
+                    serde_json::Value::String(tenant.tenant_id.clone()),
+                );
+            }
+        }
+        // After ingest, update the tenant_id column
+        let count = self.ingest.ingest(events).await?;
+
+        // Batch update tenant_id for events that don't have one
+        let tenant_id = tenant.tenant_id.clone();
+        let episodic = self.episodic.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = episodic.write_conn();
+            let _ = db.execute(
+                "UPDATE episodic SET tenant_id = ? WHERE tenant_id = 'default' OR tenant_id IS NULL",
+                duckdb::params![tenant_id],
+            );
+        })
+        .await
+        .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))?;
+
+        Ok(count)
+    }
+
     /// Query events by source.
     pub async fn query_by_source(&self, source: &str, limit: usize) -> Result<Vec<Event>> {
         self.episodic.query_by_source(source, limit).await
@@ -382,28 +419,130 @@ impl StrataEngine {
 
     /// Delete events older than the configured retention period.
     ///
+    /// Checks per-source retention policies first (stored in state),
+    /// then falls back to the default retention period.
     /// Returns the number of events deleted.
     pub async fn enforce_retention(&self) -> Result<u64> {
-        let retention_days = self.config.memory.episodic.default_retention_days;
-        if retention_days == 0 {
-            return Ok(0);
-        }
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
-        let cutoff_str = cutoff.to_rfc3339();
+        let default_days = self.config.memory.episodic.default_retention_days;
+
+        // Load per-source retention policies from state store
+        let policies = self.retention_policies().await?;
 
         let episodic = self.episodic.clone();
         tokio::task::spawn_blocking(move || {
             let db = episodic.write_conn();
-            let deleted = db
-                .execute(
-                    "DELETE FROM episodic WHERE ts < ?::TIMESTAMPTZ",
-                    duckdb::params![cutoff_str],
-                )
-                .map_err(|e| crate::Error::Storage(format!("retention delete: {e}")))?;
-            Ok(deleted as u64)
+            let mut total_deleted = 0u64;
+
+            // Apply per-source policies first
+            for (source, days) in &policies {
+                if *days == 0 {
+                    continue;
+                }
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(*days as i64);
+                let cutoff_str = cutoff.to_rfc3339();
+                let deleted = db
+                    .execute(
+                        "DELETE FROM episodic WHERE source = ? AND ts < ?::TIMESTAMPTZ",
+                        duckdb::params![source, cutoff_str],
+                    )
+                    .map_err(|e| crate::Error::Storage(format!("retention delete: {e}")))?;
+                total_deleted += deleted as u64;
+            }
+
+            // Apply default retention to sources without a specific policy
+            if default_days > 0 {
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(default_days as i64);
+                let cutoff_str = cutoff.to_rfc3339();
+
+                if policies.is_empty() {
+                    // No per-source policies — apply globally
+                    let deleted = db
+                        .execute(
+                            "DELETE FROM episodic WHERE ts < ?::TIMESTAMPTZ",
+                            duckdb::params![cutoff_str],
+                        )
+                        .map_err(|e| crate::Error::Storage(format!("retention delete: {e}")))?;
+                    total_deleted += deleted as u64;
+                } else {
+                    // Apply default only to sources without a specific policy
+                    let policy_sources: Vec<&str> =
+                        policies.iter().map(|(s, _)| s.as_str()).collect();
+                    let placeholders: Vec<String> =
+                        policy_sources.iter().map(|_| "?".to_string()).collect();
+                    if !placeholders.is_empty() {
+                        let sql = format!(
+                            "DELETE FROM episodic WHERE ts < ?::TIMESTAMPTZ AND source NOT IN ({})",
+                            placeholders.join(", ")
+                        );
+                        let mut stmt = db
+                            .prepare(&sql)
+                            .map_err(|e| crate::Error::Storage(format!("prepare: {e}")))?;
+
+                        // Build params: cutoff + source names
+                        let mut params: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+                        params.push(Box::new(cutoff_str));
+                        for s in &policy_sources {
+                            params.push(Box::new(s.to_string()));
+                        }
+                        let param_refs: Vec<&dyn duckdb::ToSql> =
+                            params.iter().map(|p| p.as_ref()).collect();
+                        let deleted = stmt
+                            .execute(param_refs.as_slice())
+                            .map_err(|e| crate::Error::Storage(format!("retention delete: {e}")))?;
+                        total_deleted += deleted as u64;
+                    }
+                }
+            }
+
+            Ok(total_deleted)
         })
         .await
         .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))?
+    }
+
+    /// Get all per-source retention policies.
+    pub async fn retention_policies(&self) -> Result<Vec<(String, u32)>> {
+        match self.state.get("_system", "retention_policies").await? {
+            Some(entry) => {
+                let policies: Vec<(String, u32)> =
+                    serde_json::from_value(entry.value).unwrap_or_default();
+                Ok(policies)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Set a retention policy for a specific source.
+    pub async fn set_retention_policy(&self, source: &str, retention_days: u32) -> Result<()> {
+        let mut policies = self.retention_policies().await?;
+        // Update or insert
+        if let Some(existing) = policies.iter_mut().find(|(s, _)| s == source) {
+            existing.1 = retention_days;
+        } else {
+            policies.push((source.to_string(), retention_days));
+        }
+        self.state
+            .set(
+                "_system",
+                "retention_policies",
+                serde_json::to_value(&policies).map_err(|e| crate::Error::State(e.to_string()))?,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Remove a retention policy for a source (falls back to default).
+    pub async fn remove_retention_policy(&self, source: &str) -> Result<()> {
+        let mut policies = self.retention_policies().await?;
+        policies.retain(|(s, _)| s != source);
+        self.state
+            .set(
+                "_system",
+                "retention_policies",
+                serde_json::to_value(&policies).map_err(|e| crate::Error::State(e.to_string()))?,
+            )
+            .await?;
+        Ok(())
     }
 
     // ── Backup / Restore ─────────────────────────────────────────────

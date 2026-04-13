@@ -99,6 +99,10 @@ pub fn router_with_engine_and_auth(
             "/admin/retention",
             axum::routing::post(handlers::enforce_retention),
         )
+        .route(
+            "/admin/retention/policies",
+            axum::routing::get(handlers::retention_policies).put(handlers::retention_policies),
+        )
         .route("/admin/backup", axum::routing::post(handlers::backup))
         .route("/admin/audit", axum::routing::get(handlers::audit_query))
         .route(

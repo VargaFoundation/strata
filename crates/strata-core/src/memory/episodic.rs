@@ -166,6 +166,12 @@ impl EpisodicStore {
              CREATE INDEX IF NOT EXISTS idx_episodic_trace ON episodic(trace_id);",
         );
 
+        // Multi-tenancy: tenant_id column for row-level security
+        let _ = conn.execute_batch(
+            "ALTER TABLE episodic ADD COLUMN IF NOT EXISTS tenant_id VARCHAR DEFAULT 'default';
+             CREATE INDEX IF NOT EXISTS idx_episodic_tenant ON episodic(tenant_id);",
+        );
+
         // Sessions table for conversation threading
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (

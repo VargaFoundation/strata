@@ -221,6 +221,30 @@ impl Default for BackupConfig {
     }
 }
 
+/// Tenant context for multi-tenancy row-level security.
+///
+/// When set, all engine operations are automatically scoped to the given tenant.
+/// Extracted from JWT claims (`tenant_id` field) by the gateway auth middleware.
+#[derive(Debug, Clone)]
+pub struct TenantContext {
+    pub tenant_id: String,
+}
+
+impl TenantContext {
+    pub fn new(tenant_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+        }
+    }
+
+    /// The default tenant for backwards compatibility.
+    pub fn default_tenant() -> Self {
+        Self {
+            tenant_id: "default".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

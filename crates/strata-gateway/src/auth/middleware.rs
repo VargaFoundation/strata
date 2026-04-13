@@ -19,6 +19,8 @@ pub struct AuthContext {
     pub role: Role,
     /// For Agent role: the specific agent_id this identity is scoped to.
     pub agent_id: Option<String>,
+    /// Tenant ID for multi-tenancy row-level security.
+    pub tenant_id: Option<String>,
 }
 
 /// User roles for RBAC.
@@ -71,6 +73,7 @@ impl Role {
 pub struct AuthState {
     keys: Arc<HashSet<String>>,
     jwt_secret: Option<Arc<String>>,
+    oidc: Option<Arc<super::oidc::OidcValidator>>,
     rate_limiter: Option<Arc<RateLimiter>>,
     audit_log: Option<AuditLog>,
 }
@@ -87,6 +90,21 @@ impl std::fmt::Debug for AuthState {
 }
 
 impl AuthState {
+    /// Create with OIDC support.
+    pub fn with_oidc(
+        api_keys: Vec<String>,
+        jwt_secret: Option<String>,
+        oidc_config: super::oidc::OidcConfig,
+        rate_limit_per_key: u32,
+    ) -> Self {
+        let mut state = Self::new(api_keys, jwt_secret, rate_limit_per_key);
+        if oidc_config.enabled && !oidc_config.issuer_url.is_empty() {
+            state.oidc = Some(Arc::new(super::oidc::OidcValidator::new(oidc_config)));
+            tracing::info!("OIDC authentication enabled");
+        }
+        state
+    }
+
     pub fn new(api_keys: Vec<String>, jwt_secret: Option<String>, rate_limit_per_key: u32) -> Self {
         let rate_limiter = if rate_limit_per_key > 0 {
             Some(Arc::new(RateLimiter::new(rate_limit_per_key)))
@@ -103,6 +121,7 @@ impl AuthState {
         Self {
             keys: Arc::new(api_keys.into_iter().collect()),
             jwt_secret: jwt_secret.map(Arc::new),
+            oidc: None,
             rate_limiter,
             audit_log,
         }
@@ -222,45 +241,53 @@ pub async fn require_auth(
         _ => return Err(StatusCode::UNAUTHORIZED.into_response()),
     };
 
-    // Try JWT first, then API key
-    let auth_ctx = if let Some(ref secret) = state.jwt_secret {
-        match jwt::validate_token(token, secret) {
-            Ok(claims) => {
+    // Auth chain: try OIDC (RS256) → JWT (HS256) → API key
+    let auth_ctx = 'auth: {
+        // 1. Try OIDC (RS256 with JWKS)
+        if let Some(ref oidc) = state.oidc {
+            if let Ok(claims) = oidc.validate_token(token).await {
                 let role = Role::from_str_loose(&claims.role).unwrap_or(Role::Reader);
-                AuthContext {
+                break 'auth AuthContext {
                     identity: claims.sub.clone(),
                     role,
                     agent_id: claims.agent_id.or(if claims.role == "agent" {
-                        Some(claims.sub)
+                        Some(claims.sub.clone())
                     } else {
                         None
                     }),
-                }
-            }
-            Err(_jwt_err) => {
-                // JWT failed — fall back to API key
-                if state.validate_api_key(token) {
-                    AuthContext {
-                        identity: "api-key-user".into(),
-                        role: Role::Writer,
-                        agent_id: None,
-                    }
-                } else {
-                    return Err(StatusCode::UNAUTHORIZED.into_response());
-                }
+                    tenant_id: claims.tenant_id,
+                };
             }
         }
-    } else {
-        // No JWT secret configured — API key only
+
+        // 2. Try JWT (HS256 with shared secret)
+        if let Some(ref secret) = state.jwt_secret {
+            if let Ok(claims) = jwt::validate_token(token, secret) {
+                let role = Role::from_str_loose(&claims.role).unwrap_or(Role::Reader);
+                break 'auth AuthContext {
+                    identity: claims.sub.clone(),
+                    role,
+                    agent_id: claims.agent_id.or(if claims.role == "agent" {
+                        Some(claims.sub.clone())
+                    } else {
+                        None
+                    }),
+                    tenant_id: claims.tenant_id,
+                };
+            }
+        }
+
+        // 3. Try API key (no tenant scoping)
         if state.validate_api_key(token) {
-            AuthContext {
+            break 'auth AuthContext {
                 identity: "api-key-user".into(),
                 role: Role::Writer,
                 agent_id: None,
-            }
-        } else {
-            return Err(StatusCode::UNAUTHORIZED.into_response());
+                tenant_id: None,
+            };
         }
+
+        return Err(StatusCode::UNAUTHORIZED.into_response());
     };
 
     // ── RBAC: check method permission ────────────────────────────
@@ -370,6 +397,7 @@ mod tests {
             identity: "user-1".into(),
             role: Role::Admin,
             agent_id: None,
+            tenant_id: None,
         };
         let cloned = ctx.clone();
         assert_eq!(cloned.identity, "user-1");
@@ -382,6 +410,7 @@ mod tests {
             identity: "agent-bot".into(),
             role: Role::Agent,
             agent_id: Some("agent-bot".into()),
+            tenant_id: Some("tenant-1".into()),
         };
         let debug = format!("{:?}", ctx);
         assert!(debug.contains("agent-bot"));

@@ -14,6 +14,9 @@ pub struct Claims {
     /// Optional: the specific agent_id this token is scoped to (for Agent role).
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Optional: tenant ID for multi-tenancy row-level security.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
 }
 
 /// Validate a JWT token and extract claims.
@@ -49,6 +52,7 @@ mod tests {
             role: "writer".into(),
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as u64,
             agent_id: None,
+            tenant_id: None,
         };
         let token = make_token(&claims, secret);
         let result = validate_token(&token, secret).unwrap();
@@ -64,6 +68,7 @@ mod tests {
             role: "admin".into(),
             exp: 1000, // long expired
             agent_id: None,
+            tenant_id: None,
         };
         let token = make_token(&claims, secret);
         let err = validate_token(&token, secret).unwrap_err();
@@ -77,6 +82,7 @@ mod tests {
             role: "reader".into(),
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as u64,
             agent_id: None,
+            tenant_id: None,
         };
         let token = make_token(&claims, "correct-secret-key-very-long!!");
         let err = validate_token(&token, "wrong-secret-key-very-long!!!").unwrap_err();
@@ -90,6 +96,7 @@ mod tests {
             role: "admin".into(),
             exp: 1700000000,
             agent_id: Some("agent-x".into()),
+            tenant_id: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let deserialized: Claims = serde_json::from_str(&json).unwrap();
@@ -114,6 +121,7 @@ mod tests {
             role: "agent".into(),
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as u64,
             agent_id: Some("bot-7".into()),
+            tenant_id: None,
         };
         let token = make_token(&claims, secret);
         let result = validate_token(&token, secret).unwrap();

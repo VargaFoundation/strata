@@ -31,6 +31,9 @@ pub struct GatewayConfig {
     /// Maximum requests per second per API key (token bucket). 0 = unlimited.
     #[serde(default)]
     pub rate_limit_per_key: u32,
+    /// OIDC configuration for federated SSO authentication.
+    #[serde(default)]
+    pub oidc: crate::auth::oidc::OidcConfig,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -47,6 +50,7 @@ impl std::fmt::Debug for GatewayConfig {
             .field("jwt_secret", &self.jwt_secret.as_ref().map(|_| "***"))
             .field("cors_origins", &self.cors_origins)
             .field("rate_limit_per_key", &self.rate_limit_per_key)
+            .field("oidc_enabled", &self.oidc.enabled)
             .finish()
     }
 }
@@ -65,6 +69,7 @@ impl Default for GatewayConfig {
             jwt_secret: None,
             cors_origins: vec![],
             rate_limit_per_key: 0,
+            oidc: crate::auth::oidc::OidcConfig::default(),
         }
     }
 }
@@ -92,11 +97,20 @@ impl GatewayServer {
 
         // Build REST router with engine state and optional auth
         let auth_state = if config.auth_enabled {
-            let state = crate::auth::middleware::AuthState::new(
-                config.api_keys.clone(),
-                config.jwt_secret.clone(),
-                config.rate_limit_per_key,
-            );
+            let state = if config.oidc.enabled {
+                crate::auth::middleware::AuthState::with_oidc(
+                    config.api_keys.clone(),
+                    config.jwt_secret.clone(),
+                    config.oidc.clone(),
+                    config.rate_limit_per_key,
+                )
+            } else {
+                crate::auth::middleware::AuthState::new(
+                    config.api_keys.clone(),
+                    config.jwt_secret.clone(),
+                    config.rate_limit_per_key,
+                )
+            };
             if state.is_empty() {
                 tracing::warn!(
                     "auth_enabled=true but no api_keys or jwt_secret configured — auth disabled"
