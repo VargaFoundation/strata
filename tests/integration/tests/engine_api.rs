@@ -212,3 +212,237 @@ async fn webhook_github_push() {
     assert_eq!(json["source"], "github");
     assert_eq!(json["ingested"], 1);
 }
+
+// ── Session lifecycle ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn session_lifecycle() {
+    let app = engine_router().await;
+
+    // Start session
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/sessions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"session_id":"s1","agent_id":"bot-1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "started");
+
+    // End session
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/sessions/s1/end")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"summary":"test conversation"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Recall session
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sessions/s1/recall")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 0);
+}
+
+// ── Schema introspection ────────────────────────────────────────────
+
+#[tokio::test]
+async fn schema_sources_after_ingest() {
+    let app = engine_router().await;
+
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/ingest")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"source":"schema-test","events":[{"event_type":"ping"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/schema/sources")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let sources = json["sources"].as_array().unwrap();
+    assert!(sources.iter().any(|s| s.as_str() == Some("schema-test")));
+}
+
+// ── MCP tools ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mcp_tools_list_has_nine_tools() {
+    let app = engine_router().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let tools = json["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 9, "expected 9 tools (6 core + 3 session)");
+
+    for tool in tools {
+        assert!(
+            tool["inputSchema"].is_object(),
+            "tool {} missing inputSchema",
+            tool["name"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn mcp_session_tool_dispatch() {
+    let app = engine_router().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"start_session","arguments":{"session_id":"mcp-s1","agent_id":"mcp-bot"}}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("started"), "expected 'started' in: {text}");
+}
+
+// ── Batch limit ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ingest_batch_limit_rejects_oversize() {
+    let app = engine_router().await;
+
+    let events: Vec<serde_json::Value> = (0..10_001)
+        .map(|i| serde_json::json!({"event_type": "test", "i": i}))
+        .collect();
+    let body_json = serde_json::json!({"source": "test", "events": events});
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/ingest")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&body_json).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "BATCH_TOO_LARGE");
+}
+
+// ── Retention policies ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn retention_policies_crud() {
+    let app = engine_router().await;
+
+    // Set a policy
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/admin/retention/policies")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"source":"logs","retention_days":30}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Read policies
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/retention/policies")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let policies = json["policies"].as_array().unwrap();
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0]["source"], "logs");
+    assert_eq!(policies[0]["retention_days"], 30);
+}

@@ -301,9 +301,91 @@ async fn call_tool(
                 .map_err(|e| e.to_string())
         }
 
-        "search" | "embed" => Ok(serde_json::json!({
-            "message": "not yet implemented — requires embedding provider"
-        })),
+        "search" => {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'text' parameter")?;
+            let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            engine
+                .embed_and_search(text, k, None, None)
+                .await
+                .map(|results| {
+                    let items: Vec<serde_json::Value> = results
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "id": r.entry.id.to_string(),
+                                "content": r.entry.content,
+                                "metadata": r.entry.metadata,
+                                "score": r.score,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({"results": items, "count": items.len()})
+                })
+                .map_err(|e| e.to_string())
+        }
+
+        "embed" => {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'text' parameter")?;
+            engine
+                .embed_text(text)
+                .await
+                .map(|vector| serde_json::json!({"embedding": vector, "dimension": vector.len()}))
+                .map_err(|e| e.to_string())
+        }
+
+        "start_session" => {
+            let session_id = args
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'session_id'")?;
+            let agent_id = args
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'agent_id'")?;
+            let parent = args.get("parent_session_id").and_then(|v| v.as_str());
+            engine
+                .session_start(session_id, agent_id, parent, None)
+                .await
+                .map(|()| serde_json::json!({"session_id": session_id, "status": "started"}))
+                .map_err(|e| e.to_string())
+        }
+
+        "end_session" => {
+            let session_id = args
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'session_id'")?;
+            let summary = args.get("summary").and_then(|v| v.as_str());
+            engine
+                .session_end(session_id, summary)
+                .await
+                .map(|()| serde_json::json!({"session_id": session_id, "status": "ended"}))
+                .map_err(|e| e.to_string())
+        }
+
+        "recall_session" => {
+            let session_id = args
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'session_id'")?;
+            engine
+                .session_recall(session_id)
+                .await
+                .map(|events| {
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "events": events,
+                        "count": events.len(),
+                    })
+                })
+                .map_err(|e| e.to_string())
+        }
 
         _ => Err(format!("unknown tool: {name}")),
     }

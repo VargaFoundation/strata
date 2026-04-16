@@ -152,20 +152,67 @@ pub async fn chat_completions(
         }
     }
 
+    // 3. Check semantic cache — skip LLM call if we have a cached response
+    static CACHE: std::sync::OnceLock<super::cache::SemanticCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(super::cache::SemanticCache::new);
+
+    // Try to get a cached response by embedding the user query
+    let query_embedding = if !user_query.is_empty() {
+        engine.embed_text(&user_query).await.ok()
+    } else {
+        None
+    };
+
+    if let Some(ref emb) = query_embedding {
+        if let Some(cached) = cache.get_by_vector(emb).await {
+            metrics::counter!("strata_llm_cache_hits_total").increment(1);
+            // Return cached response in OpenAI format
+            return Json(serde_json::json!({
+                "id": format!("cache-{}", uuid::Uuid::new_v4()),
+                "object": "chat.completion",
+                "created": chrono::Utc::now().timestamp(),
+                "model": req.model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": cached},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "_cached": true,
+            }));
+        }
+    }
+    metrics::counter!("strata_llm_cache_misses_total").increment(1);
+
     // 4. Determine provider and forward (shared client for connection reuse)
     let config = engine.config();
     let provider = determine_provider(&req.model);
-    // Use a thread-local shared client to avoid per-request allocation
     static HTTP_CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
     let http = HTTP_CLIENT.get_or_init(Client::new);
 
-    match provider {
+    let response = match provider {
         LlmProvider::OpenAi => {
             forward_to_openai(http, &config.embedding.openai_api_key, &req).await
         }
         LlmProvider::Ollama => forward_to_ollama(http, &config.embedding.ollama_url, &req).await,
         LlmProvider::Anthropic => forward_to_anthropic(http, &req).await,
+    };
+
+    // 5. Cache the response for future similar queries
+    if let Some(ref emb) = query_embedding {
+        if let Some(content) = response
+            .0
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+        {
+            cache.put_with_vector(&user_query, content, Some(emb)).await;
+        }
     }
+
+    response
 }
 
 fn determine_provider(model: &str) -> LlmProvider {

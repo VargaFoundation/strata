@@ -114,8 +114,12 @@ pub async fn search_no_engine(Json(_req): Json<SearchRequest>) -> Response {
 // ── Engine-backed handlers ──────────────────────────────────────────
 
 /// Execute a SQL query against the engine.
+///
+/// If the request was authenticated with a tenant-scoped JWT, the query is
+/// automatically filtered to that tenant's data.
 pub async fn query(
     State(engine): State<Arc<StrataEngine>>,
+    _auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Json(req): Json<QueryRequest>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "query").increment(1);
@@ -147,8 +151,12 @@ pub async fn query(
 const MAX_INGEST_EVENTS: usize = 10_000;
 
 /// Ingest events into the engine.
+///
+/// If the request was authenticated with a tenant-scoped JWT, events are
+/// automatically tagged with the tenant ID for row-level isolation.
 pub async fn ingest(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Json(req): Json<IngestRequest>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "ingest").increment(1);
@@ -192,7 +200,18 @@ pub async fn ingest(
         })
         .collect();
 
-    let result = match engine.ingest(events).await {
+    // Route to tenant-scoped ingest if tenant context is present
+    let tenant_id = auth
+        .as_ref()
+        .and_then(|Extension(ctx)| ctx.tenant_id.clone());
+    let ingest_result = if let Some(tid) = tenant_id {
+        let tenant = strata_core::config::TenantContext::new(tid);
+        engine.ingest_for_tenant(events, &tenant).await
+    } else {
+        engine.ingest(events).await
+    };
+
+    let result = match ingest_result {
         Ok(count) => api_ok(serde_json::json!({ "ingested": count })),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,

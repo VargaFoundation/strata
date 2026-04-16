@@ -17,8 +17,9 @@ upon commit.
 | `NetworkFactory` | **Working** | Creates `NetworkClient` per target node with shared reqwest::Client |
 | `ClusterCoordinator` | **Working** | Owns the `openraft::Raft` instance, `client_write()`, `is_leader()`, `leader_id()`, single-node init, graceful shutdown |
 | `ClusterConfig` | **Working** | TOML deserialization, node_id, listen, peers |
-| `LogShipper` | Stub | WAL segment shipping between peers |
-| `SnapshotManager` | Stub | Snapshot creation and transfer |
+| `ClusterCoordinator` (metrics) | **Working** | Background task publishing Raft metrics to Prometheus (term, is_leader, replication_lag, leader_changes) |
+| `LogShipper` | Stub | WAL segment shipping between peers (not needed for basic Raft, uses AppendEntries) |
+| `SnapshotManager` | **Working** | Binary pack/unpack of all 3 stores (DuckDB export + USearch index + metadata), build/install wired into RaftSnapshotBuilder |
 
 ## Internal Architecture
 
@@ -34,7 +35,7 @@ src/
     store.rs       MemStore: RaftStorage + RaftLogReader + RaftSnapshotBuilder
   replication/
     log_shipper.rs WAL segment shipping (stub)
-    snapshot.rs    Snapshot transfer (stub)
+    snapshot.rs    SnapshotManager: build/restore with binary pack/unpack format
 ```
 
 ## AppRequest Variants
@@ -51,7 +52,7 @@ All mutating operations are serialized as `AppRequest` through Raft:
 
 ## Testing
 
-- `cargo test -p strata-cluster` (15 tests)
+- `cargo test -p strata-cluster` (18 tests)
 - Config deserialization tests (TOML, defaults, clone)
 - MemStore tests (create, save/read vote, log state)
 - AppRequest/AppResponse serialization roundtrip (MessagePack + JSON)
