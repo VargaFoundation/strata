@@ -551,8 +551,7 @@ pub async fn embed_and_search(
                 api_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "NO_EMBEDDING_PROVIDER",
-                    "No embedding provider configured. Set STRATA_EMBEDDING__PROVIDER=ollama"
-                        .into(),
+                    "No embedding provider configured. To enable semantic search, set STRATA_EMBEDDING__PROVIDER=ollama (local, requires Ollama) or STRATA_EMBEDDING__PROVIDER=openai (cloud, requires OPENAI_API_KEY)".into(),
                 )
             } else {
                 api_error(StatusCode::INTERNAL_SERVER_ERROR, "SEARCH_ERROR", msg)

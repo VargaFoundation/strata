@@ -108,7 +108,7 @@ pub struct EpisodicConfig {
 impl Default for EpisodicConfig {
     fn default() -> Self {
         Self {
-            db_path: ":memory:".into(),
+            db_path: "./data/episodic.duckdb".into(),
             wal_dir: "./data/wal".into(),
             default_retention_days: 365,
         }
@@ -174,7 +174,7 @@ impl std::fmt::Debug for EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            provider: "ollama".into(),
+            provider: "none".into(),
             model: "nomic-embed-text".into(),
             dimension: 768,
             batch_size: 64,
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(config.storage.data_dir, "./data");
         assert_eq!(config.storage.engine, "local");
         assert_eq!(config.embedding.dimension, 768);
-        assert_eq!(config.embedding.provider, "ollama");
+        assert_eq!(config.embedding.provider, "none");
         assert_eq!(config.embedding.model, "nomic-embed-text");
         assert_eq!(config.embedding.batch_size, 64);
         assert_eq!(config.query.max_rows, 10_000);
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(config.storage.data_dir, "/my/data");
         // Other fields should be defaults
         assert_eq!(config.storage.engine, "local");
-        assert_eq!(config.embedding.provider, "ollama");
+        assert_eq!(config.embedding.provider, "none");
         assert_eq!(config.embedding.dimension, 768);
     }
 
@@ -331,7 +331,7 @@ mod tests {
     fn deserialize_empty_toml_uses_all_defaults() {
         let config: CoreConfig = toml::from_str("").unwrap();
         assert_eq!(config.storage.data_dir, "./data");
-        assert_eq!(config.embedding.provider, "ollama");
+        assert_eq!(config.embedding.provider, "none");
     }
 
     #[test]

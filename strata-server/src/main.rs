@@ -49,11 +49,13 @@ async fn main() -> anyhow::Result<()> {
 
     let gateway = strata_gateway::GatewayServer::start(
         engine.clone(),
-        server_config.gateway,
+        server_config.gateway.clone(),
         Some(prometheus_handle),
         cluster_handle,
     )
     .await?;
+
+    banner::print_ready(&server_config.gateway, engine.config());
 
     signals::wait_for_shutdown().await;
 

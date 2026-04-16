@@ -80,11 +80,17 @@ impl StrataEngine {
                     config.embedding.dimension,
                 )))
             }
+            "none" | "" => {
+                tracing::info!("embedding provider: none (semantic search disabled)");
+                tracing::info!("  → to enable: set STRATA_EMBEDDING__PROVIDER=ollama or openai");
+                None
+            }
             other => {
                 tracing::warn!(
                     provider = %other,
-                    "unknown or unconfigured embedding provider, auto-embedding disabled"
+                    "unknown embedding provider, auto-embedding disabled"
                 );
+                tracing::info!("  → supported providers: ollama, openai, none");
                 None
             }
         };
