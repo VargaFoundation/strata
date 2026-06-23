@@ -880,6 +880,18 @@ impl StrataEngine {
         self.memory_store.count().await
     }
 
+    /// Apply a set of fully-materialized memory rows (Raft apply / replication).
+    ///
+    /// The leader runs the non-deterministic cognition (dedup / contradiction / LLM) and
+    /// proposes the resulting rows; every node replays them identically here. Returns the count.
+    pub async fn memory_apply_upsert(&self, memories: Vec<Memory>) -> Result<u64> {
+        let n = memories.len() as u64;
+        for mem in &memories {
+            self.memory_store.upsert_raw(mem, None).await?;
+        }
+        Ok(n)
+    }
+
     /// Forget low-value memories via time-decay of importance (configurable half-life /
     /// threshold). Forgotten memories are expired (kept for history) and dropped from the
     /// vector index. Returns the number forgotten.

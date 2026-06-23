@@ -562,6 +562,62 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Insert or **replace** a fully-materialized memory row by id (deterministic).
+    ///
+    /// Used by Raft apply to replicate the result of cognition that the leader already computed
+    /// (so followers don't re-run non-deterministic dedup/contradiction/LLM logic).
+    pub async fn upsert_raw(
+        &self,
+        memory: &Memory,
+        embedding: Option<&[f32]>,
+    ) -> crate::Result<()> {
+        let db = self.write_db.lock();
+        let source_ids = if memory.source_event_ids.is_empty() {
+            None
+        } else {
+            Some(
+                memory
+                    .source_event_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+        };
+        let embedding_json = embedding.map(|e| serde_json::to_string(e).unwrap_or_default());
+        let metadata_str = serde_json::to_string(&memory.metadata).unwrap_or_else(|_| "{}".into());
+        db.execute(
+            "INSERT OR REPLACE INTO memories
+             (id, tenant_id, user_id, agent_id, session_id, subject, content, importance,
+              valid_from, valid_to, state, supersedes, source_event_ids, version,
+              created_at, updated_at, metadata, embedding)
+             VALUES (?,?,?,?,?,?,?,?, ?::TIMESTAMPTZ,?::TIMESTAMPTZ,?,?,?,?, \
+                     ?::TIMESTAMPTZ,?::TIMESTAMPTZ,?::JSON,?::JSON)",
+            duckdb::params![
+                memory.id.to_string(),
+                memory.scope.tenant_id,
+                memory.scope.user_id,
+                memory.scope.agent_id,
+                memory.scope.session_id,
+                memory.subject,
+                memory.content,
+                memory.importance as f64,
+                memory.valid_from.to_rfc3339(),
+                memory.valid_to.map(|t| t.to_rfc3339()),
+                memory.state.as_str(),
+                memory.supersedes.map(|s| s.to_string()),
+                source_ids,
+                memory.version as i64,
+                memory.created_at.to_rfc3339(),
+                memory.updated_at.to_rfc3339(),
+                metadata_str,
+                embedding_json,
+            ],
+        )
+        .map_err(|e| crate::Error::Ingest(format!("upsert memory: {e}")))?;
+        Ok(())
+    }
+
     /// Get a memory by id.
     pub async fn get(&self, id: Uuid) -> crate::Result<Option<Memory>> {
         let sql = format!("SELECT {} FROM memories WHERE id = ?", Self::SELECT_COLS);

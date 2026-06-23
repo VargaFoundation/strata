@@ -3,20 +3,22 @@
 use std::io::Cursor;
 
 use serde::{Deserialize, Serialize};
+use strata_core::memory::episodic::Event;
 
 /// Node identifier in the Raft cluster.
 pub type NodeId = u64;
 
-/// Application-level request data sent through Raft consensus.
+/// Application-level request data sent through Raft consensus (MessagePack on the wire).
 ///
-/// Serialized as MessagePack for compact over-the-wire representation.
+/// IMPORTANT — apply MUST be deterministic: applying the same committed entry on every node
+/// must produce identical state. So requests carry **fully materialized** values (ids,
+/// timestamps, and any non-deterministic results computed once on the leader at propose time),
+/// never "commands" that would re-run non-deterministic logic (uuid/now/LLM) at apply time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AppRequest {
-    /// Ingest events into episodic memory.
-    Ingest {
-        source: String,
-        events: Vec<serde_json::Value>,
-    },
+    /// Ingest fully-formed events (ids + timestamps assigned on the leader), so every node
+    /// applies an identical, deterministic result.
+    Ingest { events: Vec<Event> },
     /// Set agent state.
     StateSet {
         agent_id: String,
@@ -34,19 +36,13 @@ pub enum AppRequest {
     },
     /// Delete a semantic entry.
     SemanticDelete { id: uuid::Uuid },
-    /// Add a memory through the cognition pipeline (dedup / contradiction / importance).
-    MemoryAdd {
-        scope: strata_core::memory::cognition::MemoryScope,
-        subject: Option<String>,
-        content: String,
-        importance: Option<f32>,
+    /// Replace materialized memory rows (the leader runs the non-deterministic cognition —
+    /// dedup / contradiction / LLM extraction — and proposes the resulting rows so every node
+    /// applies an identical result). Supersession is captured as upserts of the affected rows.
+    MemoryUpsert {
+        memories: Vec<strata_core::memory::cognition::Memory>,
     },
-    /// Remember free-form text (LLM extraction when enabled, else stored as one memory).
-    MemoryRemember {
-        scope: strata_core::memory::cognition::MemoryScope,
-        text: String,
-    },
-    /// Delete a memory by id.
+    /// Delete a memory by id (deterministic).
     MemoryDelete { id: uuid::Uuid },
 }
 
@@ -108,15 +104,18 @@ mod tests {
     #[test]
     fn app_request_roundtrip() {
         let req = AppRequest::Ingest {
-            source: "test".into(),
-            events: vec![serde_json::json!({"key": "val"})],
+            events: vec![Event::new(
+                "test",
+                "click",
+                serde_json::json!({"key": "val"}),
+            )],
         };
         let bytes = rmp_serde::to_vec(&req).unwrap();
         let decoded: AppRequest = rmp_serde::from_slice(&bytes).unwrap();
         match decoded {
-            AppRequest::Ingest { source, events } => {
-                assert_eq!(source, "test");
+            AppRequest::Ingest { events } => {
                 assert_eq!(events.len(), 1);
+                assert_eq!(events[0].source, "test");
             }
             _ => panic!("wrong variant"),
         }
@@ -124,16 +123,19 @@ mod tests {
 
     #[test]
     fn memory_request_roundtrip() {
-        let req = AppRequest::MemoryRemember {
-            scope: strata_core::memory::cognition::MemoryScope::user("alice"),
-            text: "likes tea".into(),
+        let mem = strata_core::memory::cognition::Memory::new(
+            strata_core::memory::cognition::MemoryScope::user("alice"),
+            "likes tea",
+        );
+        let req = AppRequest::MemoryUpsert {
+            memories: vec![mem],
         };
         let bytes = rmp_serde::to_vec(&req).unwrap();
         let decoded: AppRequest = rmp_serde::from_slice(&bytes).unwrap();
         match decoded {
-            AppRequest::MemoryRemember { scope, text } => {
-                assert_eq!(scope.user_id.as_deref(), Some("alice"));
-                assert_eq!(text, "likes tea");
+            AppRequest::MemoryUpsert { memories } => {
+                assert_eq!(memories.len(), 1);
+                assert_eq!(memories[0].content, "likes tea");
             }
             _ => panic!("wrong variant"),
         }
