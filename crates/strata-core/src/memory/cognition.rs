@@ -781,6 +781,43 @@ impl MemoryStore {
         Ok(ids)
     }
 
+    /// Export the `memories` table to a DuckDB `EXPORT DATABASE` directory (backup/snapshot).
+    pub fn export_to(&self, dir: &Path) -> crate::Result<()> {
+        let db = self.write_db.lock();
+        db.execute_batch(&format!("EXPORT DATABASE '{}'", dir.to_string_lossy()))
+            .map_err(|e| crate::Error::Storage(format!("memory export: {e}")))?;
+        Ok(())
+    }
+
+    /// Atomically restore the `memories` table from an `EXPORT DATABASE` directory (stage then
+    /// swap inside a transaction, so a corrupt snapshot never destroys existing memories).
+    pub fn restore_from_export(&self, export_dir: &Path, staging_path: &Path) -> crate::Result<()> {
+        let export_str = export_dir.to_string_lossy();
+        let staging_str = staging_path.to_string_lossy();
+        {
+            let staging = Connection::open(staging_path)
+                .map_err(|e| crate::Error::Storage(format!("open staging db: {e}")))?;
+            staging
+                .execute_batch(&format!("IMPORT DATABASE '{export_str}'"))
+                .map_err(|e| crate::Error::Storage(format!("import memories snapshot: {e}")))?;
+        }
+        let db = self.write_db.lock();
+        let swap = format!(
+            "ATTACH '{staging_str}' AS snap (READ_ONLY);
+             BEGIN TRANSACTION;
+             DELETE FROM memories;
+             INSERT INTO memories SELECT * FROM snap.memories;
+             COMMIT;"
+        );
+        if let Err(e) = db.execute_batch(&swap) {
+            let _ = db.execute_batch("ROLLBACK");
+            let _ = db.execute_batch("DETACH snap");
+            return Err(crate::Error::Storage(format!("memory restore swap: {e}")));
+        }
+        let _ = db.execute_batch("DETACH snap");
+        Ok(())
+    }
+
     /// Load all active memories together with their persisted embeddings, so the in-memory
     /// vector index can be rebuilt on startup without re-calling the embedding provider.
     pub async fn load_active_with_embeddings(&self) -> crate::Result<Vec<(Memory, Vec<f32>)>> {

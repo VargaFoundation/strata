@@ -1194,7 +1194,76 @@ impl StrataEngine {
         let vectors_dir = dir.join("vectors");
         self.semantic.save(&vectors_dir)?;
 
+        // Backup the memories store (DuckDB EXPORT)
+        let mem_export = dir.join("memories_export");
+        let memory_store = self.memory_store.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&mem_export)
+                .map_err(|e| crate::Error::Storage(format!("mkdir: {e}")))?;
+            memory_store.export_to(&mem_export)
+        })
+        .await
+        .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))??;
+
+        // Backup the state store (SQLite VACUUM INTO)
+        let state_path = dir.join("state.db");
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || state.backup_to(&state_path))
+            .await
+            .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))??;
+
         tracing::info!(path = %dir.display(), "backup complete");
+        Ok(())
+    }
+
+    /// Restore all stores from a backup directory produced by [`Self::backup`].
+    ///
+    /// Used by the Raft snapshot-install path and for disaster recovery. Episodic and memories
+    /// are restored atomically (stage-then-swap); the memory vector index is rebuilt afterward.
+    pub async fn restore_from_backup(&self, dir: &std::path::Path) -> Result<()> {
+        let ep_export = dir.join("episodic_export");
+        if ep_export.exists() {
+            let episodic = self.episodic.clone();
+            let staging = dir.join("episodic_staging.duckdb");
+            tokio::task::spawn_blocking(move || episodic.restore_from_export(&ep_export, &staging))
+                .await
+                .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))??;
+        }
+
+        let mem_export = dir.join("memories_export");
+        if mem_export.exists() {
+            let memory_store = self.memory_store.clone();
+            let staging = dir.join("memories_staging.duckdb");
+            tokio::task::spawn_blocking(move || {
+                memory_store.restore_from_export(&mem_export, &staging)
+            })
+            .await
+            .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))??;
+        }
+
+        let state_path = dir.join("state.db");
+        if state_path.exists() {
+            let state = self.state.clone();
+            tokio::task::spawn_blocking(move || state.restore_from(&state_path))
+                .await
+                .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))??;
+        }
+
+        let vectors_dir = dir.join("vectors");
+        if vectors_dir.exists() {
+            self.semantic
+                .load_from(&vectors_dir)
+                .map_err(|e| crate::Error::Storage(format!("semantic restore: {e}")))?;
+        }
+
+        // Rebuild the memory vector index from the restored memories (no provider call).
+        if let Ok(rows) = self.memory_store.load_active_with_embeddings().await {
+            for (mem, emb) in rows {
+                let _ = self.memory_index.upsert(&mem.to_semantic_entry(emb)).await;
+            }
+        }
+
+        tracing::info!(path = %dir.display(), "restore complete");
         Ok(())
     }
 
@@ -1664,5 +1733,43 @@ mod tests {
             .unwrap();
         assert_eq!(alice.len(), 1);
         assert_eq!(alice[0].content, "secret A");
+    }
+
+    #[tokio::test]
+    async fn backup_and_restore_roundtrips_all_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = dir.path().join("backup");
+
+        // Source: an episodic event, a memory, and agent state.
+        let src = StrataEngine::new(inmem_config()).await.unwrap();
+        src.ingest(vec![Event::new("src", "e", serde_json::json!({"x": 1}))])
+            .await
+            .unwrap();
+        src.memory_add(MemoryInput::new(MemoryScope::user("alice"), "likes tea"))
+            .await
+            .unwrap();
+        src.state_set("bot", "mood", serde_json::json!("happy"))
+            .await
+            .unwrap();
+        src.backup(&backup_dir).await.unwrap();
+
+        // Fresh engine → restore → all three stores are present.
+        let dst = StrataEngine::new(inmem_config()).await.unwrap();
+        assert_eq!(dst.event_count().await.unwrap(), 0);
+        dst.restore_from_backup(&backup_dir).await.unwrap();
+
+        assert_eq!(dst.event_count().await.unwrap(), 1);
+        assert_eq!(dst.memory_count().await.unwrap(), 1);
+        assert_eq!(
+            dst.memory_all(&MemoryScope::user("alice"), 10)
+                .await
+                .unwrap()[0]
+                .content,
+            "likes tea"
+        );
+        assert_eq!(
+            dst.state_get("bot", "mood").await.unwrap().unwrap().value,
+            serde_json::json!("happy")
+        );
     }
 }
