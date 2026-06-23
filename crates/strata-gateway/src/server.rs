@@ -144,6 +144,9 @@ impl GatewayServer {
                     coordinator: coord.clone(),
                 });
 
+        // gRPC shares the same auth state (tenant scoping + token validation).
+        let grpc_auth = auth_state.clone();
+
         let mut app = crate::rest::router_with_engine_and_auth(
             engine.clone(),
             auth_state,
@@ -214,7 +217,13 @@ impl GatewayServer {
 
         // Start gRPC server
         let grpc_addr = config.grpc_listen.clone();
-        let grpc_handle = match crate::grpc::service::start_grpc(&grpc_addr, engine.clone()).await {
+        let grpc_handle = match crate::grpc::service::start_grpc(
+            &grpc_addr,
+            engine.clone(),
+            grpc_auth,
+        )
+        .await
+        {
             Ok(handle) => Some(handle),
             Err(e) => {
                 tracing::warn!(%grpc_addr, error = %e, "failed to start gRPC server (non-fatal)");
