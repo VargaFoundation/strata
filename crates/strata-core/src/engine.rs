@@ -388,6 +388,57 @@ impl StrataEngine {
         self.state.list_keys(agent_id).await
     }
 
+    // Tenant-scoped state: the agent_id is namespaced by tenant so one tenant can never
+    // read/write another tenant's agent state, even with a colliding agent_id.
+
+    /// Tenant-scoped state get (the returned `agent_id` has the tenant prefix stripped).
+    pub async fn state_get_for_tenant(
+        &self,
+        tenant: &str,
+        agent_id: &str,
+        key: &str,
+    ) -> Result<Option<crate::memory::state::StateEntry>> {
+        let mut entry = self.state.get(&scoped_agent(tenant, agent_id), key).await?;
+        if let Some(ref mut e) = entry {
+            e.agent_id = agent_id.to_string();
+        }
+        Ok(entry)
+    }
+
+    /// Tenant-scoped state set.
+    pub async fn state_set_for_tenant(
+        &self,
+        tenant: &str,
+        agent_id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<u64> {
+        self.state
+            .set(&scoped_agent(tenant, agent_id), key, value)
+            .await
+    }
+
+    /// Tenant-scoped state delete.
+    pub async fn state_delete_for_tenant(
+        &self,
+        tenant: &str,
+        agent_id: &str,
+        key: &str,
+    ) -> Result<()> {
+        self.state
+            .delete(&scoped_agent(tenant, agent_id), key)
+            .await
+    }
+
+    /// Tenant-scoped state key listing.
+    pub async fn state_list_keys_for_tenant(
+        &self,
+        tenant: &str,
+        agent_id: &str,
+    ) -> Result<Vec<String>> {
+        self.state.list_keys(&scoped_agent(tenant, agent_id)).await
+    }
+
     // ── Sessions ─────────────────────────────────────────────────────
 
     /// Start a new conversation session.
@@ -425,6 +476,43 @@ impl StrataEngine {
     /// Recall all events in a session.
     pub async fn session_recall(&self, session_id: &str) -> Result<Vec<serde_json::Value>> {
         self.episodic.recall_session(session_id).await
+    }
+
+    /// Start a session scoped to a tenant.
+    pub async fn session_start_for_tenant(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        parent_session_id: Option<&str>,
+        metadata: Option<serde_json::Value>,
+        tenant: &str,
+    ) -> Result<()> {
+        self.episodic
+            .start_session_for_tenant(session_id, agent_id, parent_session_id, metadata, tenant)
+            .await
+    }
+
+    /// End a session scoped to a tenant (true iff a session was updated).
+    pub async fn session_end_for_tenant(
+        &self,
+        session_id: &str,
+        summary: Option<&str>,
+        tenant: &str,
+    ) -> Result<bool> {
+        self.episodic
+            .end_session_for_tenant(session_id, summary, tenant)
+            .await
+    }
+
+    /// Recall a session's events scoped to a tenant.
+    pub async fn session_recall_for_tenant(
+        &self,
+        session_id: &str,
+        tenant: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.episodic
+            .recall_session_for_tenant(session_id, tenant)
+            .await
     }
 
     // ── Embed & Search ────────────────────────────────────────────────
@@ -898,6 +986,50 @@ impl StrataEngine {
         .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))?
     }
 
+    /// List event sources for a single tenant.
+    pub async fn list_sources_for_tenant(&self, tenant: &str) -> Result<Vec<String>> {
+        let episodic = self.episodic.clone();
+        let tenant = tenant.to_string();
+        tokio::task::spawn_blocking(move || {
+            let db = episodic.write_conn();
+            let mut stmt = db
+                .prepare("SELECT DISTINCT source FROM episodic WHERE tenant_id = ? ORDER BY source")
+                .map_err(|e| crate::Error::Query(e.to_string()))?;
+            let sources: Vec<String> = stmt
+                .query_map(duckdb::params![tenant], |row| row.get(0))
+                .map_err(|e| crate::Error::Query(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(sources)
+        })
+        .await
+        .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))?
+    }
+
+    /// List agent IDs for a single tenant (the tenant prefix is stripped from the result).
+    pub async fn list_agents_for_tenant(&self, tenant: &str) -> Result<Vec<String>> {
+        let state = self.state.clone();
+        let prefix = format!("{tenant}{TENANT_AGENT_SEP}");
+        tokio::task::spawn_blocking(move || {
+            let db = state.db_conn();
+            let like = format!("{prefix}%");
+            let mut stmt = db
+                .prepare(
+                    "SELECT DISTINCT agent_id FROM state WHERE agent_id LIKE ?1 ORDER BY agent_id",
+                )
+                .map_err(|e| crate::Error::Query(e.to_string()))?;
+            let agents: Vec<String> = stmt
+                .query_map(rusqlite::params![like], |row| row.get::<_, String>(0))
+                .map_err(|e| crate::Error::Query(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .map(|a| a.strip_prefix(&prefix).unwrap_or(&a).to_string())
+                .collect();
+            Ok(agents)
+        })
+        .await
+        .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))?
+    }
+
     // ── Retention ─────────────────────────────────────────────────────
 
     /// Clean up expired state entries (TTL).
@@ -1192,6 +1324,15 @@ impl StrataEngine {
     }
 }
 
+/// Separator that namespaces an `agent_id` by tenant for state isolation. A control char
+/// (unit separator) that is extremely unlikely to occur in a real agent id.
+const TENANT_AGENT_SEP: char = '\u{1f}';
+
+/// Namespace an agent id by tenant so agent state is isolated per tenant.
+fn scoped_agent(tenant: &str, agent_id: &str) -> String {
+    format!("{tenant}{TENANT_AGENT_SEP}{agent_id}")
+}
+
 /// Leniently parse an LLM extraction response into `(subject, content)` facts.
 ///
 /// Tolerates surrounding prose / Markdown fences by extracting the outermost `[...]` array.
@@ -1234,13 +1375,13 @@ mod tests {
 
     #[tokio::test]
     async fn engine_lifecycle() {
-        let engine = StrataEngine::new(CoreConfig::default()).await.unwrap();
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
         engine.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn engine_ingest_and_count() {
-        let engine = StrataEngine::new(CoreConfig::default()).await.unwrap();
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
 
         let events = vec![Event {
             id: uuid::Uuid::new_v4(),
@@ -1261,7 +1402,7 @@ mod tests {
 
     #[tokio::test]
     async fn engine_state_crud() {
-        let engine = StrataEngine::new(CoreConfig::default()).await.unwrap();
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
 
         let v = engine
             .state_set("bot", "mood", serde_json::json!("happy"))
@@ -1278,7 +1419,7 @@ mod tests {
 
     #[tokio::test]
     async fn engine_query_sql() {
-        let engine = StrataEngine::new(CoreConfig::default()).await.unwrap();
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
         let rows = engine
             .query_sql("SELECT 42::VARCHAR as answer")
             .await
@@ -1289,7 +1430,7 @@ mod tests {
 
     #[tokio::test]
     async fn engine_semantic_search() {
-        let engine = StrataEngine::new(CoreConfig::default()).await.unwrap();
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
 
         // Use distinct vectors so cosine similarity clearly differentiates them
         let mut rust_vec = vec![0.0f32; 768];

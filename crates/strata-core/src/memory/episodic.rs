@@ -184,6 +184,7 @@ impl EpisodicStore {
                 metadata         JSON DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tenant_id VARCHAR DEFAULT 'default';
             ALTER TABLE episodic ADD COLUMN IF NOT EXISTS session_id VARCHAR;
             CREATE INDEX IF NOT EXISTS idx_episodic_session ON episodic(session_id);",
         )
@@ -653,6 +654,76 @@ impl EpisodicStore {
             .map_err(|e| crate::Error::Query(e.to_string()))?;
         let rows = stmt
             .query_map(duckdb::params![session_id], |row| {
+                let payload_str: String = row.get(3)?;
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "source": row.get::<_, String>(1)?,
+                    "event_type": row.get::<_, String>(2)?,
+                    "payload": serde_json::from_str::<serde_json::Value>(&payload_str).unwrap_or_default(),
+                    "ts": row.get::<_, String>(4)?,
+                }))
+            })
+            .map_err(|e| crate::Error::Query(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Start a session tagged with a tenant (for isolation).
+    pub async fn start_session_for_tenant(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        parent_session_id: Option<&str>,
+        metadata: Option<serde_json::Value>,
+        tenant: &str,
+    ) -> crate::Result<()> {
+        let db = self.write_db.lock();
+        let meta_str = serde_json::to_string(&metadata.unwrap_or(serde_json::json!({})))
+            .unwrap_or_else(|_| "{}".to_string());
+        db.execute(
+            "INSERT INTO sessions (session_id, parent_session_id, agent_id, started_at, metadata, tenant_id)
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?::JSON, ?)",
+            duckdb::params![session_id, parent_session_id, agent_id, meta_str, tenant],
+        )
+        .map_err(|e| crate::Error::Ingest(format!("start session: {e}")))?;
+        Ok(())
+    }
+
+    /// End a session scoped to a tenant. Returns true iff a row was updated.
+    pub async fn end_session_for_tenant(
+        &self,
+        session_id: &str,
+        summary: Option<&str>,
+        tenant: &str,
+    ) -> crate::Result<bool> {
+        let db = self.write_db.lock();
+        let n = db
+            .execute(
+                "UPDATE sessions SET ended_at = CURRENT_TIMESTAMP, summary = ?
+                 WHERE session_id = ? AND tenant_id = ?",
+                duckdb::params![summary, session_id, tenant],
+            )
+            .map_err(|e| crate::Error::Ingest(format!("end session: {e}")))?;
+        Ok(n > 0)
+    }
+
+    /// Recall a session's events, scoped to a tenant.
+    pub async fn recall_session_for_tenant(
+        &self,
+        session_id: &str,
+        tenant: &str,
+    ) -> crate::Result<Vec<serde_json::Value>> {
+        let db = self.read_conn();
+        let mut stmt = db
+            .prepare(
+                "SELECT id, source, event_type, payload::VARCHAR, ts::VARCHAR
+                 FROM episodic WHERE session_id = ? AND tenant_id = ?
+                 ORDER BY ts ASC",
+            )
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map(duckdb::params![session_id, tenant], |row| {
                 let payload_str: String = row.get(3)?;
                 Ok(serde_json::json!({
                     "id": row.get::<_, String>(0)?,

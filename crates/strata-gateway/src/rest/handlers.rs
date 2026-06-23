@@ -234,9 +234,10 @@ pub async fn ingest(
     result
 }
 
-/// Webhook ingestion — normalizes vendor payloads into Strata events.
+/// Webhook ingestion — normalizes vendor payloads into Strata events (tenant-scoped).
 pub async fn webhook(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Path(source): Path<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
@@ -245,7 +246,16 @@ pub async fn webhook(
     match strata_core::ingest::webhook::normalize_webhook(&source, &payload) {
         Ok(events) => {
             let count = events.len();
-            match engine.ingest(events).await {
+            // Tag with the caller's tenant so webhook data is isolated like everything else.
+            let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+            let ingest_result = match tenant {
+                Some(t) => {
+                    let tc = strata_core::config::TenantContext::new(t);
+                    engine.ingest_for_tenant(events, &tc).await
+                }
+                None => engine.ingest(events).await,
+            };
+            match ingest_result {
                 Ok(ingested) => api_ok(serde_json::json!({
                     "source": source,
                     "normalized": count,
@@ -325,14 +335,20 @@ pub async fn search(
     result
 }
 
-/// Get agent state.
+/// Get agent state (tenant-scoped).
 pub async fn state_get(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Path((agent_id, key)): Path<(String, String)>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "state_get").increment(1);
 
-    match engine.state_get(&agent_id, &key).await {
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    let got = match tenant {
+        Some(t) => engine.state_get_for_tenant(&t, &agent_id, &key).await,
+        None => engine.state_get(&agent_id, &key).await,
+    };
+    match got {
         Ok(Some(entry)) => api_ok(serde_json::json!({
             "agent_id": entry.agent_id,
             "key": entry.key,
@@ -352,15 +368,21 @@ pub async fn state_get(
     }
 }
 
-/// Set agent state.
+/// Set agent state (tenant-scoped).
 pub async fn state_set(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Path((agent_id, key)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "state_set").increment(1);
 
-    match engine.state_set(&agent_id, &key, body).await {
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    let set = match tenant {
+        Some(t) => engine.state_set_for_tenant(&t, &agent_id, &key, body).await,
+        None => engine.state_set(&agent_id, &key, body).await,
+    };
+    match set {
         Ok(version) => api_ok(serde_json::json!({ "version": version })),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -520,10 +542,17 @@ pub async fn audit_query(
 /// Sends JSON messages for each state change matching the agent_id.
 pub async fn state_watch(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Path(agent_id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_state_ws(socket, engine, agent_id))
+    // Namespace the watched agent id by tenant (mirrors core's `\u{1f}` separator) so a tenant
+    // only receives its own state-change notifications.
+    let effective = match auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone()) {
+        Some(t) => format!("{t}\u{1f}{agent_id}"),
+        None => agent_id,
+    };
+    ws.on_upgrade(move |socket| handle_state_ws(socket, engine, effective))
 }
 
 // ── Embed & Search (DX killer feature) ──────────────────────────────
@@ -598,6 +627,7 @@ pub async fn embed_and_search(
 /// POST /api/v1/sessions { "session_id": "...", "agent_id": "...", "parent_session_id": "..." }
 pub async fn session_start(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Json(req): Json<serde_json::Value>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "session_start").increment(1);
@@ -622,10 +652,20 @@ pub async fn session_start(
     let parent = req.get("parent_session_id").and_then(|v| v.as_str());
     let metadata = req.get("metadata").cloned();
 
-    match engine
-        .session_start(session_id, agent_id, parent, metadata)
-        .await
-    {
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    let started = match tenant {
+        Some(t) => {
+            engine
+                .session_start_for_tenant(session_id, agent_id, parent, metadata, &t)
+                .await
+        }
+        None => {
+            engine
+                .session_start(session_id, agent_id, parent, metadata)
+                .await
+        }
+    };
+    match started {
         Ok(()) => api_ok(serde_json::json!({
             "session_id": session_id,
             "agent_id": agent_id,
@@ -644,22 +684,39 @@ pub async fn session_start(
 /// POST /api/v1/sessions/{session_id}/end { "summary": "..." }
 pub async fn session_end(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Path(session_id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "session_end").increment(1);
 
     let summary = req.get("summary").and_then(|v| v.as_str());
-    match engine.session_end(&session_id, summary).await {
-        Ok(()) => api_ok(serde_json::json!({
-            "session_id": session_id,
-            "status": "ended"
-        })),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "SESSION_ERROR",
-            e.to_string(),
-        ),
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    match tenant {
+        Some(t) => match engine
+            .session_end_for_tenant(&session_id, summary, &t)
+            .await
+        {
+            Ok(true) => api_ok(serde_json::json!({"session_id": session_id, "status": "ended"})),
+            Ok(false) => api_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                format!("session '{session_id}' not found"),
+            ),
+            Err(e) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SESSION_ERROR",
+                e.to_string(),
+            ),
+        },
+        None => match engine.session_end(&session_id, summary).await {
+            Ok(()) => api_ok(serde_json::json!({"session_id": session_id, "status": "ended"})),
+            Err(e) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SESSION_ERROR",
+                e.to_string(),
+            ),
+        },
     }
 }
 
@@ -668,11 +725,17 @@ pub async fn session_end(
 /// GET /api/v1/sessions/{session_id}/recall
 pub async fn session_recall(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
     Path(session_id): Path<String>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "session_recall").increment(1);
 
-    match engine.session_recall(&session_id).await {
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    let recalled = match tenant {
+        Some(t) => engine.session_recall_for_tenant(&session_id, &t).await,
+        None => engine.session_recall(&session_id).await,
+    };
+    match recalled {
         Ok(events) => {
             let count = events.len();
             api_ok(serde_json::json!({
@@ -961,9 +1024,17 @@ pub async fn memory_decay(State(engine): State<Arc<StrataEngine>>) -> Response {
 
 // ── Schema Introspection ────────────────────────────────────────────
 
-/// List all distinct event sources.
-pub async fn schema_sources(State(engine): State<Arc<StrataEngine>>) -> Response {
-    match engine.list_sources().await {
+/// List distinct event sources (tenant-scoped).
+pub async fn schema_sources(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+) -> Response {
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    let listed = match tenant {
+        Some(t) => engine.list_sources_for_tenant(&t).await,
+        None => engine.list_sources().await,
+    };
+    match listed {
         Ok(sources) => api_ok(serde_json::json!({ "sources": sources })),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -973,9 +1044,17 @@ pub async fn schema_sources(State(engine): State<Arc<StrataEngine>>) -> Response
     }
 }
 
-/// List all distinct agent IDs.
-pub async fn schema_agents(State(engine): State<Arc<StrataEngine>>) -> Response {
-    match engine.list_agents().await {
+/// List distinct agent IDs (tenant-scoped).
+pub async fn schema_agents(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+) -> Response {
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    let listed = match tenant {
+        Some(t) => engine.list_agents_for_tenant(&t).await,
+        None => engine.list_agents().await,
+    };
+    match listed {
         Ok(agents) => api_ok(serde_json::json!({ "agents": agents })),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
