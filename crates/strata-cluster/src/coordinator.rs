@@ -28,8 +28,28 @@ impl ClusterCoordinator {
         Self { config, raft: None }
     }
 
-    /// Start the Raft instance with the given engine for state machine application.
+    /// Start the Raft instance with the production HTTP network.
     pub async fn start_raft(&mut self, engine: Arc<StrataEngine>) -> crate::Result<()> {
+        self.start_raft_with_network(engine, NetworkFactory::new())
+            .await
+    }
+
+    /// Start the Raft instance with a custom network factory (tests inject an in-process network).
+    ///
+    /// Forms the cluster from configuration:
+    /// - **no peers** → single-node, initialized immediately;
+    /// - **peers** (`id@addr` voter membership, including this node) → the lowest-id node is the
+    ///   designated bootstrapper: it `initialize`s the full membership **once**, idempotently
+    ///   (skips if already initialized — e.g. on restart) and retries until peers are reachable.
+    ///   Every other node simply starts and is brought into the cluster by the leader.
+    pub async fn start_raft_with_network<N>(
+        &mut self,
+        engine: Arc<StrataEngine>,
+        network: N,
+    ) -> crate::Result<()>
+    where
+        N: openraft::RaftNetworkFactory<TypeConfig>,
+    {
         let raft_config = openraft::Config {
             cluster_name: "strata".into(),
             heartbeat_interval: 500,
@@ -69,7 +89,6 @@ impl ClusterCoordinator {
             }
         };
         let (log_store, state_machine) = Adaptor::new(store);
-        let network = NetworkFactory::new();
 
         let raft = Raft::new(
             self.config.node_id,
@@ -83,21 +102,29 @@ impl ClusterCoordinator {
 
         tracing::info!(node_id = self.config.node_id, "Raft instance started");
 
-        // If this is a single-node cluster (no peers), initialize immediately
+        // Form the cluster from configuration.
+        let members = self.parse_members()?;
         if self.config.peers.is_empty() {
-            let mut members = std::collections::BTreeMap::new();
-            members.insert(
-                self.config.node_id,
-                NodeInfo {
-                    addr: format!("http://{}", self.config.listen),
-                },
-            );
-
             raft.initialize(members)
                 .await
                 .map_err(|e| crate::Error::Raft(format!("failed to initialize: {e}")))?;
-
             tracing::info!("single-node cluster initialized");
+        } else {
+            let min_id = *members.keys().next().expect("membership is non-empty");
+            if self.config.node_id == min_id {
+                tracing::info!(
+                    node_id = min_id,
+                    members = members.len(),
+                    "designated bootstrap node — forming cluster"
+                );
+                let raft_bs = raft.clone();
+                tokio::spawn(async move { bootstrap_cluster(raft_bs, members).await });
+            } else {
+                tracing::info!(
+                    node_id = self.config.node_id,
+                    "joining cluster — awaiting leader replication"
+                );
+            }
         }
 
         // Spawn background task to publish Raft metrics to Prometheus
@@ -146,6 +173,47 @@ impl ClusterCoordinator {
 
         self.raft = Some(raft);
         Ok(())
+    }
+
+    /// Build the full voter membership from configuration.
+    ///
+    /// Empty peers → just this node (single-node). Otherwise each `peers` entry is `id@addr`
+    /// (the complete voter set, including this node), e.g. `"2@http://strata-1:9433"`.
+    fn parse_members(&self) -> crate::Result<std::collections::BTreeMap<NodeId, NodeInfo>> {
+        use std::collections::BTreeMap;
+        let mut members = BTreeMap::new();
+        if self.config.peers.is_empty() {
+            members.insert(
+                self.config.node_id,
+                NodeInfo {
+                    addr: normalize_addr(&self.config.listen),
+                },
+            );
+            return Ok(members);
+        }
+        for entry in &self.config.peers {
+            let (id_str, addr) = entry.split_once('@').ok_or_else(|| {
+                crate::Error::Coordination(format!(
+                    "cluster peer '{entry}' must be in 'id@addr' form (e.g. '2@http://strata-1:9433')"
+                ))
+            })?;
+            let id: NodeId = id_str.trim().parse().map_err(|_| {
+                crate::Error::Coordination(format!("invalid node id in cluster peer '{entry}'"))
+            })?;
+            members.insert(
+                id,
+                NodeInfo {
+                    addr: normalize_addr(addr.trim()),
+                },
+            );
+        }
+        if !members.contains_key(&self.config.node_id) {
+            return Err(crate::Error::Coordination(format!(
+                "cluster peers must include this node (id {}); peers={:?}",
+                self.config.node_id, self.config.peers
+            )));
+        }
+        Ok(members)
     }
 
     /// Whether this node is the current Raft leader.
@@ -205,6 +273,48 @@ impl ClusterCoordinator {
         }
         Ok(())
     }
+}
+
+/// Prefix a bare `host:port` with `http://` so the HTTP Raft transport can POST to it.
+fn normalize_addr(addr: &str) -> String {
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr.to_string()
+    } else {
+        format!("http://{addr}")
+    }
+}
+
+/// Bootstrap a multi-node cluster: `initialize` once, idempotently, retrying until a quorum of
+/// peers is reachable. Safe to run on every start — a restart finds the cluster already
+/// initialized (membership restored from the persisted log) and skips.
+async fn bootstrap_cluster(
+    raft: StrataRaft,
+    members: std::collections::BTreeMap<NodeId, NodeInfo>,
+) {
+    for attempt in 0..120u32 {
+        if matches!(raft.is_initialized().await, Ok(true)) {
+            tracing::info!("cluster already initialized — skipping bootstrap");
+            return;
+        }
+        match raft.initialize(members.clone()).await {
+            Ok(()) => {
+                tracing::info!(members = members.len(), "multi-node cluster bootstrapped");
+                return;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // Another node (or a previous boot) already formed the cluster — done.
+                if msg.contains("already") || msg.contains("initialized") {
+                    tracing::info!("cluster already initialized (concurrent) — skipping");
+                    return;
+                }
+                // Peers not reachable yet (quorum unavailable) — back off and retry.
+                tracing::debug!(attempt, error = %msg, "cluster bootstrap retry — peers not ready");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+    tracing::error!("cluster bootstrap timed out — cluster not formed");
 }
 
 #[cfg(test)]

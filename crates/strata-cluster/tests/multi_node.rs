@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError};
+use openraft::error::{InstallSnapshotError, RPCError, RaftError, Unreachable};
 use openraft::network::RPCOption;
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
@@ -37,8 +37,10 @@ impl Router {
     fn register(&self, id: NodeId, raft: RaftHandle) {
         self.nodes.lock().insert(id, raft);
     }
-    fn get(&self, id: NodeId) -> RaftHandle {
-        self.nodes.lock().get(&id).expect("node registered").clone()
+    /// Look up a target node. `None` if it isn't registered yet — during bootstrap a node may
+    /// dial a peer that hasn't started; the caller turns that into a retryable `Unreachable`.
+    fn get(&self, id: NodeId) -> Option<RaftHandle> {
+        self.nodes.lock().get(&id).cloned()
     }
 }
 
@@ -48,17 +50,26 @@ struct Conn {
     target: NodeId,
 }
 
+fn not_registered(target: NodeId) -> Unreachable {
+    Unreachable::new(&std::io::Error::new(
+        std::io::ErrorKind::NotConnected,
+        format!("node {target} not registered yet"),
+    ))
+}
+
 impl RaftNetwork<TypeConfig> for Conn {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         _o: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, NodeInfo, RaftError<NodeId>>> {
-        self.router
+        let raft = self
+            .router
             .get(self.target)
-            .append_entries(rpc)
+            .ok_or_else(|| RPCError::Unreachable(not_registered(self.target)))?;
+        raft.append_entries(rpc)
             .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))
     }
 
     async fn install_snapshot(
@@ -69,11 +80,13 @@ impl RaftNetwork<TypeConfig> for Conn {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, NodeInfo, RaftError<NodeId, InstallSnapshotError>>,
     > {
-        self.router
+        let raft = self
+            .router
             .get(self.target)
-            .install_snapshot(rpc)
+            .ok_or_else(|| RPCError::Unreachable(not_registered(self.target)))?;
+        raft.install_snapshot(rpc)
             .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))
     }
 
     async fn vote(
@@ -81,11 +94,13 @@ impl RaftNetwork<TypeConfig> for Conn {
         rpc: VoteRequest<NodeId>,
         _o: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, NodeInfo, RaftError<NodeId>>> {
-        self.router
+        let raft = self
+            .router
             .get(self.target)
-            .vote(rpc)
+            .ok_or_else(|| RPCError::Unreachable(not_registered(self.target)))?;
+        raft.vote(rpc)
             .await
-            .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))
     }
 }
 
@@ -222,5 +237,91 @@ async fn three_node_cluster_replicates_and_converges() {
 
     for raft in rafts.into_values() {
         let _ = raft.shutdown().await;
+    }
+}
+
+/// End-to-end deployment path: bring up 3 `ClusterCoordinator`s from **configuration only**
+/// (`peers` = `id@addr` membership) and assert the cluster forms ITSELF — the lowest-id node
+/// bootstraps via `start_raft_with_network`, no manual `initialize` — then a leader write
+/// converges on every node. This is what a real 3-replica deployment does.
+#[tokio::test]
+async fn cluster_forms_from_config_via_coordinator() {
+    use strata_cluster::{ClusterConfig, ClusterCoordinator};
+
+    let router = Router::default();
+    let peers: Vec<String> = (1..=3u64).map(|id| format!("{id}@mem://{id}")).collect();
+    let mut engines: BTreeMap<NodeId, Arc<StrataEngine>> = BTreeMap::new();
+    let mut coords: Vec<ClusterCoordinator> = Vec::new();
+
+    for id in 1..=3u64 {
+        let engine = inmem_engine().await;
+        let config = ClusterConfig {
+            enabled: true,
+            node_id: id,
+            listen: "0.0.0.0:9433".into(),
+            peers: peers.clone(),
+            data_dir: ":memory:".into(),
+        };
+        let mut coord = ClusterCoordinator::new(config);
+        coord
+            .start_raft_with_network(
+                engine.clone(),
+                Factory {
+                    router: router.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        // Register this node so peers' bootstrap/election RPCs can reach it.
+        router.register(id, coord.raft().unwrap().clone());
+        engines.insert(id, engine);
+        coords.push(coord);
+    }
+
+    // No manual initialize: the designated coordinator forms the cluster on its own. Wait for a
+    // leader to emerge (bootstrap retries until all peers are registered/reachable).
+    let mut elected = false;
+    for _ in 0..200 {
+        if coords.iter().any(|c| c.is_leader()) {
+            elected = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(elected, "cluster did not elect a leader from config");
+
+    // Propose a write on whichever node is leader.
+    let leader = coords
+        .iter()
+        .find(|c| c.is_leader())
+        .expect("a leader coordinator");
+    let ev = strata_core::memory::episodic::Event::new("src", "e", serde_json::json!({"y": 2}));
+    leader
+        .client_write(AppRequest::Ingest {
+            events: vec![ev],
+            tenant: None,
+        })
+        .await
+        .unwrap();
+
+    // Converges on every node's engine.
+    for id in 1..=3u64 {
+        let engine = &engines[&id];
+        let mut converged = false;
+        for _ in 0..100 {
+            if engine.event_count().await.unwrap() == 1 {
+                converged = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            converged,
+            "node {id} did not converge after config-driven formation"
+        );
+    }
+
+    for mut c in coords {
+        let _ = c.shutdown().await;
     }
 }

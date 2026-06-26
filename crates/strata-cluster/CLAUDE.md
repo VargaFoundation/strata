@@ -21,7 +21,7 @@ cognition results) computed once on the leader — never re-run non-deterministi
 | `MemStore` | **Working** | Full `RaftStorage` trait impl: log (BTreeMap), vote, state machine (applies to StrataEngine), snapshots |
 | `NetworkClient` | **Working** | HTTP JSON POST for AppendEntries, Vote, InstallSnapshot RPCs |
 | `NetworkFactory` | **Working** | Creates `NetworkClient` per target node with shared reqwest::Client |
-| `ClusterCoordinator` | **Working** | Owns the `openraft::Raft` instance, `client_write()`, `is_leader()`, `leader_id()`, single-node init, graceful shutdown |
+| `ClusterCoordinator` | **Working** | Owns the `openraft::Raft` instance, `client_write()`, `is_leader()`, `leader_id()`, graceful shutdown. **Cluster formation**: single-node inits immediately; multi-node parses `peers` as `id@addr` voter membership and the lowest-id node bootstraps via `initialize` once — idempotent on restart, retries until peers are reachable. `start_raft_with_network` allows injecting a network (tests). |
 | `ClusterConfig` | **Working** | TOML deserialization, node_id, listen, peers |
 | `ClusterCoordinator` (metrics) | **Working** | Background task publishing Raft metrics to Prometheus (term, is_leader, replication_lag, leader_changes) |
 | `LogShipper` | Stub | WAL segment shipping between peers (not needed for basic Raft, uses AppendEntries) |
@@ -70,7 +70,16 @@ All requests carry **materialized** values so apply is deterministic on every no
 - ClusterCoordinator single-node Raft lifecycle (start → is_leader → shutdown)
 - Consensus round-trip: `client_write` → commit → apply lands on the engine (Ingest/State/Memory)
 - Deterministic apply: the same committed entry yields identical state on two independent engines
-- **Multi-node** (`tests/multi_node.rs`): a real 3-node openraft cluster over an in-process
-  network proves a leader write commits via quorum and **converges on every node's engine**
-  (same event id) — port-free and non-flaky. The HTTP `NetworkClient` transport itself is
-  covered by the single-node + unit tests (an in-process network is used here for determinism).
+- **Multi-node** (`tests/multi_node.rs`, 2 tests): (1) a real 3-node openraft cluster over an
+  in-process network proves a leader write commits via quorum and **converges on every node's
+  engine** (same event id); (2) **config-driven formation** — 3 `ClusterCoordinator`s built from
+  `peers` config form the cluster THEMSELVES (lowest-id node bootstraps, no manual `initialize`),
+  elect a leader, and a write converges. Port-free, non-flaky. The HTTP `NetworkClient` transport
+  is covered by the single-node + unit tests.
+
+## Cluster deployment
+
+`STRATA_CLUSTER__PEERS` is the **full voter membership** as comma-separated `id@addr`
+(including this node), e.g. `1@http://strata-0:9433,2@http://strata-1:9433,3@http://strata-2:9433`;
+`STRATA_CLUSTER__NODE_ID` is this node's id. The Helm StatefulSet derives both from the pod
+ordinal automatically. The lowest-id node forms the cluster; the rest are pulled in by the leader.

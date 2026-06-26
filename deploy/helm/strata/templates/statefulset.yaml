@@ -97,16 +97,18 @@ spec:
               NODE_ID=$((ORDINAL + 1))
               export STRATA_CLUSTER__NODE_ID=$NODE_ID
 
-              # Build peer list from StatefulSet DNS
+              # Build the FULL voter membership (including self) from StatefulSet DNS, as the
+              # `id@http://addr` form the coordinator parses to form/join the cluster.
+              # The lowest-id node (strata-0 -> id 1) bootstraps; the rest are pulled in by the leader.
               PEERS=""
               for i in $(seq 0 $(({{ .Values.replicaCount }} - 1))); do
-                if [ "$i" != "$ORDINAL" ]; then
-                  PEER="{{ include "strata.fullname" . }}-${i}.{{ include "strata.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local:9433"
-                  if [ -z "$PEERS" ]; then
-                    PEERS="$PEER"
-                  else
-                    PEERS="$PEERS,$PEER"
-                  fi
+                PID=$((i + 1))
+                ADDR="http://{{ include "strata.fullname" . }}-${i}.{{ include "strata.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local:9433"
+                ENTRY="${PID}@${ADDR}"
+                if [ -z "$PEERS" ]; then
+                  PEERS="$ENTRY"
+                else
+                  PEERS="$PEERS,$ENTRY"
                 fi
               done
               export STRATA_CLUSTER__PEERS=$PEERS
