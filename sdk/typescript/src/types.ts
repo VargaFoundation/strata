@@ -116,3 +116,11 @@ export interface BackupResponse {
 export interface RetentionResponse {
   [key: string]: unknown;
 }
+
+/** Scope tuple for the memory cognition layer (all fields optional; default tenant). */
+export interface MemoryScope {
+  tenant_id?: string;
+  user_id?: string;
+  agent_id?: string;
+  session_id?: string;
+}

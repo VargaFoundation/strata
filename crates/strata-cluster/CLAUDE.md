@@ -5,13 +5,14 @@
 Distributed mode. Implements Raft consensus via openraft v0.9, routes writes through
 the leader, and provides cluster coordination.
 
-In cluster mode, **ingest and state writes** are proposed as an `AppRequest` through Raft
-(`coordinator.client_write`) and applied deterministically to every node's `StrataEngine`
-on commit — committed writes survive leader failover. **Memory writes** currently apply
-directly on the leader and replicate to followers via (complete) snapshots, not the log.
-`apply` MUST be deterministic: requests carry fully-materialized values (ids, timestamps,
-cognition results) computed once on the leader — never re-run non-deterministic logic
-(uuid/now/LLM) at apply time.
+In cluster mode, **ingest, state, and memory writes** are proposed as an `AppRequest` through Raft
+(`coordinator.client_write`) and applied deterministically to every node's `StrataEngine` on
+commit — committed writes survive leader failover. This covers the REST write handlers AND the MCP
+write tools (`ingest`/`set_state`/`add_memory`/`delete_memory`); for `add_memory` the leader runs
+cognition (`memory_plan`) and replicates the materialized rows. The one exception is the MCP
+`remember` tool (LLM extraction) which stays direct + snapshot-replicated. `apply` MUST be
+deterministic: requests carry fully-materialized values (ids, timestamps, cognition results)
+computed once on the leader — never re-run non-deterministic logic (uuid/now/LLM) at apply time.
 
 ## Implementation Status
 

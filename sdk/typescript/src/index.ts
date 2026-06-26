@@ -7,6 +7,7 @@ export type {
   FindRequest,
   HealthResponse,
   IngestResponse,
+  MemoryScope,
   QueryResponse,
   RetentionResponse,
   SearchFilters,

@@ -48,7 +48,30 @@ pub struct ChatCompletionRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    /// Optional: assistant tool-call turns carry `content: null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// OpenAI tool calls on an assistant message (multi-turn tool use).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+    /// For `role: "tool"` messages: the id of the tool call this result answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    /// Convenience: a plain text message.
+    fn text(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+    fn content_str(&self) -> &str {
+        self.content.as_deref().unwrap_or("")
+    }
 }
 
 /// OpenAI-compatible chat completion response.
@@ -92,7 +115,7 @@ pub async fn chat_completions(
         .iter()
         .rev()
         .find(|m| m.role == "user")
-        .map(|m| m.content.clone())
+        .map(|m| m.content_str().to_string())
         .unwrap_or_default();
 
     // 2. Build context from both semantic and episodic memory
@@ -190,15 +213,10 @@ pub async fn chat_completions(
         );
 
         if let Some(sys_msg) = req.messages.iter_mut().find(|m| m.role == "system") {
-            sys_msg.content = format!("{}\n\n{}", context_block, sys_msg.content);
+            sys_msg.content = Some(format!("{}\n\n{}", context_block, sys_msg.content_str()));
         } else {
-            req.messages.insert(
-                0,
-                ChatMessage {
-                    role: "system".into(),
-                    content: context_block,
-                },
-            );
+            req.messages
+                .insert(0, ChatMessage::text("system", context_block));
         }
     }
 
@@ -356,6 +374,7 @@ async fn stream_anthropic(http: &Client, req: &ChatCompletionRequest) -> Respons
         // Buffer raw BYTES (not a String): a multi-byte UTF-8 char can be split across two network
         // chunks; decoding each chunk independently would corrupt it. We only decode complete lines.
         let mut buf: Vec<u8> = Vec::new();
+        let mut state = StreamState::default();
         while let Some(chunk) = upstream.next().await {
             let Ok(bytes) = chunk else { break };
             buf.extend_from_slice(&bytes);
@@ -372,7 +391,8 @@ async fn stream_anthropic(http: &Client, req: &ChatCompletionRequest) -> Respons
                     continue;
                 }
                 if let Ok(ev) = serde_json::from_str::<serde_json::Value>(data) {
-                    for chunk_json in anthropic_event_to_openai_chunks(&ev, &id, &model) {
+                    for chunk_json in anthropic_event_to_openai_chunks(&ev, &id, &model, &mut state)
+                    {
                         if tx
                             .send(Ok(Event::default().data(chunk_json)))
                             .await
@@ -396,7 +416,20 @@ async fn stream_anthropic(http: &Client, req: &ChatCompletionRequest) -> Respons
 }
 
 /// Translate one Anthropic streaming event into zero or more OpenAI chunk payloads (pure).
-fn anthropic_event_to_openai_chunks(ev: &serde_json::Value, id: &str, model: &str) -> Vec<String> {
+/// Streaming-translation state: maps an Anthropic content-block index (which counts text AND
+/// tool_use blocks) to a sequential OpenAI tool_call index.
+#[derive(Default)]
+struct StreamState {
+    tool_index_by_block: std::collections::HashMap<u64, usize>,
+    next_tool_index: usize,
+}
+
+fn anthropic_event_to_openai_chunks(
+    ev: &serde_json::Value,
+    id: &str,
+    model: &str,
+    state: &mut StreamState,
+) -> Vec<String> {
     let typ = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let chunk = |delta: serde_json::Value, finish: serde_json::Value| {
         serde_json::json!({
@@ -413,18 +446,57 @@ fn anthropic_event_to_openai_chunks(ev: &serde_json::Value, id: &str, model: &st
             serde_json::json!({ "role": "assistant" }),
             serde_json::Value::Null,
         )],
+        // A tool_use block begins → open a new OpenAI tool_call (id + name, empty args).
+        "content_block_start" => {
+            let block = ev.get("content_block");
+            if block.and_then(|b| b.get("type")).and_then(|v| v.as_str()) == Some("tool_use") {
+                let a_idx = ev.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                let o_idx = state.next_tool_index;
+                state.next_tool_index += 1;
+                state.tool_index_by_block.insert(a_idx, o_idx);
+                let tool_id = block
+                    .and_then(|b| b.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let name = block
+                    .and_then(|b| b.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                vec![chunk(
+                    serde_json::json!({ "tool_calls": [{
+                        "index": o_idx, "id": tool_id, "type": "function",
+                        "function": { "name": name, "arguments": "" }
+                    }]}),
+                    serde_json::Value::Null,
+                )]
+            } else {
+                vec![]
+            }
+        }
         "content_block_delta" => {
-            match ev
-                .get("delta")
-                .and_then(|d| d.get("text"))
-                .and_then(|v| v.as_str())
-            {
-                Some(text) => vec![chunk(
+            let delta = ev.get("delta");
+            // Text delta → assistant content.
+            if let Some(text) = delta.and_then(|d| d.get("text")).and_then(|v| v.as_str()) {
+                return vec![chunk(
                     serde_json::json!({ "content": text }),
                     serde_json::Value::Null,
-                )],
-                None => vec![],
+                )];
             }
+            // Tool-input JSON delta → tool_call arguments fragment.
+            if let Some(partial) = delta
+                .and_then(|d| d.get("partial_json"))
+                .and_then(|v| v.as_str())
+            {
+                let a_idx = ev.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                let o_idx = *state.tool_index_by_block.get(&a_idx).unwrap_or(&0);
+                return vec![chunk(
+                    serde_json::json!({ "tool_calls": [{
+                        "index": o_idx, "function": { "arguments": partial }
+                    }]}),
+                    serde_json::Value::Null,
+                )];
+            }
+            vec![]
         }
         "message_delta" => {
             let stop = ev
@@ -439,7 +511,7 @@ fn anthropic_event_to_openai_chunks(ev: &serde_json::Value, id: &str, model: &st
             };
             vec![chunk(serde_json::json!({}), serde_json::json!(finish))]
         }
-        // content_block_start/stop, ping, message_stop carry no OpenAI-visible delta.
+        // content_block_stop, ping, message_stop carry no OpenAI-visible delta.
         _ => vec![],
     }
 }
@@ -490,21 +562,81 @@ async fn forward_to_ollama(
     }
 }
 
+/// Translate one OpenAI tool-call object into an Anthropic `tool_use` content block.
+fn openai_tool_call_to_anthropic(tc: &serde_json::Value) -> serde_json::Value {
+    let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let func = tc.get("function");
+    let name = func
+        .and_then(|f| f.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // OpenAI passes tool arguments as a JSON *string*; Anthropic wants a JSON object.
+    let input = func
+        .and_then(|f| f.get("arguments"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    serde_json::json!({ "type": "tool_use", "id": id, "name": name, "input": input })
+}
+
+/// Translate OpenAI-style messages into Anthropic Messages, handling multi-turn tool use:
+/// assistant `tool_calls` → `tool_use` blocks; consecutive `role:"tool"` results → a single user
+/// message of `tool_result` blocks (Anthropic requires tool results grouped in one user turn).
+fn build_anthropic_messages(req: &ChatCompletionRequest) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
+
+    let flush_tool_results = |out: &mut Vec<serde_json::Value>,
+                              pending: &mut Vec<serde_json::Value>| {
+        if !pending.is_empty() {
+            out.push(serde_json::json!({
+                "role": "user",
+                "content": std::mem::take(pending),
+            }));
+        }
+    };
+
+    for m in req.messages.iter().filter(|m| m.role != "system") {
+        if m.role == "tool" {
+            pending_tool_results.push(serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                "content": m.content_str(),
+            }));
+            continue;
+        }
+        // Any non-tool message ends a run of tool results.
+        flush_tool_results(&mut out, &mut pending_tool_results);
+
+        if m.role == "assistant" {
+            if let Some(tool_calls) = m.tool_calls.as_ref().and_then(|v| v.as_array()) {
+                let mut blocks: Vec<serde_json::Value> = Vec::new();
+                if !m.content_str().is_empty() {
+                    blocks.push(serde_json::json!({ "type": "text", "text": m.content_str() }));
+                }
+                for tc in tool_calls {
+                    blocks.push(openai_tool_call_to_anthropic(tc));
+                }
+                out.push(serde_json::json!({ "role": "assistant", "content": blocks }));
+                continue;
+            }
+        }
+        out.push(serde_json::json!({ "role": m.role, "content": m.content_str() }));
+    }
+    flush_tool_results(&mut out, &mut pending_tool_results);
+    out
+}
+
 /// Build the Anthropic Messages API request body from an OpenAI-style request (system split,
-/// message mapping, optional temperature + single-turn tool-use translation).
+/// multi-turn message + tool-use translation, optional temperature + tools).
 fn build_anthropic_body(req: &ChatCompletionRequest) -> serde_json::Value {
     let system = req
         .messages
         .iter()
         .find(|m| m.role == "system")
-        .map(|m| m.content.clone());
+        .map(|m| m.content_str().to_string());
 
-    let messages: Vec<serde_json::Value> = req
-        .messages
-        .iter()
-        .filter(|m| m.role != "system")
-        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-        .collect();
+    let messages = build_anthropic_messages(req);
 
     let mut body = serde_json::json!({
         "model": req.model,
@@ -738,7 +870,8 @@ mod tests {
             "index": 0,
             "delta": { "type": "text_delta", "text": "Hello" }
         });
-        let chunks = anthropic_event_to_openai_chunks(&ev, "id1", "claude-x");
+        let chunks =
+            anthropic_event_to_openai_chunks(&ev, "id1", "claude-x", &mut StreamState::default());
         assert_eq!(chunks.len(), 1);
         let parsed: serde_json::Value = serde_json::from_str(&chunks[0]).unwrap();
         assert_eq!(parsed["object"], "chat.completion.chunk");
@@ -748,7 +881,7 @@ mod tests {
     #[test]
     fn anthropic_message_start_emits_role() {
         let ev = serde_json::json!({ "type": "message_start", "message": {} });
-        let chunks = anthropic_event_to_openai_chunks(&ev, "id", "m");
+        let chunks = anthropic_event_to_openai_chunks(&ev, "id", "m", &mut StreamState::default());
         let parsed: serde_json::Value = serde_json::from_str(&chunks[0]).unwrap();
         assert_eq!(parsed["choices"][0]["delta"]["role"], "assistant");
     }
@@ -756,7 +889,7 @@ mod tests {
     #[test]
     fn anthropic_message_delta_maps_finish_reason() {
         let ev = serde_json::json!({ "type": "message_delta", "delta": { "stop_reason": "max_tokens" } });
-        let chunks = anthropic_event_to_openai_chunks(&ev, "id", "m");
+        let chunks = anthropic_event_to_openai_chunks(&ev, "id", "m", &mut StreamState::default());
         let parsed: serde_json::Value = serde_json::from_str(&chunks[0]).unwrap();
         assert_eq!(parsed["choices"][0]["finish_reason"], "length");
     }
@@ -764,7 +897,10 @@ mod tests {
     #[test]
     fn anthropic_ping_emits_nothing() {
         let ev = serde_json::json!({ "type": "ping" });
-        assert!(anthropic_event_to_openai_chunks(&ev, "id", "m").is_empty());
+        assert!(
+            anthropic_event_to_openai_chunks(&ev, "id", "m", &mut StreamState::default())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -772,14 +908,8 @@ mod tests {
         let req = ChatCompletionRequest {
             model: "claude-x".into(),
             messages: vec![
-                ChatMessage {
-                    role: "system".into(),
-                    content: "be nice".into(),
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: "hi".into(),
-                },
+                ChatMessage::text("system", "be nice"),
+                ChatMessage::text("user", "hi"),
             ],
             temperature: Some(0.5),
             max_tokens: Some(100),
@@ -850,13 +980,81 @@ mod tests {
 
     #[test]
     fn chat_message_serialization() {
-        let msg = ChatMessage {
-            role: "user".into(),
-            content: "Hello".into(),
-        };
+        let msg = ChatMessage::text("user", "Hello");
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["role"], "user");
         assert_eq!(json["content"], "Hello");
+    }
+
+    #[test]
+    fn multi_turn_tool_use_translates_to_anthropic_blocks() {
+        // assistant tool_call → user tool_result → assistant final.
+        let req = ChatCompletionRequest {
+            model: "claude-x".into(),
+            messages: vec![
+                ChatMessage::text("user", "weather in Paris?"),
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: None,
+                    tool_calls: Some(serde_json::json!([{
+                        "id": "call_1", "type": "function",
+                        "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" }
+                    }])),
+                    tool_call_id: None,
+                },
+                ChatMessage {
+                    role: "tool".into(),
+                    content: Some("18°C".into()),
+                    tool_calls: None,
+                    tool_call_id: Some("call_1".into()),
+                },
+            ],
+            temperature: None,
+            max_tokens: None,
+            stream: None,
+            user: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let msgs = build_anthropic_messages(&req);
+        assert_eq!(msgs.len(), 3);
+        // assistant tool_use block
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"][0]["type"], "tool_use");
+        assert_eq!(msgs[1]["content"][0]["id"], "call_1");
+        assert_eq!(msgs[1]["content"][0]["input"]["city"], "Paris");
+        // tool result becomes a user message with a tool_result block
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
+        assert_eq!(msgs[2]["content"][0]["tool_use_id"], "call_1");
+        assert_eq!(msgs[2]["content"][0]["content"], "18°C");
+    }
+
+    #[test]
+    fn streaming_tool_use_emits_openai_tool_call_deltas() {
+        let mut st = StreamState::default();
+        // Tool block starts (Anthropic block index 1, after a text block at 0).
+        let start = serde_json::json!({
+            "type": "content_block_start", "index": 1,
+            "content_block": { "type": "tool_use", "id": "toolu_9", "name": "get_weather" }
+        });
+        let c0 = anthropic_event_to_openai_chunks(&start, "id", "m", &mut st);
+        let p0: serde_json::Value = serde_json::from_str(&c0[0]).unwrap();
+        let tc0 = &p0["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(tc0["index"], 0);
+        assert_eq!(tc0["id"], "toolu_9");
+        assert_eq!(tc0["function"]["name"], "get_weather");
+
+        // Argument fragment for the same block.
+        let delta = serde_json::json!({
+            "type": "content_block_delta", "index": 1,
+            "delta": { "type": "input_json_delta", "partial_json": "{\"city\":" }
+        });
+        let c1 = anthropic_event_to_openai_chunks(&delta, "id", "m", &mut st);
+        let p1: serde_json::Value = serde_json::from_str(&c1[0]).unwrap();
+        let tc1 = &p1["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(tc1["index"], 0);
+        assert_eq!(tc1["function"]["arguments"], "{\"city\":");
     }
 
     #[test]

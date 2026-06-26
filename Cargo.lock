@@ -4683,6 +4683,7 @@ dependencies = [
  "parking_lot",
  "pgwire",
  "prost",
+ "prost-types",
  "protobuf-src",
  "reqwest",
  "serde",

@@ -127,12 +127,13 @@ class StrataClient:
         path: str,
         *,
         json: Any = None,
+        params: Any = None,
     ) -> httpx.Response:
         """Execute an HTTP request with retry + exponential backoff on 429/503."""
         last_resp: Optional[httpx.Response] = None
 
         for attempt in range(self.max_retries + 1):
-            resp = await self._client.request(method, path, json=json)
+            resp = await self._client.request(method, path, json=json, params=params)
 
             if resp.status_code not in _RETRYABLE_STATUSES:
                 return resp
@@ -390,6 +391,148 @@ class StrataClient:
         """Delete agent state."""
         resp = await self._request("DELETE", f"/api/v1/state/{agent_id}/{key}")
         resp.raise_for_status()
+
+    # ── Memory (cognition layer) ─────────────────────────────────────
+
+    async def memory_add(
+        self,
+        content: str,
+        *,
+        subject: Optional[str] = None,
+        importance: Optional[float] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Add a memory through the cognition pipeline (dedup / contradiction / importance).
+
+        Returns the resulting memory + outcome (Inserted / Confirmed / Merged / Superseded).
+        """
+        body: dict[str, Any] = {"content": content}
+        for k, v in (
+            ("subject", subject),
+            ("importance", importance),
+            ("user_id", user_id),
+            ("agent_id", agent_id),
+            ("session_id", session_id),
+            ("tenant_id", tenant_id),
+            ("metadata", metadata),
+        ):
+            if v is not None:
+                body[k] = v
+        resp = await self._request("POST", "/api/v1/memories", json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def memory_search(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Hybrid (BM25 + vector) search over a scope's memories. Returns ranked hits."""
+        body: dict[str, Any] = {"query": query, "k": k}
+        for key, v in (
+            ("user_id", user_id),
+            ("agent_id", agent_id),
+            ("session_id", session_id),
+            ("tenant_id", tenant_id),
+        ):
+            if v is not None:
+                body[key] = v
+        resp = await self._request("POST", "/api/v1/memories/search", json=body)
+        resp.raise_for_status()
+        return resp.json().get("results", [])
+
+    async def memory_list(
+        self,
+        *,
+        limit: int = 50,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """List active memories in a scope."""
+        params: dict[str, Any] = {"limit": limit}
+        for key, v in (
+            ("user_id", user_id),
+            ("agent_id", agent_id),
+            ("session_id", session_id),
+            ("tenant_id", tenant_id),
+        ):
+            if v is not None:
+                params[key] = v
+        resp = await self._request("GET", "/api/v1/memories", params=params)
+        resp.raise_for_status()
+        return resp.json().get("memories", [])
+
+    async def memory_get(self, memory_id: str) -> Optional[dict[str, Any]]:
+        """Get a memory by id. Returns None if not found (or not in your tenant)."""
+        resp = await self._request("GET", f"/api/v1/memories/{memory_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
+    async def memory_history(self, memory_id: str) -> list[dict[str, Any]]:
+        """Bi-temporal history for a memory's subject (oldest first)."""
+        resp = await self._request("GET", f"/api/v1/memories/{memory_id}/history")
+        resp.raise_for_status()
+        return resp.json().get("history", [])
+
+    async def memory_delete(self, memory_id: str) -> bool:
+        """Delete a memory by id. Returns False if it didn't exist (or not in your tenant)."""
+        resp = await self._request("DELETE", f"/api/v1/memories/{memory_id}")
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        return True
+
+    # ── Sessions ─────────────────────────────────────────────────────
+
+    async def session_start(
+        self,
+        session_id: str,
+        agent_id: str,
+        *,
+        parent_session_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Start a conversation session."""
+        body: dict[str, Any] = {"session_id": session_id, "agent_id": agent_id}
+        if parent_session_id is not None:
+            body["parent_session_id"] = parent_session_id
+        if metadata is not None:
+            body["metadata"] = metadata
+        resp = await self._request("POST", "/api/v1/sessions", json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def session_end(
+        self, session_id: str, *, summary: Optional[str] = None
+    ) -> dict[str, Any]:
+        """End a session, optionally attaching a summary."""
+        body: dict[str, Any] = {}
+        if summary is not None:
+            body["summary"] = summary
+        resp = await self._request(
+            "POST", f"/api/v1/sessions/{session_id}/end", json=body
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def session_recall(self, session_id: str) -> list[dict[str, Any]]:
+        """Recall all events recorded in a session."""
+        resp = await self._request("GET", f"/api/v1/sessions/{session_id}/recall")
+        resp.raise_for_status()
+        return resp.json().get("events", [])
 
     # ── Admin ────────────────────────────────────────────────────────
 

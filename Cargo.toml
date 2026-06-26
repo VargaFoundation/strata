@@ -38,6 +38,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # gRPC
 tonic = { version = "0.12" }
 prost = { version = "0.13" }
+prost-types = { version = "0.13" }
 tonic-build = { version = "0.12" }
 protobuf-src = { version = "2" }
 

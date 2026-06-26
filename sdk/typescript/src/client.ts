@@ -6,6 +6,7 @@ import type {
   FindRequest,
   HealthResponse,
   IngestResponse,
+  MemoryScope,
   QueryResponse,
   RetentionResponse,
   SearchFilters,
@@ -250,6 +251,139 @@ export class StrataClient {
   /** Enforce data retention policy. */
   async enforceRetention(): Promise<RetentionResponse> {
     return this.post<RetentionResponse>("/api/v1/admin/retention", {});
+  }
+
+  // ── Memory (cognition layer) ─────────────────────────────────────
+
+  /** Add a memory through the cognition pipeline (dedup / contradiction / importance). */
+  async memoryAdd(
+    content: string,
+    opts: MemoryScope & {
+      subject?: string;
+      importance?: number;
+      metadata?: Record<string, unknown>;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    return this.post<Record<string, unknown>>("/api/v1/memories", { content, ...opts });
+  }
+
+  /** Hybrid (BM25 + vector) search over a scope's memories. Returns ranked hits. */
+  async memorySearch(
+    query: string,
+    opts: MemoryScope & { k?: number } = {},
+  ): Promise<Record<string, unknown>[]> {
+    const { k = 5, ...scope } = opts;
+    const data = await this.post<{ results: Record<string, unknown>[] }>(
+      "/api/v1/memories/search",
+      { query, k, ...scope },
+    );
+    return data.results ?? [];
+  }
+
+  /** List active memories in a scope. */
+  async memoryList(
+    opts: MemoryScope & { limit?: number } = {},
+  ): Promise<Record<string, unknown>[]> {
+    const params = new URLSearchParams();
+    params.set("limit", String(opts.limit ?? 50));
+    for (const key of ["tenant_id", "user_id", "agent_id", "session_id"] as const) {
+      const v = opts[key];
+      if (v !== undefined) params.set(key, v);
+    }
+    const data = await this.get<{ memories: Record<string, unknown>[] }>(
+      `/api/v1/memories?${params.toString()}`,
+    );
+    return data.memories ?? [];
+  }
+
+  /** Get a memory by id. Returns null if not found (or not in your tenant). */
+  async memoryGet(id: string): Promise<Record<string, unknown> | null> {
+    const url = `${this.baseUrl}/api/v1/memories/${encodeURIComponent(id)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const resp = await fetch(url, { headers: this.headers, signal: controller.signal });
+      if (resp.status === 404) return null;
+      if (!resp.ok) {
+        throw new StrataError(
+          `HTTP ${resp.status}: ${resp.statusText}`,
+          "HTTP_ERROR",
+          resp.status,
+        );
+      }
+      return (await resp.json()) as Record<string, unknown>;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Bi-temporal history for a memory's subject (oldest first). */
+  async memoryHistory(id: string): Promise<Record<string, unknown>[]> {
+    const data = await this.get<{ history: Record<string, unknown>[] }>(
+      `/api/v1/memories/${encodeURIComponent(id)}/history`,
+    );
+    return data.history ?? [];
+  }
+
+  /** Delete a memory by id. Returns false if it didn't exist (or not in your tenant). */
+  async memoryDelete(id: string): Promise<boolean> {
+    const url = `${this.baseUrl}/api/v1/memories/${encodeURIComponent(id)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const resp = await fetch(url, {
+        method: "DELETE",
+        headers: this.headers,
+        signal: controller.signal,
+      });
+      if (resp.status === 404) return false;
+      if (!resp.ok) {
+        throw new StrataError(
+          `HTTP ${resp.status}: ${resp.statusText}`,
+          "HTTP_ERROR",
+          resp.status,
+        );
+      }
+      return true;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // ── Sessions ─────────────────────────────────────────────────────
+
+  /** Start a conversation session. */
+  async sessionStart(
+    sessionId: string,
+    agentId: string,
+    opts: { parentSessionId?: string; metadata?: Record<string, unknown> } = {},
+  ): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {
+      session_id: sessionId,
+      agent_id: agentId,
+    };
+    if (opts.parentSessionId) body.parent_session_id = opts.parentSessionId;
+    if (opts.metadata) body.metadata = opts.metadata;
+    return this.post<Record<string, unknown>>("/api/v1/sessions", body);
+  }
+
+  /** End a session, optionally attaching a summary. */
+  async sessionEnd(
+    sessionId: string,
+    summary?: string,
+  ): Promise<Record<string, unknown>> {
+    return this.post<Record<string, unknown>>(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/end`,
+      summary ? { summary } : {},
+    );
+  }
+
+  /** Recall all events recorded in a session. */
+  async sessionRecall(sessionId: string): Promise<Record<string, unknown>[]> {
+    const data = await this.get<{ events: Record<string, unknown>[] }>(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/recall`,
+    );
+    return data.events ?? [];
   }
 
   // ── Cluster ──────────────────────────────────────────────────────

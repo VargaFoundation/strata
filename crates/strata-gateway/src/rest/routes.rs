@@ -155,6 +155,9 @@ pub fn router_with_engine_and_auth(
         ));
     }
 
+    // Coordinator handle for write replication (also handed to the MCP protocol routes below).
+    let coordinator = cluster_state.as_ref().map(|cs| cs.coordinator.clone());
+
     // Apply leader-forwarding middleware if cluster mode is active
     if let Some(cluster_state) = cluster_state {
         // Expose the coordinator to write handlers so they replicate through the Raft log.
@@ -179,6 +182,12 @@ pub fn router_with_engine_and_auth(
             axum::routing::post(crate::llm_proxy::router::chat_completions),
         )
         .with_state(engine);
+
+    // MCP write tools replicate through Raft in cluster mode (MCP isn't leader-forwarded, so the
+    // handler checks leadership itself).
+    if let Some(coord) = coordinator {
+        protocol_routes = protocol_routes.layer(axum::Extension(coord));
+    }
 
     // When auth is enabled, MCP and the LLM proxy require a Bearer token too
     // (clients like Claude Code / OpenAI SDKs send `Authorization: Bearer <token>`).

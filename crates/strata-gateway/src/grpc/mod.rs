@@ -1,3 +1,4 @@
+pub mod convert;
 pub mod service;
 
 /// Generated protobuf types from proto/strata.proto.

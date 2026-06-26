@@ -15,10 +15,13 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use futures::stream::Stream;
+use strata_cluster::raft::types::{AppRequest, AppResponse};
+use strata_cluster::ClusterCoordinator;
 use strata_core::memory::cognition::{MemoryInput, MemoryScope};
 use strata_core::StrataEngine;
+use tokio::sync::RwLock;
 
 /// MCP JSON-RPC request envelope.
 #[derive(Debug, serde::Deserialize)]
@@ -80,6 +83,7 @@ pub async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible
 /// Handle MCP JSON-RPC requests (Streamable HTTP `POST /mcp`).
 pub async fn handle_mcp(
     State(engine): State<Arc<StrataEngine>>,
+    cluster: Option<Extension<Arc<RwLock<ClusterCoordinator>>>>,
     Json(req): Json<McpRequest>,
 ) -> Response {
     let id = req.id.clone();
@@ -123,7 +127,8 @@ pub async fn handle_mcp(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
-            match call_tool(&engine, tool_name, &args).await {
+            let coord = cluster.as_ref().map(|Extension(c)| c.clone());
+            match call_tool(&engine, coord, tool_name, &args).await {
                 Ok(result) => McpResponse::success(
                     id,
                     serde_json::json!({
@@ -188,8 +193,25 @@ fn scope_from_args(args: &serde_json::Value) -> MemoryScope {
     }
 }
 
+/// Replicate a write through the Raft log via the leader. MCP isn't leader-forwarded, so a write
+/// that reaches a follower surfaces a clear "retry on the leader" message.
+async fn mcp_cluster_write(
+    coord: &Arc<RwLock<ClusterCoordinator>>,
+    ar: AppRequest,
+) -> Result<AppResponse, String> {
+    coord.read().await.client_write(ar).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("ForwardToLeader") || msg.to_lowercase().contains("not leader") {
+            format!("not the cluster leader — retry on the leader node ({msg})")
+        } else {
+            msg
+        }
+    })
+}
+
 async fn call_tool(
     engine: &StrataEngine,
+    cluster: Option<Arc<RwLock<ClusterCoordinator>>>,
     name: &str,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -238,6 +260,21 @@ async fn call_tool(
                 })
                 .collect();
 
+            if let Some(coord) = &cluster {
+                let n = match mcp_cluster_write(
+                    coord,
+                    AppRequest::Ingest {
+                        events,
+                        tenant: None,
+                    },
+                )
+                .await?
+                {
+                    AppResponse::Ingested(n) => n,
+                    _ => 0,
+                };
+                return Ok(serde_json::json!({ "ingested": n }));
+            }
             engine
                 .ingest(events)
                 .await
@@ -279,6 +316,23 @@ async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'key'")?;
             let value = args.get("value").cloned().ok_or("missing 'value'")?;
+            if let Some(coord) = &cluster {
+                let v = match mcp_cluster_write(
+                    coord,
+                    AppRequest::StateSet {
+                        agent_id: agent_id.to_string(),
+                        key: key.to_string(),
+                        value,
+                        tenant: None,
+                    },
+                )
+                .await?
+                {
+                    AppResponse::StateVersion(v) => v,
+                    _ => 0,
+                };
+                return Ok(serde_json::json!({ "version": v }));
+            }
             engine
                 .state_set(agent_id, key, value)
                 .await
@@ -391,6 +445,12 @@ async fn call_tool(
                 source_event_ids: vec![],
                 metadata: serde_json::json!({}),
             };
+            if let Some(coord) = &cluster {
+                // Run cognition on the leader, replicate the materialized rows through the log.
+                let (result, rows) = engine.memory_plan(input).await.map_err(|e| e.to_string())?;
+                mcp_cluster_write(coord, AppRequest::MemoryUpsert { rows }).await?;
+                return Ok(serde_json::to_value(result).unwrap_or_default());
+            }
             engine
                 .memory_add(input)
                 .await
@@ -449,6 +509,10 @@ async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'id' parameter")?;
             let uuid = uuid::Uuid::parse_str(id).map_err(|_| "invalid 'id'".to_string())?;
+            if let Some(coord) = &cluster {
+                mcp_cluster_write(coord, AppRequest::MemoryDelete { id: uuid }).await?;
+                return Ok(serde_json::json!({ "id": id, "deleted": true }));
+            }
             engine
                 .memory_delete(uuid)
                 .await
@@ -492,7 +556,7 @@ mod tests {
             method: "initialize".into(),
             params: serde_json::json!({}),
         };
-        let resp = handle_mcp(State(engine().await), Json(req)).await;
+        let resp = handle_mcp(State(engine().await), None, Json(req)).await;
         assert!(resp.headers().get("Mcp-Session-Id").is_some());
     }
 
@@ -504,7 +568,7 @@ mod tests {
             method: "ping".into(),
             params: serde_json::json!({}),
         };
-        let resp = handle_mcp(State(engine().await), Json(req)).await;
+        let resp = handle_mcp(State(engine().await), None, Json(req)).await;
         assert!(resp.headers().get("Mcp-Session-Id").is_none());
     }
 

@@ -103,13 +103,13 @@ resp = client.chat.completions.create(
 ```
 
 What works: format translation (OpenAI ↔ Anthropic), auto-RAG, semantic response cache,
-**single-turn tool-use** (`tools`/`tool_choice` are translated; `tool_calls` come back), and
-**SSE streaming** — `stream: true` returns `text/event-stream`; for Claude, Anthropic's streaming
-events are translated into OpenAI `chat.completion.chunk`s (text deltas + finish_reason),
-terminated by `data: [DONE]` (caching is skipped while streaming).
+**multi-turn tool-use** (`tools`/`tool_choice` translated; assistant `tool_calls` and `role:"tool"`
+results are mapped to Anthropic `tool_use`/`tool_result` blocks — so agentic loops work through the
+proxy), and **SSE streaming** — `stream: true` returns `text/event-stream`; Anthropic's streaming
+events become OpenAI `chat.completion.chunk`s including **tool-call deltas** (id/name + streamed
+argument fragments) and finish_reason, terminated by `data: [DONE]` (caching skipped while streaming).
 
 Limitations (honest):
-- **Streaming tool-use deltas** aren't translated yet — text streams fine; for streamed tool calls
-  use path 1.
-- **Multi-turn tool-result passing** through the proxy is not yet supported — use path 1 for
-  agentic loops.
+- Parallel tool calls stream as separate indexed `tool_calls` entries; very exotic content-block
+  shapes may not all be mapped. For the highest-fidelity agentic loop, path 1 (direct Anthropic +
+  REST memory tools) remains the reference.

@@ -20,6 +20,11 @@ Homepage = "https://github.com/VargaFoundation/strata"
 Documentation = "https://github.com/VargaFoundation/strata/tree/main/sdk/python"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio"]
+dev = ["pytest"]
 langchain = ["langchain-core>=0.1"]
 llama-index = ["llama-index-core>=0.10"]
+
+[tool.pytest.ini_options]
+# Make `import strata` work in-repo without an editable install.
+pythonpath = ["."]
+testpaths = ["tests"]
