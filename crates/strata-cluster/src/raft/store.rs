@@ -245,26 +245,21 @@ impl MemStore {
         };
 
         match req {
-            AppRequest::Ingest { source, events } => {
-                let strata_events: Vec<strata_core::memory::episodic::Event> = events
-                    .iter()
-                    .map(|payload| strata_core::memory::episodic::Event {
-                        id: uuid::Uuid::new_v4(),
-                        source: source.clone(),
-                        event_type: payload
-                            .get("event_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string(),
-                        payload: payload.clone(),
-                        timestamp: chrono::Utc::now(),
-                        parent_id: None,
-                        trace_id: None,
-                        tags: vec![],
-                        idempotency_key: None,
-                    })
-                    .collect();
-                match engine.ingest(strata_events).await {
+            // Events are already fully formed (ids + timestamps fixed by the leader), so apply
+            // is deterministic across nodes.
+            AppRequest::Ingest { events, tenant } => {
+                let result = match tenant {
+                    Some(t) => {
+                        engine
+                            .ingest_for_tenant(
+                                events.clone(),
+                                &strata_core::config::TenantContext::new(t.clone()),
+                            )
+                            .await
+                    }
+                    None => engine.ingest(events.clone()).await,
+                };
+                match result {
                     Ok(n) => AppResponse::Ingested(n),
                     Err(e) => {
                         tracing::error!(error = %e, "raft apply: ingest failed");
@@ -276,15 +271,33 @@ impl MemStore {
                 agent_id,
                 key,
                 value,
-            } => match engine.state_set(agent_id, key, value.clone()).await {
-                Ok(v) => AppResponse::StateVersion(v),
-                Err(e) => {
-                    tracing::error!(error = %e, "raft apply: state_set failed");
-                    AppResponse::StateVersion(0)
+                tenant,
+            } => {
+                let res = match tenant {
+                    Some(t) => {
+                        engine
+                            .state_set_for_tenant(t, agent_id, key, value.clone())
+                            .await
+                    }
+                    None => engine.state_set(agent_id, key, value.clone()).await,
+                };
+                match res {
+                    Ok(v) => AppResponse::StateVersion(v),
+                    Err(e) => {
+                        tracing::error!(error = %e, "raft apply: state_set failed");
+                        AppResponse::StateVersion(0)
+                    }
                 }
-            },
-            AppRequest::StateDelete { agent_id, key } => {
-                let _ = engine.state_delete(agent_id, key).await;
+            }
+            AppRequest::StateDelete {
+                agent_id,
+                key,
+                tenant,
+            } => {
+                let _ = match tenant {
+                    Some(t) => engine.state_delete_for_tenant(t, agent_id, key).await,
+                    None => engine.state_delete(agent_id, key).await,
+                };
                 AppResponse::Deleted
             }
             AppRequest::SemanticUpsert {
@@ -305,6 +318,20 @@ impl MemStore {
             AppRequest::SemanticDelete { id } => {
                 let _ = engine.semantic_delete(*id).await;
                 AppResponse::Ok
+            }
+            // Materialized memory rows (leader already ran cognition) → deterministic replay.
+            AppRequest::MemoryUpsert { rows } => {
+                match engine.memory_apply_rows(rows.clone()).await {
+                    Ok(n) => AppResponse::MemoryCount(n),
+                    Err(e) => {
+                        tracing::error!(error = %e, "raft apply: memory upsert failed");
+                        AppResponse::MemoryCount(0)
+                    }
+                }
+            }
+            AppRequest::MemoryDelete { id } => {
+                let _ = engine.memory_delete(*id).await;
+                AppResponse::MemoryCount(1)
             }
         }
     }
@@ -585,6 +612,56 @@ mod tests {
     fn create_stores() {
         let store = MemStore::new(None);
         assert!(store.inner.lock().log.is_empty());
+    }
+
+    async fn inmem_engine() -> Arc<StrataEngine> {
+        let mut c = strata_core::CoreConfig::default();
+        c.memory.episodic.db_path = ":memory:".into();
+        c.memory.state.db_path = ":memory:".into();
+        c.memory.cognition.db_path = ":memory:".into();
+        Arc::new(StrataEngine::new(c).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn apply_ingest_is_deterministic_across_nodes() {
+        // The SAME committed log entry...
+        let ev = strata_core::memory::episodic::Event::new("src", "e", serde_json::json!({"x": 1}));
+        let req = AppRequest::Ingest {
+            events: vec![ev.clone()],
+            tenant: None,
+        };
+
+        // ...applied on two independent nodes...
+        let (n1, n2) = (inmem_engine().await, inmem_engine().await);
+        MemStore::new(Some(n1.clone())).apply_request(&req).await;
+        MemStore::new(Some(n2.clone())).apply_request(&req).await;
+
+        // ...yields identical state (same event id) — the determinism property Raft requires.
+        let r1 = n1.query_sql("SELECT id FROM episodic").await.unwrap();
+        let r2 = n2.query_sql("SELECT id FROM episodic").await.unwrap();
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r1[0]["id"], r2[0]["id"]);
+        assert_eq!(r1[0]["id"].as_str().unwrap(), ev.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn apply_memory_upsert_replicates_to_engine() {
+        let engine = inmem_engine().await;
+        let store = MemStore::new(Some(engine.clone()));
+        let mem = strata_core::memory::cognition::Memory::new(
+            strata_core::memory::cognition::MemoryScope::user("alice"),
+            "likes tea",
+        );
+        let resp = store
+            .apply_request(&AppRequest::MemoryUpsert {
+                rows: vec![strata_core::memory::cognition::MemoryRow {
+                    memory: mem,
+                    embedding: None,
+                }],
+            })
+            .await;
+        assert!(matches!(resp, AppResponse::MemoryCount(1)));
+        assert_eq!(engine.memory_count().await.unwrap(), 1);
     }
 
     #[tokio::test]

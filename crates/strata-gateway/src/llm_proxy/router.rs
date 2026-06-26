@@ -10,9 +10,15 @@
 
 use std::sync::Arc;
 
+use std::convert::Infallible;
+
 use axum::extract::State;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures::StreamExt;
 use reqwest::Client;
+use strata_core::memory::cognition::MemoryScope;
 use strata_core::StrataEngine;
 
 use super::providers::LlmProvider;
@@ -28,6 +34,15 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u64>,
     #[serde(default)]
     pub stream: Option<bool>,
+    /// Standard OpenAI `user` field — used to scope auto-RAG to that user's memories.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// OpenAI-style tool definitions, passed through (translated) to the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<serde_json::Value>,
+    /// OpenAI-style tool_choice, passed through (translated) to the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -64,8 +79,13 @@ pub struct Usage {
 /// Handle /v1/chat/completions — OpenAI-compatible endpoint with auto-RAG.
 pub async fn chat_completions(
     State(engine): State<Arc<StrataEngine>>,
+    auth: Option<axum::Extension<crate::auth::middleware::AuthContext>>,
     Json(mut req): Json<ChatCompletionRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    // Tenant for memory-RAG scoping (so the proxy can't leak one tenant's memories to another).
+    let req_tenant = auth
+        .as_ref()
+        .and_then(|axum::Extension(c)| c.tenant_id.clone());
     // 1. Extract last user message for context search
     let user_query = req
         .messages
@@ -132,7 +152,37 @@ pub async fn chat_completions(
         }
     }
 
-    // 2c. Inject combined context into the conversation
+    // 2c. User memories: hybrid (BM25 + vector) search over the user's distilled memories,
+    // scoped by the standard OpenAI `user` field. This feeds the cognition layer into RAG.
+    if let Some(user) = req.user.as_deref().filter(|u| !u.is_empty()) {
+        if !user_query.is_empty() {
+            let scope = MemoryScope {
+                tenant_id: req_tenant.clone().unwrap_or_else(|| "default".to_string()),
+                user_id: Some(user.to_string()),
+                agent_id: None,
+                session_id: None,
+            };
+            if let Ok(hits) = engine.memory_search(&user_query, &scope, 5).await {
+                let memory_lines: Vec<String> = hits
+                    .iter()
+                    .map(|h| {
+                        format!(
+                            "- {}",
+                            h.memory.content.chars().take(300).collect::<String>()
+                        )
+                    })
+                    .collect();
+                if !memory_lines.is_empty() {
+                    context_sections.push(format!(
+                        "### What we remember about this user\n{}",
+                        memory_lines.join("\n")
+                    ));
+                }
+            }
+        }
+    }
+
+    // 2d. Inject combined context into the conversation
     if !context_sections.is_empty() {
         let context_block = format!(
             "## Context from Strata\nThe following context was automatically retrieved from Strata's memory stores.\n\n{}",
@@ -152,7 +202,15 @@ pub async fn chat_completions(
         }
     }
 
-    // 3. Check semantic cache — skip LLM call if we have a cached response
+    // 3. Streaming bypasses the (non-streaming) semantic cache and relays the provider's SSE.
+    if req.stream == Some(true) {
+        static STREAM_CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+        let http = STREAM_CLIENT.get_or_init(Client::new);
+        let config = engine.config();
+        return stream_chat(http, config, &req).await;
+    }
+
+    // 3b. Check semantic cache — skip LLM call if we have a cached response
     static CACHE: std::sync::OnceLock<super::cache::SemanticCache> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(super::cache::SemanticCache::new);
 
@@ -179,7 +237,8 @@ pub async fn chat_completions(
                 }],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                 "_cached": true,
-            }));
+            }))
+            .into_response();
         }
     }
     metrics::counter!("strata_llm_cache_misses_total").increment(1);
@@ -212,7 +271,177 @@ pub async fn chat_completions(
         }
     }
 
-    response
+    response.into_response()
+}
+
+/// Dispatch a streaming chat completion to the right provider, returning an SSE response.
+async fn stream_chat(
+    http: &Client,
+    config: &strata_core::CoreConfig,
+    req: &ChatCompletionRequest,
+) -> Response {
+    match determine_provider(&req.model) {
+        // OpenAI and Ollama already speak the OpenAI SSE wire format → relay bytes verbatim.
+        LlmProvider::OpenAi => {
+            stream_passthrough(
+                http,
+                "https://api.openai.com/v1/chat/completions",
+                Some(&config.embedding.openai_api_key),
+                req,
+            )
+            .await
+        }
+        LlmProvider::Ollama => {
+            let url = format!(
+                "{}/v1/chat/completions",
+                config.embedding.ollama_url.trim_end_matches('/')
+            );
+            stream_passthrough(http, &url, None, req).await
+        }
+        // Anthropic speaks its own SSE format → translate each event to an OpenAI chunk.
+        LlmProvider::Anthropic => stream_anthropic(http, req).await,
+    }
+}
+
+/// Relay an upstream OpenAI-compatible SSE byte stream verbatim.
+async fn stream_passthrough(
+    http: &Client,
+    url: &str,
+    api_key: Option<&str>,
+    req: &ChatCompletionRequest,
+) -> Response {
+    let mut rb = http.post(url).json(req);
+    if let Some(k) = api_key {
+        rb = rb.bearer_auth(k);
+    }
+    match rb.send().await {
+        Ok(resp) => axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(axum::body::Body::from_stream(resp.bytes_stream()))
+            .unwrap_or_else(|_| error_response("failed to build stream").into_response()),
+        Err(e) => error_response(&format!("upstream stream failed: {e}")).into_response(),
+    }
+}
+
+/// Stream from Anthropic, translating its SSE events into OpenAI `chat.completion.chunk`s.
+async fn stream_anthropic(http: &Client, req: &ChatCompletionRequest) -> Response {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return error_response("ANTHROPIC_API_KEY environment variable not set").into_response();
+    }
+    let mut body = build_anthropic_body(req);
+    body["stream"] = serde_json::Value::Bool(true);
+
+    let resp = match http
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return error_response(&format!("Anthropic stream failed: {e}")).into_response(),
+    };
+
+    let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let model = req.model.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+
+    // Reader task: parse Anthropic SSE frames and forward translated OpenAI chunks.
+    tokio::spawn(async move {
+        let mut upstream = resp.bytes_stream();
+        // Buffer raw BYTES (not a String): a multi-byte UTF-8 char can be split across two network
+        // chunks; decoding each chunk independently would corrupt it. We only decode complete lines.
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = upstream.next().await {
+            let Ok(bytes) = chunk else { break };
+            buf.extend_from_slice(&bytes);
+            // Anthropic emits one JSON object per `data:` line, frames separated by newlines.
+            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
+                let line = String::from_utf8_lossy(&line_bytes);
+                let line = line.trim();
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = data.trim();
+                if data.is_empty() {
+                    continue;
+                }
+                if let Ok(ev) = serde_json::from_str::<serde_json::Value>(data) {
+                    for chunk_json in anthropic_event_to_openai_chunks(&ev, &id, &model) {
+                        if tx
+                            .send(Ok(Event::default().data(chunk_json)))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+    });
+
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Translate one Anthropic streaming event into zero or more OpenAI chunk payloads (pure).
+fn anthropic_event_to_openai_chunks(ev: &serde_json::Value, id: &str, model: &str) -> Vec<String> {
+    let typ = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let chunk = |delta: serde_json::Value, finish: serde_json::Value| {
+        serde_json::json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": model,
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+        })
+        .to_string()
+    };
+    match typ {
+        "message_start" => vec![chunk(
+            serde_json::json!({ "role": "assistant" }),
+            serde_json::Value::Null,
+        )],
+        "content_block_delta" => {
+            match ev
+                .get("delta")
+                .and_then(|d| d.get("text"))
+                .and_then(|v| v.as_str())
+            {
+                Some(text) => vec![chunk(
+                    serde_json::json!({ "content": text }),
+                    serde_json::Value::Null,
+                )],
+                None => vec![],
+            }
+        }
+        "message_delta" => {
+            let stop = ev
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("end_turn");
+            let finish = match stop {
+                "tool_use" => "tool_calls",
+                "max_tokens" => "length",
+                _ => "stop",
+            };
+            vec![chunk(serde_json::json!({}), serde_json::json!(finish))]
+        }
+        // content_block_start/stop, ping, message_stop carry no OpenAI-visible delta.
+        _ => vec![],
+    }
 }
 
 fn determine_provider(model: &str) -> LlmProvider {
@@ -261,17 +490,9 @@ async fn forward_to_ollama(
     }
 }
 
-async fn forward_to_anthropic(
-    http: &Client,
-    req: &ChatCompletionRequest,
-) -> Json<serde_json::Value> {
-    // Translate OpenAI format to Anthropic Messages API format
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        return error_response("ANTHROPIC_API_KEY environment variable not set");
-    }
-
-    // Separate system message from conversation messages
+/// Build the Anthropic Messages API request body from an OpenAI-style request (system split,
+/// message mapping, optional temperature + single-turn tool-use translation).
+fn build_anthropic_body(req: &ChatCompletionRequest) -> serde_json::Value {
     let system = req
         .messages
         .iter()
@@ -282,12 +503,7 @@ async fn forward_to_anthropic(
         .messages
         .iter()
         .filter(|m| m.role != "system")
-        .map(|m| {
-            serde_json::json!({
-                "role": m.role,
-                "content": m.content,
-            })
-        })
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
         .collect();
 
     let mut body = serde_json::json!({
@@ -302,6 +518,26 @@ async fn forward_to_anthropic(
     if let Some(temp) = req.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
+    if let Some(ref tools) = req.tools {
+        body["tools"] = openai_tools_to_anthropic(tools);
+        if let Some(ref tc) = req.tool_choice {
+            body["tool_choice"] = openai_tool_choice_to_anthropic(tc);
+        }
+    }
+    body
+}
+
+async fn forward_to_anthropic(
+    http: &Client,
+    req: &ChatCompletionRequest,
+) -> Json<serde_json::Value> {
+    // Translate OpenAI format to Anthropic Messages API format
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return error_response("ANTHROPIC_API_KEY environment variable not set");
+    }
+
+    let body = build_anthropic_body(req);
 
     match http
         .post("https://api.anthropic.com/v1/messages")
@@ -314,14 +550,21 @@ async fn forward_to_anthropic(
     {
         Ok(resp) => match resp.json::<serde_json::Value>().await {
             Ok(anthropic_resp) => {
-                // Translate Anthropic response back to OpenAI format
-                let content = anthropic_resp
-                    .get("content")
-                    .and_then(|c| c.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|block| block.get("text"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
+                // Check for API error first.
+                if let Some(err) = anthropic_resp.get("error") {
+                    return error_response(
+                        err.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Anthropic API error"),
+                    );
+                }
+
+                // Translate Anthropic content blocks → OpenAI text + tool_calls.
+                let (content_text, tool_calls) = anthropic_content_to_openai(
+                    anthropic_resp
+                        .get("content")
+                        .unwrap_or(&serde_json::Value::Null),
+                );
 
                 let usage_in = anthropic_resp
                     .get("usage")
@@ -334,13 +577,23 @@ async fn forward_to_anthropic(
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
 
-                // Check for API error
-                if let Some(err) = anthropic_resp.get("error") {
-                    return error_response(
-                        err.get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Anthropic API error"),
-                    );
+                let finish_reason = match anthropic_resp
+                    .get("stop_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("end_turn")
+                {
+                    "tool_use" => "tool_calls",
+                    "max_tokens" => "length",
+                    "end_turn" | "stop_sequence" => "stop",
+                    other => other,
+                };
+
+                let mut message = serde_json::json!({
+                    "role": "assistant",
+                    "content": content_text,
+                });
+                if !tool_calls.is_empty() {
+                    message["tool_calls"] = serde_json::Value::Array(tool_calls);
                 }
 
                 Json(serde_json::json!({
@@ -350,14 +603,8 @@ async fn forward_to_anthropic(
                     "model": req.model,
                     "choices": [{
                         "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": content,
-                        },
-                        "finish_reason": anthropic_resp
-                            .get("stop_reason")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("stop"),
+                        "message": message,
+                        "finish_reason": finish_reason,
                     }],
                     "usage": {
                         "prompt_tokens": usage_in,
@@ -370,6 +617,82 @@ async fn forward_to_anthropic(
         },
         Err(e) => error_response(&format!("Anthropic request failed: {e}")),
     }
+}
+
+/// Translate OpenAI `tools` (`[{type:function, function:{name,description,parameters}}]`)
+/// into Anthropic `tools` (`[{name,description,input_schema}]`).
+fn openai_tools_to_anthropic(tools: &serde_json::Value) -> serde_json::Value {
+    let out: Vec<serde_json::Value> = tools
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let f = t.get("function").unwrap_or(t);
+                    let name = f.get("name")?.as_str()?;
+                    let mut obj = serde_json::json!({ "name": name });
+                    if let Some(d) = f.get("description").and_then(|v| v.as_str()) {
+                        obj["description"] = serde_json::json!(d);
+                    }
+                    obj["input_schema"] = f
+                        .get("parameters")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"type": "object"}));
+                    Some(obj)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::Value::Array(out)
+}
+
+/// Translate OpenAI `tool_choice` into Anthropic's `tool_choice`.
+fn openai_tool_choice_to_anthropic(tc: &serde_json::Value) -> serde_json::Value {
+    match tc {
+        serde_json::Value::String(s) if s == "required" || s == "any" => {
+            serde_json::json!({"type": "any"})
+        }
+        serde_json::Value::Object(_) => tc
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|name| serde_json::json!({"type": "tool", "name": name}))
+            .unwrap_or_else(|| serde_json::json!({"type": "auto"})),
+        // "auto", "none", or anything else → let the model decide.
+        _ => serde_json::json!({"type": "auto"}),
+    }
+}
+
+/// Translate an Anthropic response `content` array into OpenAI `(text, tool_calls)`.
+fn anthropic_content_to_openai(content: &serde_json::Value) -> (String, Vec<serde_json::Value>) {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    if let Some(arr) = content.as_array() {
+        for block in arr {
+            match block.get("type").and_then(|v| v.as_str()) {
+                Some("text") => {
+                    if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+                Some("tool_use") => {
+                    let input = block
+                        .get("input")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    tool_calls.push(serde_json::json!({
+                        "id": block.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                            "arguments": input.to_string(),
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    (text, tool_calls)
 }
 
 fn error_response(message: &str) -> Json<serde_json::Value> {
@@ -406,6 +729,123 @@ mod tests {
     fn determine_ollama_provider() {
         assert!(matches!(determine_provider("llama3"), LlmProvider::Ollama));
         assert!(matches!(determine_provider("mistral"), LlmProvider::Ollama));
+    }
+
+    #[test]
+    fn anthropic_text_delta_becomes_content_chunk() {
+        let ev = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": { "type": "text_delta", "text": "Hello" }
+        });
+        let chunks = anthropic_event_to_openai_chunks(&ev, "id1", "claude-x");
+        assert_eq!(chunks.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(&chunks[0]).unwrap();
+        assert_eq!(parsed["object"], "chat.completion.chunk");
+        assert_eq!(parsed["choices"][0]["delta"]["content"], "Hello");
+    }
+
+    #[test]
+    fn anthropic_message_start_emits_role() {
+        let ev = serde_json::json!({ "type": "message_start", "message": {} });
+        let chunks = anthropic_event_to_openai_chunks(&ev, "id", "m");
+        let parsed: serde_json::Value = serde_json::from_str(&chunks[0]).unwrap();
+        assert_eq!(parsed["choices"][0]["delta"]["role"], "assistant");
+    }
+
+    #[test]
+    fn anthropic_message_delta_maps_finish_reason() {
+        let ev = serde_json::json!({ "type": "message_delta", "delta": { "stop_reason": "max_tokens" } });
+        let chunks = anthropic_event_to_openai_chunks(&ev, "id", "m");
+        let parsed: serde_json::Value = serde_json::from_str(&chunks[0]).unwrap();
+        assert_eq!(parsed["choices"][0]["finish_reason"], "length");
+    }
+
+    #[test]
+    fn anthropic_ping_emits_nothing() {
+        let ev = serde_json::json!({ "type": "ping" });
+        assert!(anthropic_event_to_openai_chunks(&ev, "id", "m").is_empty());
+    }
+
+    #[test]
+    fn build_anthropic_body_splits_system_and_messages() {
+        let req = ChatCompletionRequest {
+            model: "claude-x".into(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: "be nice".into(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                },
+            ],
+            temperature: Some(0.5),
+            max_tokens: Some(100),
+            stream: None,
+            user: None,
+            tools: None,
+            tool_choice: None,
+        };
+        let body = build_anthropic_body(&req);
+        assert_eq!(body["system"], "be nice");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["max_tokens"], 100);
+        assert_eq!(body["temperature"], 0.5);
+    }
+
+    #[test]
+    fn translate_openai_tools_to_anthropic_shape() {
+        let tools = serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+            }
+        }]);
+        let out = openai_tools_to_anthropic(&tools);
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "get_weather");
+        assert_eq!(arr[0]["description"], "Get weather");
+        assert!(arr[0]["input_schema"]["properties"]["city"].is_object());
+    }
+
+    #[test]
+    fn translate_tool_choice_variants() {
+        assert_eq!(
+            openai_tool_choice_to_anthropic(&serde_json::json!("auto")),
+            serde_json::json!({"type": "auto"})
+        );
+        assert_eq!(
+            openai_tool_choice_to_anthropic(&serde_json::json!("required")),
+            serde_json::json!({"type": "any"})
+        );
+        assert_eq!(
+            openai_tool_choice_to_anthropic(
+                &serde_json::json!({"type": "function", "function": {"name": "foo"}})
+            ),
+            serde_json::json!({"type": "tool", "name": "foo"})
+        );
+    }
+
+    #[test]
+    fn translate_anthropic_tool_use_response() {
+        let content = serde_json::json!([
+            {"type": "text", "text": "Let me check."},
+            {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}}
+        ]);
+        let (text, calls) = anthropic_content_to_openai(&content);
+        assert_eq!(text, "Let me check.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "toolu_1");
+        assert_eq!(calls[0]["function"]["name"], "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["city"], "Paris");
     }
 
     #[test]

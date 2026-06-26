@@ -3,28 +3,41 @@
 use std::io::Cursor;
 
 use serde::{Deserialize, Serialize};
+use strata_core::memory::episodic::Event;
 
 /// Node identifier in the Raft cluster.
 pub type NodeId = u64;
 
-/// Application-level request data sent through Raft consensus.
+/// Application-level request data sent through Raft consensus (MessagePack on the wire).
 ///
-/// Serialized as MessagePack for compact over-the-wire representation.
+/// IMPORTANT — apply MUST be deterministic: applying the same committed entry on every node
+/// must produce identical state. So requests carry **fully materialized** values (ids,
+/// timestamps, and any non-deterministic results computed once on the leader at propose time),
+/// never "commands" that would re-run non-deterministic logic (uuid/now/LLM) at apply time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AppRequest {
-    /// Ingest events into episodic memory.
+    /// Ingest fully-formed events (ids + timestamps assigned on the leader), so every node
+    /// applies an identical, deterministic result. `tenant` scopes the ingest (None = default).
     Ingest {
-        source: String,
-        events: Vec<serde_json::Value>,
+        events: Vec<Event>,
+        #[serde(default)]
+        tenant: Option<String>,
     },
-    /// Set agent state.
+    /// Set agent state (tenant-scoped; version is computed deterministically from prior state).
     StateSet {
         agent_id: String,
         key: String,
         value: serde_json::Value,
+        #[serde(default)]
+        tenant: Option<String>,
     },
-    /// Delete agent state.
-    StateDelete { agent_id: String, key: String },
+    /// Delete agent state (tenant-scoped).
+    StateDelete {
+        agent_id: String,
+        key: String,
+        #[serde(default)]
+        tenant: Option<String>,
+    },
     /// Upsert a semantic entry (pre-embedded).
     SemanticUpsert {
         id: uuid::Uuid,
@@ -34,6 +47,15 @@ pub enum AppRequest {
     },
     /// Delete a semantic entry.
     SemanticDelete { id: uuid::Uuid },
+    /// Replace materialized memory rows (the leader runs the non-deterministic cognition —
+    /// dedup / contradiction / LLM extraction — and proposes the resulting rows + embeddings so
+    /// every node applies an identical result). Supersession is captured as upserts of the
+    /// affected rows.
+    MemoryUpsert {
+        rows: Vec<strata_core::memory::cognition::MemoryRow>,
+    },
+    /// Delete a memory by id (deterministic).
+    MemoryDelete { id: uuid::Uuid },
 }
 
 /// Application-level response from applying a Raft log entry.
@@ -47,6 +69,8 @@ pub enum AppResponse {
     Deleted,
     /// Semantic entry upserted/deleted.
     Ok,
+    /// Number of memories affected by a memory operation.
+    MemoryCount(u64),
 }
 
 /// Cluster node info for openraft membership.
@@ -92,15 +116,43 @@ mod tests {
     #[test]
     fn app_request_roundtrip() {
         let req = AppRequest::Ingest {
-            source: "test".into(),
-            events: vec![serde_json::json!({"key": "val"})],
+            events: vec![Event::new(
+                "test",
+                "click",
+                serde_json::json!({"key": "val"}),
+            )],
+            tenant: None,
         };
         let bytes = rmp_serde::to_vec(&req).unwrap();
         let decoded: AppRequest = rmp_serde::from_slice(&bytes).unwrap();
         match decoded {
-            AppRequest::Ingest { source, events } => {
-                assert_eq!(source, "test");
+            AppRequest::Ingest { events, .. } => {
                 assert_eq!(events.len(), 1);
+                assert_eq!(events[0].source, "test");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn memory_request_roundtrip() {
+        let mem = strata_core::memory::cognition::Memory::new(
+            strata_core::memory::cognition::MemoryScope::user("alice"),
+            "likes tea",
+        );
+        let req = AppRequest::MemoryUpsert {
+            rows: vec![strata_core::memory::cognition::MemoryRow {
+                memory: mem,
+                embedding: Some(vec![0.1, 0.2]),
+            }],
+        };
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        let decoded: AppRequest = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            AppRequest::MemoryUpsert { rows } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].memory.content, "likes tea");
+                assert_eq!(rows[0].embedding.as_deref(), Some(&[0.1, 0.2][..]));
             }
             _ => panic!("wrong variant"),
         }

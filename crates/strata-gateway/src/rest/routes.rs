@@ -109,6 +109,26 @@ pub fn router_with_engine_and_auth(
             "/state/{agent_id}/watch",
             axum::routing::get(handlers::state_watch),
         )
+        .route(
+            "/memories",
+            axum::routing::post(handlers::memory_add).get(handlers::memory_list),
+        )
+        .route(
+            "/memories/search",
+            axum::routing::post(handlers::memory_search),
+        )
+        .route(
+            "/memories/{id}",
+            axum::routing::get(handlers::memory_get).delete(handlers::memory_delete),
+        )
+        .route(
+            "/memories/{id}/history",
+            axum::routing::get(handlers::memory_history),
+        )
+        .route(
+            "/admin/memory/decay",
+            axum::routing::post(handlers::memory_decay),
+        )
         .route("/sessions", axum::routing::post(handlers::session_start))
         .route(
             "/sessions/{session_id}/end",
@@ -119,6 +139,9 @@ pub fn router_with_engine_and_auth(
             axum::routing::get(handlers::session_recall),
         )
         .with_state(engine.clone());
+
+    // Keep a handle so MCP + LLM-proxy routes can be authenticated too.
+    let protocol_auth = auth_state.clone();
 
     // Apply auth middleware if configured
     if let Some(state) = auth_state {
@@ -134,6 +157,8 @@ pub fn router_with_engine_and_auth(
 
     // Apply leader-forwarding middleware if cluster mode is active
     if let Some(cluster_state) = cluster_state {
+        // Expose the coordinator to write handlers so they replicate through the Raft log.
+        api_routes = api_routes.layer(axum::Extension(cluster_state.coordinator.clone()));
         api_routes = api_routes.route_layer(axum::middleware::from_fn_with_state(
             cluster_state,
             crate::cluster::leader_forward::require_leader_for_writes,
@@ -143,16 +168,26 @@ pub fn router_with_engine_and_auth(
     app = app.nest("/api/v1", api_routes);
 
     // MCP & LLM proxy (use engine state, resolved separately)
-    let protocol_routes = Router::new()
+    let mut protocol_routes = Router::new()
         .route(
             "/mcp",
-            axum::routing::post(crate::mcp::transport::handle_mcp),
+            axum::routing::post(crate::mcp::transport::handle_mcp)
+                .get(crate::mcp::transport::handle_mcp_sse),
         )
         .route(
             "/v1/chat/completions",
             axum::routing::post(crate::llm_proxy::router::chat_completions),
         )
         .with_state(engine);
+
+    // When auth is enabled, MCP and the LLM proxy require a Bearer token too
+    // (clients like Claude Code / OpenAI SDKs send `Authorization: Bearer <token>`).
+    if let Some(state) = protocol_auth {
+        protocol_routes = protocol_routes.route_layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::auth::middleware::require_auth,
+        ));
+    }
 
     app = app.merge(protocol_routes);
 

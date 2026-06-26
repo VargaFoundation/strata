@@ -84,6 +84,62 @@ pub struct EmbedAndSearchRequest {
     pub min_score: Option<f32>,
 }
 
+// ── Memory cognition DTOs ───────────────────────────────────────────
+
+/// Add a memory through the cognition pipeline.
+#[derive(Debug, Deserialize)]
+pub struct MemoryAddRequest {
+    /// The atomic fact/statement to remember.
+    pub content: String,
+    /// Optional stable key the memory is about (enables contradiction resolution).
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// Optional importance override (0.0–1.0).
+    #[serde(default)]
+    pub importance: Option<f32>,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Search memories within a scope.
+#[derive(Debug, Deserialize)]
+pub struct MemorySearchRequest {
+    pub query: String,
+    #[serde(default = "default_k")]
+    pub k: usize,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// Query parameters for listing memories in a scope (GET /api/v1/memories).
+#[derive(Debug, Deserialize)]
+pub struct MemoryListParams {
+    #[serde(default = "default_memory_limit")]
+    pub limit: usize,
+    pub tenant_id: Option<String>,
+    pub user_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+fn default_memory_limit() -> usize {
+    50
+}
+
 /// Query parameters for the audit log endpoint.
 #[derive(Debug, Deserialize)]
 pub struct AuditQueryParams {

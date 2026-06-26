@@ -95,6 +95,48 @@ pub struct MemoryConfig {
     pub episodic: EpisodicConfig,
     pub semantic: SemanticConfig,
     pub state: StateConfig,
+    pub cognition: CognitionConfig,
+}
+
+/// Configuration for the memory-cognition layer (dedup, contradiction resolution, importance).
+///
+/// The deterministic core (subject-based contradiction resolution, exact/semantic dedup,
+/// importance) is always on. LLM-based fact extraction is opt-in via `extraction = "llm"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CognitionConfig {
+    /// DuckDB path for the bi-temporal `memories` table.
+    pub db_path: String,
+    /// Cosine similarity at/above which a new memory is merged into an existing one
+    /// (semantic dedup / consolidation) instead of inserted.
+    pub dedup_threshold: f32,
+    /// Fact-extraction strategy on `remember`: `none` (store as-is) or `llm` (opt-in).
+    pub extraction: String,
+    /// Completion provider for LLM extraction when `extraction = "llm"`: `ollama`, `openai`, or `none`.
+    pub extraction_provider: String,
+    /// Model used for LLM extraction (reuses embedding `ollama_url` / `openai_api_key`).
+    pub extraction_model: String,
+    /// Default importance assigned to a new memory (0.0..=1.0).
+    pub default_importance: f32,
+    /// Half-life (days) for time-decay of importance during `enforce_decay`.
+    pub decay_half_life_days: f32,
+    /// Memories whose time-decayed importance falls below this are forgotten (expired).
+    pub forget_threshold: f32,
+}
+
+impl Default for CognitionConfig {
+    fn default() -> Self {
+        Self {
+            db_path: "./data/memories.duckdb".into(),
+            dedup_threshold: 0.92,
+            extraction: "none".into(),
+            extraction_provider: "none".into(),
+            extraction_model: "llama3.2".into(),
+            default_importance: 0.5,
+            decay_half_life_days: 30.0,
+            forget_threshold: 0.05,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

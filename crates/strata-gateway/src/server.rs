@@ -34,6 +34,9 @@ pub struct GatewayConfig {
     /// OIDC configuration for federated SSO authentication.
     #[serde(default)]
     pub oidc: crate::auth::oidc::OidcConfig,
+    /// Durable audit-log path (file-backed DuckDB). Empty/`:memory:` = in-memory (non-durable).
+    #[serde(default)]
+    pub audit_db_path: String,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -51,6 +54,7 @@ impl std::fmt::Debug for GatewayConfig {
             .field("cors_origins", &self.cors_origins)
             .field("rate_limit_per_key", &self.rate_limit_per_key)
             .field("oidc_enabled", &self.oidc.enabled)
+            .field("audit_db_path", &self.audit_db_path)
             .finish()
     }
 }
@@ -70,6 +74,7 @@ impl Default for GatewayConfig {
             cors_origins: vec![],
             rate_limit_per_key: 0,
             oidc: crate::auth::oidc::OidcConfig::default(),
+            audit_db_path: "./data/audit.duckdb".into(),
         }
     }
 }
@@ -111,6 +116,8 @@ impl GatewayServer {
                     config.rate_limit_per_key,
                 )
             };
+            // Make the audit log durable (file-backed) for compliance.
+            let state = state.with_audit_path(&config.audit_db_path);
             if state.is_empty() {
                 tracing::warn!(
                     "auth_enabled=true but no api_keys or jwt_secret configured — auth disabled"
@@ -136,6 +143,9 @@ impl GatewayServer {
                 .map(|coord| crate::cluster::leader_forward::ClusterState {
                     coordinator: coord.clone(),
                 });
+
+        // gRPC shares the same auth state (tenant scoping + token validation).
+        let grpc_auth = auth_state.clone();
 
         let mut app = crate::rest::router_with_engine_and_auth(
             engine.clone(),
@@ -207,7 +217,13 @@ impl GatewayServer {
 
         // Start gRPC server
         let grpc_addr = config.grpc_listen.clone();
-        let grpc_handle = match crate::grpc::service::start_grpc(&grpc_addr, engine.clone()).await {
+        let grpc_handle = match crate::grpc::service::start_grpc(
+            &grpc_addr,
+            engine.clone(),
+            grpc_auth,
+        )
+        .await
+        {
             Ok(handle) => Some(handle),
             Err(e) => {
                 tracing::warn!(%grpc_addr, error = %e, "failed to start gRPC server (non-fatal)");

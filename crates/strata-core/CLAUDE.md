@@ -13,7 +13,9 @@ or clustering (Raft).
 |-----------|--------|---------|
 | `EpisodicStore` | **Working** | DuckDB file-backed or in-memory, connection pool (4 readers via try_clone), batch transactions, typed schema (TIMESTAMPTZ, JSON), SQL injection protection (sqlparser SELECT whitelist), configurable max_rows pagination, session support (sessions table), tenant_id column for multi-tenancy |
 | `SemanticStore` | **Working** | USearch HNSW, upsert/search/delete, cosine similarity, persistent save/load to disk, memory-efficient EntryMetadata (no vector duplication in DashMap), `load_from()` for Raft snapshot restore |
-| `StateStore` | **Working** | rusqlite + DashMap hot cache, full CRUD + CAS + list_keys, race-safe cache population, WAL mode + NORMAL sync for crash safety, TTL expiry |
+| `StateStore` | **Working** | rusqlite + DashMap hot cache, full CRUD + CAS + list_keys, race-safe cache population, WAL mode + NORMAL sync for crash safety, TTL expiry, backup/restore (VACUUM INTO / attach-copy) |
+| `MemoryStore` (cognition) | **Working** | Bi-temporal `memories` (DuckDB): `valid_from`/`valid_to`, deterministic contradiction resolution (supersede), dedup/consolidation, importance, decay-based forgetting, `as_of`/history, scoped by tenant/user/agent/session. Hybrid retrieval = BM25 (pure Rust) fused with vector via RRF. Separate USearch index (rebuildable). Mem0-compatible engine API |
+| `CompletionProvider` (llm) | **Working** | Trait + Ollama/OpenAI impls for **opt-in** LLM fact extraction (`memory_remember`); deterministic single-memory fallback otherwise |
 | `LocalStorage` | **Working** | tokio::fs, put/get/delete/list with tempfile tests |
 | `IngestPipeline` | **Working** | Validates -> appends to EpisodicStore -> auto-embed (batched by config.batch_size) -> upsert to SemanticStore. Embedding failures are non-fatal |
 | `StrataEngine` | **Working** | Wires all 3 memories + ingest + embedding provider (auto-instantiated from config), async query_sql with spawn_blocking + timeout, session lifecycle, tenant-aware ingest, per-source retention policies |
@@ -58,6 +60,17 @@ or clustering (Raft).
 - `session_list(agent_id, limit)` -> list sessions for an agent
 - `session_recall(session_id)` -> recall all events in a session
 
+**Memory Cognition (the differentiating layer):**
+- `memory_add(input)` -> add a memory: dedup / contradiction-supersede / importance (deterministic, no LLM needed)
+- `memory_remember(text, scope)` -> distill atomic facts (opt-in LLM extraction; else stored as one memory)
+- `memory_search(query, scope, k)` -> hybrid BM25 + vector retrieval (RRF), scoped by tenant/user/agent/session
+- `memory_get/all/history/as_of/delete` -> bi-temporal access ("what was true at time T")
+- `memory_enforce_decay()` -> forget low-value memories by time-decayed importance
+- `backup(dir)` / `restore_from_backup(dir)` -> all four stores (episodic + memories + state + vectors)
+
+**Tenant isolation:** `*_for_tenant` variants of query/state/search/schema/sessions enforce row-level
+isolation; `query_sql_for_tenant` rewrites `episodic` references to a per-tenant view via the SQL AST.
+
 **Retention:**
 - `enforce_retention()` -> delete old events (per-source policies + default)
 - `retention_policies()` -> list per-source policies
@@ -70,7 +83,7 @@ or clustering (Raft).
 
 ## Testing
 
-- Unit tests: `cargo test -p strata-core` (112 tests)
+- Unit tests: `cargo test -p strata-core` (138 tests, incl. cognition, hybrid search, tenant isolation, backup/restore)
 - LocalStorage tests use `tempfile::TempDir` for isolation
 - EpisodicStore tests use both in-memory and file-backed DuckDB
 - SemanticStore tests use in-memory USearch with dimension=4 for speed, plus save/load persistence test

@@ -1,7 +1,7 @@
 <h1 align="center">Strata</h1>
 <p align="center">
-  <strong>Persistent memory for AI agents. One binary. Zero dependencies.</strong><br>
-  Episodic, semantic, and state — in a single Rust binary.
+  <strong>The open-source memory engine for AI agents — self-hostable and benchmarkable.</strong><br>
+  Bi-temporal memories with dedup, contradiction resolution, and hybrid search — in a single Rust binary.
 </p>
 
 <p align="center">
@@ -11,10 +11,35 @@
 
 ---
 
-AI agents lose their memory every time you restart them. Strata fixes that.
+AI agents lose their memory every time you restart them. Strata fixes that — and
+unlike a bare vector DB, it does the *intelligent* part of memory for you.
 
-It's an open-source **context lake** — a unified data layer that combines three
-types of memory in a single Rust binary:
+Most "agent memory" intelligence (Mem0, Zep) lives behind a cloud API or a paywalled
+graph. Strata is the **genuinely open, self-hostable, benchmarkable** alternative:
+the smarts run in your own single Rust binary, on your own infrastructure.
+
+### Memory intelligence (the part that's hard)
+
+- **First-class, bi-temporal memories** — every fact has `valid_from`/`valid_to`, so you
+  can ask *"what did we believe at time T?"* in plain SQL.
+- **Contradiction resolution** — a newer fact about the same subject **supersedes** the old
+  one (the old one is kept as history), deterministically, no LLM required.
+- **Deduplication & consolidation** — near-duplicate facts merge instead of piling up.
+- **Hybrid retrieval** — deterministic BM25 fused with vector search via Reciprocal Rank
+  Fusion. Works (and ranks well) even with no embedding provider configured.
+- **Decay-based forgetting** — low-value memories fade by time-decayed importance; nothing
+  is silently hard-deleted.
+- **Opt-in LLM extraction** — `remember("…raw conversation…")` distills atomic facts when a
+  completion provider is configured; otherwise stores the text deterministically.
+- **Mem0-compatible API + MCP-native** — drop-in `memories` REST endpoints and memory tools
+  for Claude / Cursor / any MCP client.
+- **Benchmarkable** — `cargo run -p strata-core --example locomo_eval` runs a LoCoMo-style eval
+  reporting **recall@{1,3,5}, MRR, and ingest/query p50/p95**. Runs offline (pure-Rust BM25) out
+  of the box; point it at a real export with a provider for hybrid numbers:
+  `LOCOMO_PATH=your-locomo.json STRATA_EMBEDDING__PROVIDER=ollama cargo run -p strata-core --example locomo_eval`.
+  We don't publish leaderboard numbers we can't reproduce — run it on your data and see.
+
+### Built on a unified three-store substrate
 
 | Memory | What it stores | Backend | Query |
 |--------|---------------|---------|-------|
@@ -22,7 +47,7 @@ types of memory in a single Rust binary:
 | **Semantic** | Embeddings, knowledge | USearch (HNSW vectors) | k-NN similarity |
 | **State** | Live agent state, decisions | SQLite + DashMap (KV with TTL) | Get/Set/CAS |
 
-PostgreSQL wire-compatible. MCP-native. Self-hosted.
+PostgreSQL wire-compatible. MCP-native. Self-hosted. Raft-clustered for HA.
 
 ## Quick Start (3 minutes)
 
@@ -72,7 +97,31 @@ curl -X PUT localhost:8432/api/v1/state/support-bot/context \
 curl localhost:8432/api/v1/state/support-bot/context
 ```
 
-All three memory types, running and queryable in under 3 minutes.
+**6. Remember & recall facts** (the cognition layer)
+```bash
+# Remember a fact about a user (deduped; contradictions supersede the old fact)
+curl -X POST localhost:8432/api/v1/memories \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "cust_42", "subject": "plan", "content": "On the Pro plan"}'
+
+# Later, a contradicting fact — the old one is superseded, not overwritten
+curl -X POST localhost:8432/api/v1/memories \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "cust_42", "subject": "plan", "content": "Upgraded to Enterprise"}'
+
+# Hybrid search over that user's memories
+curl -X POST localhost:8432/api/v1/memories/search \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "cust_42", "query": "what plan are they on?"}'
+
+# Full bi-temporal history of a memory (every superseded version)
+curl localhost:8432/api/v1/memories/<id>/history
+```
+
+All three memory types plus the cognition layer, running and queryable in under 3 minutes.
+
+→ **Connecting Claude?** See [docs/connect-claude.md](docs/connect-claude.md) — REST + tool-use
+(recommended), MCP (Claude Code native / Claude Desktop via `mcp-remote`), or the auto-RAG proxy.
 
 ## Why Strata?
 

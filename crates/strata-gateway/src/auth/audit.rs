@@ -26,24 +26,41 @@ pub struct AuditLog {
     conn: Arc<Mutex<Connection>>,
 }
 
+const AUDIT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS audit_log (
+    timestamp  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    identity   VARCHAR NOT NULL,
+    method     VARCHAR NOT NULL,
+    path       VARCHAR NOT NULL,
+    status     INTEGER NOT NULL,
+    duration_ms DOUBLE NOT NULL
+);";
+
 impl AuditLog {
-    /// Create a new in-memory audit log.
+    /// Create a new in-memory audit log (lost on restart — use [`Self::open`] for durability).
     pub fn new() -> Result<Self, crate::Error> {
         let conn = Connection::open_in_memory()
             .map_err(|e| crate::Error::Auth(format!("audit log init: {e}")))?;
+        conn.execute_batch(AUDIT_SCHEMA)
+            .map_err(|e| crate::Error::Auth(format!("audit table creation: {e}")))?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
 
-        conn.execute_batch(
-            "CREATE TABLE audit_log (
-                timestamp  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                identity   VARCHAR NOT NULL,
-                method     VARCHAR NOT NULL,
-                path       VARCHAR NOT NULL,
-                status     INTEGER NOT NULL,
-                duration_ms DOUBLE NOT NULL
-            );",
-        )
-        .map_err(|e| crate::Error::Auth(format!("audit table creation: {e}")))?;
-
+    /// Open a **durable** file-backed audit log (survives restart — required for compliance).
+    /// `:memory:` or empty falls back to in-memory.
+    pub fn open(path: &std::path::Path) -> Result<Self, crate::Error> {
+        if path.as_os_str().is_empty() || path.as_os_str() == ":memory:" {
+            return Self::new();
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let conn = Connection::open(path)
+            .map_err(|e| crate::Error::Auth(format!("audit log open: {e}")))?;
+        conn.execute_batch(AUDIT_SCHEMA)
+            .map_err(|e| crate::Error::Auth(format!("audit table creation: {e}")))?;
+        tracing::info!(path = %path.display(), "audit log: durable (file-backed)");
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -164,5 +181,20 @@ mod tests {
         let log = AuditLog::new().unwrap();
         let entries = log.query_since("2000-01-01").unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn audit_log_persists_to_disk() {
+        let path =
+            std::env::temp_dir().join(format!("strata-audit-test-{}.duckdb", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let log = AuditLog::open(&path).unwrap();
+            log.record("u", "GET", "/x", 200, Duration::from_millis(1));
+        }
+        // Reopen — the entry survived the restart.
+        let log = AuditLog::open(&path).unwrap();
+        assert_eq!(log.query_since("2000-01-01").unwrap().len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 }

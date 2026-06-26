@@ -139,6 +139,70 @@ impl AuthState {
     pub fn audit_log(&self) -> Option<&AuditLog> {
         self.audit_log.as_ref()
     }
+
+    /// Validate a bearer token through the full chain (OIDC → JWT → API key).
+    /// Returns the resolved [`AuthContext`], or `None` if the token is invalid.
+    /// Shared by the REST middleware and the gRPC interceptor.
+    pub async fn authenticate(&self, token: &str) -> Option<AuthContext> {
+        // 1. OIDC (RS256 with JWKS)
+        if let Some(ref oidc) = self.oidc {
+            if let Ok(claims) = oidc.validate_token(token).await {
+                let role = Role::from_str_loose(&claims.role).unwrap_or(Role::Reader);
+                let agent_id = claims.agent_id.clone().or(if claims.role == "agent" {
+                    Some(claims.sub.clone())
+                } else {
+                    None
+                });
+                return Some(AuthContext {
+                    identity: claims.sub,
+                    role,
+                    agent_id,
+                    tenant_id: claims.tenant_id,
+                });
+            }
+        }
+        // 2. JWT (HS256 shared secret)
+        if let Some(ref secret) = self.jwt_secret {
+            if let Ok(claims) = jwt::validate_token(token, secret) {
+                let role = Role::from_str_loose(&claims.role).unwrap_or(Role::Reader);
+                let agent_id = claims.agent_id.clone().or(if claims.role == "agent" {
+                    Some(claims.sub.clone())
+                } else {
+                    None
+                });
+                return Some(AuthContext {
+                    identity: claims.sub,
+                    role,
+                    agent_id,
+                    tenant_id: claims.tenant_id,
+                });
+            }
+        }
+        // 3. API key (no tenant scoping)
+        if self.validate_api_key(token) {
+            return Some(AuthContext {
+                identity: "api-key-user".into(),
+                role: Role::Writer,
+                agent_id: None,
+                tenant_id: None,
+            });
+        }
+        None
+    }
+
+    /// Make the audit log durable (file-backed) at `path`. Empty or `:memory:` keeps it
+    /// in-memory. Enterprise/compliance deployments should set a real path.
+    pub fn with_audit_path(mut self, path: &str) -> Self {
+        if !path.is_empty() && path != ":memory:" {
+            match AuditLog::open(std::path::Path::new(path)) {
+                Ok(log) => self.audit_log = Some(log),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to open durable audit log — keeping in-memory")
+                }
+            }
+        }
+        self
+    }
 }
 
 // ── Backwards-compatible ApiKeyStore alias ────────────────────────────
@@ -241,53 +305,10 @@ pub async fn require_auth(
         _ => return Err(StatusCode::UNAUTHORIZED.into_response()),
     };
 
-    // Auth chain: try OIDC (RS256) → JWT (HS256) → API key
-    let auth_ctx = 'auth: {
-        // 1. Try OIDC (RS256 with JWKS)
-        if let Some(ref oidc) = state.oidc {
-            if let Ok(claims) = oidc.validate_token(token).await {
-                let role = Role::from_str_loose(&claims.role).unwrap_or(Role::Reader);
-                break 'auth AuthContext {
-                    identity: claims.sub.clone(),
-                    role,
-                    agent_id: claims.agent_id.or(if claims.role == "agent" {
-                        Some(claims.sub.clone())
-                    } else {
-                        None
-                    }),
-                    tenant_id: claims.tenant_id,
-                };
-            }
-        }
-
-        // 2. Try JWT (HS256 with shared secret)
-        if let Some(ref secret) = state.jwt_secret {
-            if let Ok(claims) = jwt::validate_token(token, secret) {
-                let role = Role::from_str_loose(&claims.role).unwrap_or(Role::Reader);
-                break 'auth AuthContext {
-                    identity: claims.sub.clone(),
-                    role,
-                    agent_id: claims.agent_id.or(if claims.role == "agent" {
-                        Some(claims.sub.clone())
-                    } else {
-                        None
-                    }),
-                    tenant_id: claims.tenant_id,
-                };
-            }
-        }
-
-        // 3. Try API key (no tenant scoping)
-        if state.validate_api_key(token) {
-            break 'auth AuthContext {
-                identity: "api-key-user".into(),
-                role: Role::Writer,
-                agent_id: None,
-                tenant_id: None,
-            };
-        }
-
-        return Err(StatusCode::UNAUTHORIZED.into_response());
+    // Auth chain: OIDC (RS256) → JWT (HS256) → API key (shared with the gRPC interceptor).
+    let auth_ctx = match state.authenticate(token).await {
+        Some(ctx) => ctx,
+        None => return Err(StatusCode::UNAUTHORIZED.into_response()),
     };
 
     // ── RBAC: check method permission ────────────────────────────

@@ -9,7 +9,11 @@ use tower::ServiceExt;
 
 async fn engine_router() -> axum::Router {
     let mut config = CoreConfig::default();
+    // All stores in-memory so tests are isolated and don't persist state (e.g. the sessions
+    // table) into a shared ./data file across runs.
+    config.memory.episodic.db_path = ":memory:".into();
     config.memory.state.db_path = ":memory:".into();
+    config.memory.cognition.db_path = ":memory:".into();
     let engine = Arc::new(StrataEngine::new(config).await.unwrap());
     strata_gateway::rest::router_with_engine(engine)
 }
@@ -314,7 +318,7 @@ async fn schema_sources_after_ingest() {
 // ── MCP tools ───────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn mcp_tools_list_has_nine_tools() {
+async fn mcp_tools_list_has_all_tools() {
     let app = engine_router().await;
 
     let resp = app
@@ -336,7 +340,15 @@ async fn mcp_tools_list_has_nine_tools() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 9, "expected 9 tools (6 core + 3 session)");
+    assert_eq!(
+        tools.len(),
+        15,
+        "expected 15 tools (6 core + 3 session + 6 memory)"
+    );
+
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.contains(&"add_memory"));
+    assert!(names.contains(&"search_memory"));
 
     for tool in tools {
         assert!(
@@ -345,6 +357,123 @@ async fn mcp_tools_list_has_nine_tools() {
             tool["name"]
         );
     }
+}
+
+/// Fully in-memory router so cognition tests are isolated from `./data`.
+async fn memory_router() -> axum::Router {
+    let mut config = CoreConfig::default();
+    config.memory.episodic.db_path = ":memory:".into();
+    config.memory.state.db_path = ":memory:".into();
+    config.memory.cognition.db_path = ":memory:".into();
+    let engine = Arc::new(StrataEngine::new(config).await.unwrap());
+    strata_gateway::rest::router_with_engine(engine)
+}
+
+async fn post_json(app: &axum::Router, uri: &str, body: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "POST {uri}");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn memory_lifecycle_via_rest() {
+    let app = memory_router().await;
+
+    // Add an initial memory with a subject (enables contradiction resolution).
+    let added = post_json(
+        &app,
+        "/api/v1/memories",
+        r#"{"content":"favorite color is blue","subject":"favorite_color","user_id":"alice"}"#,
+    )
+    .await;
+    assert_eq!(added["outcome"], "inserted");
+    let first_id = added["memory"]["id"].as_str().unwrap().to_string();
+
+    // A contradicting fact supersedes the old one.
+    let superseded = post_json(
+        &app,
+        "/api/v1/memories",
+        r#"{"content":"favorite color is green","subject":"favorite_color","user_id":"alice"}"#,
+    )
+    .await;
+    assert_eq!(superseded["outcome"], "superseded");
+
+    // Only the latest is active.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/memories?user_id=alice")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list["count"], 1);
+    assert_eq!(list["memories"][0]["content"], "favorite color is green");
+
+    // History of the original memory shows both versions.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/memories/{first_id}/history"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let history: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(history["count"], 2);
+
+    // Scoped search (recency fallback, no embedding provider) returns the active memory.
+    let search = post_json(
+        &app,
+        "/api/v1/memories/search",
+        r#"{"query":"colour","user_id":"alice"}"#,
+    )
+    .await;
+    assert_eq!(search["count"], 1);
+    assert_eq!(
+        search["results"][0]["memory"]["content"],
+        "favorite color is green"
+    );
+}
+
+#[tokio::test]
+async fn mcp_add_memory_tool_dispatch() {
+    let app = memory_router().await;
+    let result = post_json(
+        &app,
+        "/mcp",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add_memory","arguments":{"content":"alice likes espresso","user_id":"alice"}}}"#,
+    )
+    .await;
+    let text = result["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("inserted"), "unexpected tool result: {text}");
 }
 
 #[tokio::test]

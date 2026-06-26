@@ -33,7 +33,7 @@ axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "timeout"] }
 hyper = { version = "1" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # gRPC
 tonic = { version = "0.12" }
@@ -90,8 +90,8 @@ parking_lot = { version = "0.12" }
 dashmap = { version = "6" }
 rand = { version = "0.9" }
 
-# SQL parsing
-sqlparser = { version = "0.53" }
+# SQL parsing (visitor feature: AST rewriting for tenant scoping)
+sqlparser = { version = "0.53", features = ["visitor"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

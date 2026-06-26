@@ -170,6 +170,86 @@ pub fn list_tools() -> Vec<McpTool> {
                 "required": ["session_id"]
             }),
         },
+        McpTool {
+            name: "add_memory".into(),
+            description: "Remember a fact about a user/agent. Deduplicates similar memories and, when a 'subject' is given, supersedes any older conflicting memory (bi-temporal). Scope it with user_id/agent_id/session_id.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "The fact/statement to remember"},
+                    "subject": {"type": "string", "description": "Optional stable key the memory is about (e.g. 'favorite_color') — enables contradiction resolution"},
+                    "user_id": {"type": "string", "description": "Scope the memory to a user"},
+                    "agent_id": {"type": "string", "description": "Scope the memory to an agent"},
+                    "session_id": {"type": "string", "description": "Scope the memory to a session"},
+                    "importance": {"type": "number", "description": "Optional importance 0.0–1.0"}
+                },
+                "required": ["content"]
+            }),
+        },
+        McpTool {
+            name: "search_memory".into(),
+            description: "Search a user's/agent's memories by meaning (semantic when embeddings are configured, otherwise by importance/recency).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to recall"},
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "k": {"type": "integer", "description": "Number of results (default 5)"}
+                },
+                "required": ["query"]
+            }),
+        },
+        McpTool {
+            name: "get_memories".into(),
+            description: "List the active memories in a scope (user/agent/session).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "limit": {"type": "integer", "description": "Max memories to return (default 50)"}
+                }
+            }),
+        },
+        McpTool {
+            name: "memory_history".into(),
+            description: "Get the full temporal history of a memory by id — every superseded version, oldest first.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The memory id"}
+                },
+                "required": ["id"]
+            }),
+        },
+        McpTool {
+            name: "delete_memory".into(),
+            description: "Delete a memory by id.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The memory id"}
+                },
+                "required": ["id"]
+            }),
+        },
+        McpTool {
+            name: "remember".into(),
+            description: "Remember free-form text about a user/agent. With LLM extraction enabled it distills atomic facts (deduplicated and contradiction-resolved); otherwise it stores the text as a single memory.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Free-form text / conversation snippet to remember"},
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "session_id": {"type": "string"}
+                },
+                "required": ["text"]
+            }),
+        },
     ]
 }
 
@@ -189,7 +269,18 @@ mod tests {
     #[test]
     fn list_tools_returns_expected_count() {
         let tools = list_tools();
-        assert_eq!(tools.len(), 9); // 6 core + 3 session tools
+        assert_eq!(tools.len(), 15); // 6 core + 3 session + 6 memory tools
+    }
+
+    #[test]
+    fn list_tools_contains_memory_operations() {
+        let tools = list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"add_memory"));
+        assert!(names.contains(&"search_memory"));
+        assert!(names.contains(&"get_memories"));
+        assert!(names.contains(&"memory_history"));
+        assert!(names.contains(&"delete_memory"));
     }
 
     #[test]

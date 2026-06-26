@@ -370,6 +370,39 @@ impl StateStore {
 
         Ok(keys)
     }
+
+    /// Snapshot the entire state DB into a standalone file (for backup / cluster snapshot).
+    pub fn backup_to(&self, path: &Path) -> crate::Result<()> {
+        let _ = std::fs::remove_file(path); // VACUUM INTO requires a non-existent target
+        let escaped = path.to_string_lossy().replace('\'', "''");
+        let db = self.db.lock();
+        db.execute_batch(&format!("VACUUM INTO '{escaped}'"))
+            .map_err(|e| crate::Error::State(format!("state backup: {e}")))?;
+        Ok(())
+    }
+
+    /// Restore the state table from a snapshot file (replaces current contents).
+    pub fn restore_from(&self, path: &Path) -> crate::Result<()> {
+        let escaped = path.to_string_lossy().replace('\'', "''");
+        {
+            let db = self.db.lock();
+            db.execute_batch(&format!(
+                "ATTACH '{escaped}' AS snap;
+                 BEGIN;
+                 DELETE FROM state;
+                 INSERT INTO state SELECT * FROM snap.state;
+                 COMMIT;
+                 DETACH snap;"
+            ))
+            .map_err(|e| {
+                let _ = db.execute_batch("ROLLBACK; DETACH snap;");
+                crate::Error::State(format!("state restore: {e}"))
+            })?;
+        }
+        // Invalidate the hot cache so reads reflect the restored data.
+        self.cache.clear();
+        Ok(())
+    }
 }
 
 impl Default for StateStore {

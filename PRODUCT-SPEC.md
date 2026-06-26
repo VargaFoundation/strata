@@ -4,6 +4,28 @@
 
 ---
 
+> **⚠️ Note de repositionnement (2026-06) — lire en premier.**
+>
+> L'analyse marché a montré que la catégorie « context lake » (Tacnode, jan. 2026) est
+> naissante et mono-acteur, tandis que la demande **validée et financée** est sur le marché
+> *agent-memory* (Mem0, Zep, Letta), qui se joue sur la **qualité de rappel** (benchmark LoCoMo).
+>
+> **Le produit est donc repositionné** en *« le moteur de mémoire open-source pour agents,
+> self-hostable et benchmarkable »* — l'alternative vraiment ouverte là où Mem0 est cloud-first
+> et Zep paywall son graphe. Le « context lake / decision coherence » devient un **second acte
+> entreprise** (état partagé multi-agents, mémoire auditable en SQL), pas l'accroche.
+>
+> La couche d'**intelligence mémoire** qui manquait est désormais implémentée dans `strata-core`
+> (`memory/cognition.rs`) : mémoires bi-temporelles, résolution de contradictions, dédup/
+> consolidation, recherche hybride BM25+vecteur (RRF), oubli par decay, extraction LLM opt-in,
+> API compatible Mem0 (REST + MCP), et un harnais d'éval LoCoMo (`examples/locomo_eval.rs`).
+> Cible (ICP) : équipes régulées / EU / on-prem qui ne peuvent pas envoyer leurs données au cloud.
+>
+> Les sections ci-dessous reflètent la vision « context lake » d'origine et restent valables pour
+> le substrat (3 moteurs, PG-wire, clustering) ; lire l'accroche produit à travers ce prisme.
+
+---
+
 ## 1. RÉSUMÉ EXÉCUTIF
 
 ### Nom de travail (à finaliser — voir section 10)

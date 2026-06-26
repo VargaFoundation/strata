@@ -1,12 +1,23 @@
-//! MCP Streamable HTTP transport — JSON-RPC over HTTP with SSE.
+//! MCP transport — Streamable HTTP (JSON-RPC 2.0) at `/mcp`.
 //!
-//! Implements the Model Context Protocol (MCP) server endpoint.
-//! Clients POST JSON-RPC requests to /mcp, server responds with JSON-RPC responses.
+//! Implements the Model Context Protocol (MCP) server endpoint:
+//! - **POST `/mcp`** — clients send JSON-RPC requests, receive JSON-RPC responses. The
+//!   `initialize` response carries an `Mcp-Session-Id` header (Streamable HTTP session).
+//! - **GET `/mcp`** — opens a server→client SSE stream. Strata is a stateless tool server
+//!   (no server-initiated messages), so this is an idle keep-alive stream; its presence lets
+//!   Streamable-HTTP clients (e.g. Claude Desktop) connect natively rather than via `mcp-remote`.
+//!
+//! See `docs/connect-claude.md`.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures::stream::Stream;
+use strata_core::memory::cognition::{MemoryInput, MemoryScope};
 use strata_core::StrataEngine;
 
 /// MCP JSON-RPC request envelope.
@@ -57,12 +68,22 @@ impl McpResponse {
     }
 }
 
-/// Handle MCP JSON-RPC requests.
+/// Open a server→client SSE stream (Streamable HTTP `GET /mcp`).
+///
+/// Strata sends no server-initiated messages, so this is an idle keep-alive stream — it exists
+/// so Streamable-HTTP clients that probe `GET` get a valid `text/event-stream` instead of 405.
+pub async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = futures::stream::pending::<Result<Event, Infallible>>();
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Handle MCP JSON-RPC requests (Streamable HTTP `POST /mcp`).
 pub async fn handle_mcp(
     State(engine): State<Arc<StrataEngine>>,
     Json(req): Json<McpRequest>,
-) -> Json<McpResponse> {
+) -> Response {
     let id = req.id.clone();
+    let is_initialize = req.method == "initialize";
 
     let response = match req.method.as_str() {
         "initialize" => McpResponse::success(
@@ -88,7 +109,7 @@ pub async fn handle_mcp(
                     serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "inputSchema": tool_input_schema(&t.name),
+                        "inputSchema": t.input_schema,
                     })
                 })
                 .collect();
@@ -147,59 +168,23 @@ pub async fn handle_mcp(
         _ => McpResponse::error(id, -32601, format!("method not found: {}", req.method)),
     };
 
-    Json(response)
+    if is_initialize {
+        // Hand the client a session id to echo on subsequent requests (Streamable HTTP).
+        let session_id = uuid::Uuid::new_v4().to_string();
+        ([("Mcp-Session-Id", session_id)], Json(response)).into_response()
+    } else {
+        Json(response).into_response()
+    }
 }
 
-fn tool_input_schema(name: &str) -> serde_json::Value {
-    match name {
-        "query" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "sql": {"type": "string", "description": "SQL query to execute"}
-            },
-            "required": ["sql"]
-        }),
-        "ingest" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "source": {"type": "string", "description": "Event source name"},
-                "events": {"type": "array", "description": "Array of event objects"}
-            },
-            "required": ["source", "events"]
-        }),
-        "search" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query text"},
-                "k": {"type": "number", "description": "Number of results"}
-            },
-            "required": ["query"]
-        }),
-        "get_state" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string"},
-                "key": {"type": "string"}
-            },
-            "required": ["agent_id", "key"]
-        }),
-        "set_state" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string"},
-                "key": {"type": "string"},
-                "value": {"description": "Value to set"}
-            },
-            "required": ["agent_id", "key", "value"]
-        }),
-        "embed" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "Text to embed"}
-            },
-            "required": ["text"]
-        }),
-        _ => serde_json::json!({"type": "object"}),
+/// Build a memory scope from MCP tool arguments (tenant/user/agent/session).
+fn scope_from_args(args: &serde_json::Value) -> MemoryScope {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+    MemoryScope {
+        tenant_id: s("tenant_id").unwrap_or_else(|| "default".into()),
+        user_id: s("user_id"),
+        agent_id: s("agent_id"),
+        session_id: s("session_id"),
     }
 }
 
@@ -387,6 +372,151 @@ async fn call_tool(
                 .map_err(|e| e.to_string())
         }
 
+        "add_memory" => {
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'content' parameter")?;
+            let input = MemoryInput {
+                scope: scope_from_args(args),
+                subject: args
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                content: content.to_string(),
+                importance: args
+                    .get("importance")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32),
+                source_event_ids: vec![],
+                metadata: serde_json::json!({}),
+            };
+            engine
+                .memory_add(input)
+                .await
+                .map(|added| serde_json::to_value(added).unwrap_or_default())
+                .map_err(|e| e.to_string())
+        }
+
+        "search_memory" => {
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'query' parameter")?;
+            let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            engine
+                .memory_search(query, &scope_from_args(args), k)
+                .await
+                .map(|hits| serde_json::json!({"results": hits, "count": hits.len()}))
+                .map_err(|e| e.to_string())
+        }
+
+        "get_memories" => {
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            engine
+                .memory_all(&scope_from_args(args), limit)
+                .await
+                .map(|mems| serde_json::json!({"memories": mems, "count": mems.len()}))
+                .map_err(|e| e.to_string())
+        }
+
+        "memory_history" => {
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'id' parameter")?;
+            let uuid = uuid::Uuid::parse_str(id).map_err(|_| "invalid 'id'".to_string())?;
+            let mem = engine
+                .memory_get(uuid)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "memory not found".to_string())?;
+            match mem.subject.clone() {
+                Some(subject) => engine
+                    .memory_history(&mem.scope, &subject)
+                    .await
+                    .map(
+                        |h| serde_json::json!({"subject": subject, "history": h, "count": h.len()}),
+                    )
+                    .map_err(|e| e.to_string()),
+                None => Ok(serde_json::json!({"history": [mem], "count": 1})),
+            }
+        }
+
+        "delete_memory" => {
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'id' parameter")?;
+            let uuid = uuid::Uuid::parse_str(id).map_err(|_| "invalid 'id'".to_string())?;
+            engine
+                .memory_delete(uuid)
+                .await
+                .map(|()| serde_json::json!({"id": id, "deleted": true}))
+                .map_err(|e| e.to_string())
+        }
+
+        "remember" => {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'text' parameter")?;
+            engine
+                .memory_remember(text, &scope_from_args(args))
+                .await
+                .map(|added| serde_json::json!({"remembered": added.len(), "memories": added}))
+                .map_err(|e| e.to_string())
+        }
+
         _ => Err(format!("unknown tool: {name}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn engine() -> Arc<StrataEngine> {
+        let mut c = strata_core::CoreConfig::default();
+        c.memory.episodic.db_path = ":memory:".into();
+        c.memory.state.db_path = ":memory:".into();
+        c.memory.cognition.db_path = ":memory:".into();
+        Arc::new(StrataEngine::new(c).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn initialize_issues_session_id() {
+        let req = McpRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(1)),
+            method: "initialize".into(),
+            params: serde_json::json!({}),
+        };
+        let resp = handle_mcp(State(engine().await), Json(req)).await;
+        assert!(resp.headers().get("Mcp-Session-Id").is_some());
+    }
+
+    #[tokio::test]
+    async fn non_initialize_has_no_session_id() {
+        let req = McpRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(2)),
+            method: "ping".into(),
+            params: serde_json::json!({}),
+        };
+        let resp = handle_mcp(State(engine().await), Json(req)).await;
+        assert!(resp.headers().get("Mcp-Session-Id").is_none());
+    }
+
+    #[tokio::test]
+    async fn sse_stream_is_event_stream() {
+        let resp = handle_mcp_sse().await.into_response();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.starts_with("text/event-stream"));
     }
 }

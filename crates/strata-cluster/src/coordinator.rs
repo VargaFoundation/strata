@@ -249,4 +249,71 @@ mod tests {
 
         coord.shutdown().await.unwrap();
     }
+
+    /// End-to-end proof of the log-based write path: a write proposed via `client_write`
+    /// goes through real openraft consensus (propose → commit → apply) and lands on the
+    /// node's engine. This validates that the deterministic apply composes with Raft.
+    #[tokio::test]
+    async fn client_write_round_trips_through_consensus() {
+        let mut core_cfg = strata_core::CoreConfig::default();
+        core_cfg.memory.episodic.db_path = ":memory:".into();
+        core_cfg.memory.state.db_path = ":memory:".into();
+        core_cfg.memory.cognition.db_path = ":memory:".into();
+        let engine = Arc::new(StrataEngine::new(core_cfg).await.unwrap());
+
+        let mut coord = ClusterCoordinator::new(ClusterConfig {
+            data_dir: ":memory:".into(),
+            ..Default::default()
+        });
+        coord.start_raft(engine.clone()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(coord.is_leader());
+
+        // Ingest through consensus.
+        let ev = strata_core::memory::episodic::Event::new("src", "e", serde_json::json!({"x": 1}));
+        let resp = coord
+            .client_write(AppRequest::Ingest {
+                events: vec![ev],
+                tenant: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(resp, AppResponse::Ingested(1)));
+        assert_eq!(engine.event_count().await.unwrap(), 1);
+
+        // Memory through consensus: the leader runs cognition to materialize the change-set
+        // (memory_plan, no local write), then replicates the rows through the log.
+        let input = strata_core::memory::cognition::MemoryInput::new(
+            strata_core::memory::cognition::MemoryScope::user("alice"),
+            "likes tea",
+        );
+        let (_result, rows) = engine.memory_plan(input).await.unwrap();
+        coord
+            .client_write(AppRequest::MemoryUpsert { rows })
+            .await
+            .unwrap();
+        assert_eq!(engine.memory_count().await.unwrap(), 1);
+
+        // State set through consensus.
+        coord
+            .client_write(AppRequest::StateSet {
+                agent_id: "bot".into(),
+                key: "mood".into(),
+                value: serde_json::json!("happy"),
+                tenant: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            engine
+                .state_get("bot", "mood")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            serde_json::json!("happy")
+        );
+
+        coord.shutdown().await.unwrap();
+    }
 }

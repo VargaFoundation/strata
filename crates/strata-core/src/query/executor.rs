@@ -15,6 +15,8 @@ pub struct QueryExecutor {
     semantic: Arc<SemanticStore>,
     state: Arc<StateStore>,
     embedding: Option<Arc<dyn EmbeddingProvider>>,
+    /// When set, SQL queries are scoped to this tenant (row-level isolation).
+    tenant: Option<String>,
 }
 
 impl QueryExecutor {
@@ -29,7 +31,14 @@ impl QueryExecutor {
             semantic,
             state,
             embedding,
+            tenant: None,
         }
+    }
+
+    /// Scope all SQL execution to a single tenant (row-level isolation).
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = Some(tenant.into());
+        self
     }
 
     /// Execute a query plan and return results as JSON rows.
@@ -45,7 +54,7 @@ impl QueryExecutor {
         match plan {
             QueryPlan::Sql(sql) => {
                 // Try hybrid query rewriting for SQL containing strata functions
-                if let Ok(Some(rewritten)) = super::functions::rewrite_hybrid_query(
+                let effective = match super::functions::rewrite_hybrid_query(
                     &sql,
                     &self.semantic,
                     &self.state,
@@ -53,9 +62,13 @@ impl QueryExecutor {
                 )
                 .await
                 {
-                    self.episodic.query_sql_limited(&rewritten, max_rows)
-                } else {
-                    self.episodic.query_sql_limited(&sql, max_rows)
+                    Ok(Some(rewritten)) => rewritten,
+                    _ => sql,
+                };
+                // Scope to the tenant if one is set (row-level isolation), else run as-is.
+                match &self.tenant {
+                    Some(t) => self.episodic.query_sql_for_tenant(&effective, t, max_rows),
+                    None => self.episodic.query_sql_limited(&effective, max_rows),
                 }
             }
 
@@ -90,7 +103,22 @@ impl QueryExecutor {
             .next()
             .ok_or_else(|| crate::Error::Embedding("embedding returned empty result".into()))?;
 
-        let results = self.semantic.search(&vector, k).await?;
+        // Tenant-scoped queries only ever see their own event embeddings.
+        let results = match &self.tenant {
+            Some(t) => {
+                let t = t.clone();
+                self.semantic
+                    .search_filtered(&vector, k, move |e| {
+                        e.metadata
+                            .get("tenant_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("default")
+                            == t
+                    })
+                    .await?
+            }
+            None => self.semantic.search(&vector, k).await?,
+        };
 
         Ok(results
             .into_iter()
@@ -111,9 +139,15 @@ impl QueryExecutor {
         agent_id: &str,
         key: &str,
     ) -> crate::Result<Vec<serde_json::Value>> {
-        match self.state.get(agent_id, key).await? {
+        // Tenant-scoped queries namespace the agent so they can't read another tenant's state.
+        let scoped = match &self.tenant {
+            Some(t) => crate::engine::scoped_agent(t, agent_id),
+            None => agent_id.to_string(),
+        };
+        match self.state.get(&scoped, key).await? {
             Some(entry) => Ok(vec![serde_json::json!({
-                "agent_id": entry.agent_id,
+                // Return the caller's un-prefixed agent_id, not the internal namespaced one.
+                "agent_id": agent_id,
                 "key": entry.key,
                 "value": entry.value,
                 "version": entry.version,

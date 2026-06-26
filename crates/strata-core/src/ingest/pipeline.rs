@@ -68,6 +68,10 @@ impl IngestPipeline {
         // Extract string values from payload (skip IDs, numbers-only)
         if let Some(obj) = event.payload.as_object() {
             for (key, value) in obj {
+                // Skip internal fields (e.g. `_tenant_id`) so they don't pollute embeddings.
+                if key.starts_with('_') {
+                    continue;
+                }
                 match value {
                     serde_json::Value::String(s) => {
                         // Skip likely IDs (UUID-like, short hex, pure numbers)
@@ -143,6 +147,13 @@ impl IngestPipeline {
                                     "timestamp": event.timestamp.to_rfc3339(),
                                     "trace_id": event.trace_id,
                                     "tags": event.tags,
+                                    // Tenant for row-level isolation of vector search (injected
+                                    // into the payload by ingest_for_tenant); default otherwise.
+                                    "tenant_id": event
+                                        .payload
+                                        .get("_tenant_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("default"),
                                 }),
                             };
                             if let Err(e) = semantic.upsert(&entry).await {

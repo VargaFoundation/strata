@@ -11,6 +11,9 @@ pub enum Error {
     #[error("embedding error: {0}")]
     Embedding(String),
 
+    #[error("llm error: {0}")]
+    Llm(String),
+
     #[error("ingest error: {0}")]
     Ingest(String),
 

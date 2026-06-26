@@ -1,0 +1,28 @@
+[
+  {
+    "user": "alice",
+    "turns": [
+      "Alice works as a data scientist at Acme Corp.",
+      "Alice's favorite programming language is Rust.",
+      "Alice is planning a trip to Japan next spring.",
+      "Alice has a golden retriever named Max."
+    ],
+    "qa": [
+      { "question": "What does Alice do for work?", "expected": "data scientist" },
+      { "question": "Where is Alice traveling next spring?", "expected": "Japan" },
+      { "question": "What is the name of Alice's dog?", "expected": "Max" }
+    ]
+  },
+  {
+    "user": "bob",
+    "turns": [
+      "Bob is a high school chemistry teacher.",
+      "Bob plays the saxophone in a jazz band on weekends.",
+      "Bob is allergic to peanuts."
+    ],
+    "qa": [
+      { "question": "What instrument does Bob play?", "expected": "saxophone" },
+      { "question": "What is Bob allergic to?", "expected": "peanuts" }
+    ]
+  }
+]
