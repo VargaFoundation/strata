@@ -19,8 +19,8 @@ cognition results) computed once on the leader — never re-run non-deterministi
 |-----------|--------|---------|
 | `TypeConfig` | **Working** | `declare_raft_types!` macro, AppRequest/AppResponse enums, NodeInfo, MessagePack serde |
 | `MemStore` | **Working** | Full `RaftStorage` trait impl: log (BTreeMap), vote, state machine (applies to StrataEngine), snapshots |
-| `NetworkClient` | **Working** | HTTP JSON POST for AppendEntries, Vote, InstallSnapshot RPCs |
-| `NetworkFactory` | **Working** | Creates `NetworkClient` per target node with shared reqwest::Client |
+| `GrpcRaftNetwork` (client) | **Working** | **gRPC (tonic, HTTP/2)** transport for AppendEntries/Vote/InstallSnapshot. openraft RPCs are MessagePack-encoded into an opaque `RaftBytes` proto (~1.8× smaller than JSON on embedding-heavy batches). Lazy per-peer `Channel` (auto-reconnect, multiplexed). 512 MB message cap for snapshots. |
+| `RaftGrpcServer` | **Working** | tonic service exposing this node's Raft to peers; mirror of the client. Bound to `cluster.listen` (the port peers dial). Started by the coordinator in multi-node mode. |
 | `ClusterCoordinator` | **Working** | Owns the `openraft::Raft` instance, `client_write()`, `is_leader()`, `leader_id()`, graceful shutdown. **Cluster formation**: single-node inits immediately; multi-node parses `peers` as `id@addr` voter membership and the lowest-id node bootstraps via `initialize` once — idempotent on restart, retries until peers are reachable. `start_raft_with_network` allows injecting a network (tests). |
 | `ClusterConfig` | **Working** | TOML deserialization, node_id, listen, peers |
 | `ClusterCoordinator` (metrics) | **Working** | Background task publishing Raft metrics to Prometheus (term, is_leader, replication_lag, leader_changes) |
@@ -35,9 +35,12 @@ src/
   error.rs         ClusterError (Raft, Replication, Coordination, NotLeader, Core, Internal)
   config.rs        ClusterConfig (enabled, node_id, listen, peers)
   coordinator.rs   ClusterCoordinator: Raft lifecycle, client_write, leader detection
+  proto/raft.proto Thin gRPC service (RaftBytes envelope); compiled by build.rs
   raft/
     types.rs       TypeConfig, AppRequest, AppResponse, NodeInfo (openraft types)
-    network.rs     NetworkClient + NetworkFactory (HTTP JSON transport)
+    network.rs     GrpcRaftNetwork + GrpcRaftNetworkFactory (tonic gRPC client)
+    server.rs      RaftGrpcServer (tonic gRPC service — receives peer RPCs)
+    pb (in mod.rs) tonic::include_proto! generated types
     store.rs       MemStore: RaftStorage + RaftLogReader + RaftSnapshotBuilder
   replication/
     log_shipper.rs WAL segment shipping (stub)
@@ -60,22 +63,34 @@ All requests carry **materialized** values so apply is deterministic on every no
 | `MemoryUpsert { memories }` | Replace materialized memory rows (leader ran cognition) | `MemoryCount(n)` |
 | `MemoryDelete { id }` | Delete a memory by id | `MemoryCount(n)` |
 
+## Inter-node transport (gRPC)
+
+Hot-path Raft RPCs use **gRPC (tonic, HTTP/2)** — `GrpcRaftNetwork` (client) ↔ `RaftGrpcServer`
+(server), via a thin `RaftBytes` proto carrying MessagePack-encoded openraft RPCs. The server binds
+`cluster.listen` (e.g. :9433 — the address peers actually dial). The Raft log is also persisted in
+MessagePack (`store.rs`). Low-traffic admin ops (`/cluster/status`, add-learner, change-membership)
+stay on the HTTP gateway.
+
+**Migration caveat:** the wire format AND on-disk log format are binary (MessagePack) — a breaking
+change from the previous JSON. All nodes must run the same version, and on upgrade each node's
+**Raft data dir must be wiped** (the old JSON log is unreadable). Low blast radius: the log is
+rebuildable from the leader/snapshot.
+
 ## Testing
 
-- `cargo test -p strata-cluster` (22 tests, incl. deterministic-apply + consensus round-trip)
-- Config deserialization tests (TOML, defaults, clone)
-- MemStore tests (create, save/read vote, log state)
-- AppRequest/AppResponse serialization roundtrip (MessagePack + JSON)
-- NetworkClient URL construction
-- ClusterCoordinator single-node Raft lifecycle (start → is_leader → shutdown)
-- Consensus round-trip: `client_write` → commit → apply lands on the engine (Ingest/State/Memory)
-- Deterministic apply: the same committed entry yields identical state on two independent engines
-- **Multi-node** (`tests/multi_node.rs`, 2 tests): (1) a real 3-node openraft cluster over an
-  in-process network proves a leader write commits via quorum and **converges on every node's
-  engine** (same event id); (2) **config-driven formation** — 3 `ClusterCoordinator`s built from
-  `peers` config form the cluster THEMSELVES (lowest-id node bootstraps, no manual `initialize`),
-  elect a leader, and a write converges. Port-free, non-flaky. The HTTP `NetworkClient` transport
-  is covered by the single-node + unit tests.
+- `cargo test -p strata-cluster` (lib + integration; deterministic-apply, consensus round-trip,
+  formation, transport)
+- Config deserialization tests (TOML, defaults, clone); MemStore tests (vote, log state)
+- AppRequest/AppResponse serialization roundtrip; **MessagePack-vs-JSON size** (embedding-heavy
+  AppendEntries ≈1.8× smaller — justifies the migration)
+- ClusterCoordinator single-node lifecycle; consensus round-trip (`client_write` → commit → apply);
+  deterministic apply across two engines
+- **Multi-node, in-process** (`tests/multi_node.rs`, 2 tests): real 3-node openraft convergence +
+  config-driven self-formation (lowest-id bootstraps, no manual `initialize`). Port-free.
+- **Multi-node, real sockets** (`tests/grpc_transport.rs`): 3 `ClusterCoordinator`s via the
+  production path (`start_raft` → gRPC factory + server on real `127.0.0.1:<port>`) form the cluster
+  and a leader write converges on every node **over real HTTP/2** — proves the transport + that the
+  Raft server binds the address peers dial.
 
 ## Cluster deployment
 
@@ -83,3 +98,4 @@ All requests carry **materialized** values so apply is deterministic on every no
 (including this node), e.g. `1@http://strata-0:9433,2@http://strata-1:9433,3@http://strata-2:9433`;
 `STRATA_CLUSTER__NODE_ID` is this node's id. The Helm StatefulSet derives both from the pod
 ordinal automatically. The lowest-id node forms the cluster; the rest are pulled in by the leader.
+Each node serves the Raft gRPC transport on `STRATA_CLUSTER__LISTEN` (:9433).

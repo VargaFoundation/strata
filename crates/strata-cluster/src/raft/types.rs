@@ -176,4 +176,35 @@ mod tests {
         };
         assert_eq!(format!("{node}"), "http://10.0.0.1:9433");
     }
+
+    /// Justifies the gRPC/MessagePack migration: the binary wire encoding is materially smaller
+    /// than JSON on embedding-heavy AppendEntries payloads (the dominant replication traffic).
+    #[test]
+    fn messagepack_is_smaller_than_json_for_embeddings() {
+        use strata_core::memory::cognition::{Memory, MemoryRow, MemoryScope};
+        // 100 memory rows, each with a 768-dim embedding (≈ a full AppendEntries batch).
+        let rows: Vec<MemoryRow> = (0..100)
+            .map(|i| MemoryRow {
+                memory: Memory::new(MemoryScope::user("u"), format!("fact number {i}")),
+                embedding: Some(vec![0.123_456_f32; 768]),
+            })
+            .collect();
+        let req = AppRequest::MemoryUpsert { rows };
+
+        let json = serde_json::to_vec(&req).unwrap();
+        let mp = rmp_serde::to_vec(&req).unwrap();
+        println!(
+            "embedding-heavy MemoryUpsert: JSON={} B, MessagePack={} B ({:.2}x smaller)",
+            json.len(),
+            mp.len(),
+            json.len() as f64 / mp.len() as f64
+        );
+        // Conservatively require MessagePack < 80% of JSON (observed ~1.7x smaller).
+        assert!(
+            (mp.len() as f64) < (json.len() as f64) * 0.8,
+            "MessagePack ({}) not materially smaller than JSON ({})",
+            mp.len(),
+            json.len()
+        );
+    }
 }

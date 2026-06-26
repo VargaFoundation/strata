@@ -59,7 +59,7 @@ impl StoreInner {
     /// Persist a log entry to SQLite.
     fn persist_entry(&self, idx: u64, entry: &Entry<TypeConfig>) {
         if let Some(ref db) = self.db {
-            let data = serde_json::to_vec(entry).unwrap_or_default();
+            let data = rmp_serde::to_vec(entry).unwrap_or_default();
             let _ = db.execute(
                 "INSERT OR REPLACE INTO raft_log (idx, entry) VALUES (?1, ?2)",
                 rusqlite::params![idx as i64, data],
@@ -119,7 +119,7 @@ impl StoreInner {
                     Ok((idx as u64, data))
                 }) {
                     for row in rows.flatten() {
-                        if let Ok(entry) = serde_json::from_slice::<Entry<TypeConfig>>(&row.1) {
+                        if let Ok(entry) = rmp_serde::from_slice::<Entry<TypeConfig>>(&row.1) {
                             self.log.insert(row.0, entry);
                         }
                     }
@@ -128,27 +128,27 @@ impl StoreInner {
 
             // Load vote
             if let Some(data) = self.load_meta("vote") {
-                self.vote = serde_json::from_slice(&data).ok();
+                self.vote = rmp_serde::from_slice(&data).ok();
             }
 
             // Load committed
             if let Some(data) = self.load_meta("committed") {
-                self.committed = serde_json::from_slice(&data).ok();
+                self.committed = rmp_serde::from_slice(&data).ok();
             }
 
             // Load last_purged
             if let Some(data) = self.load_meta("last_purged") {
-                self.last_purged = serde_json::from_slice(&data).ok();
+                self.last_purged = rmp_serde::from_slice(&data).ok();
             }
 
             // Load last_applied
             if let Some(data) = self.load_meta("last_applied") {
-                self.last_applied = serde_json::from_slice(&data).ok();
+                self.last_applied = rmp_serde::from_slice(&data).ok();
             }
 
             // Load last_membership
             if let Some(data) = self.load_meta("last_membership") {
-                if let Ok(m) = serde_json::from_slice(&data) {
+                if let Ok(m) = rmp_serde::from_slice(&data) {
                     self.last_membership = m;
                 }
             }
@@ -419,7 +419,7 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock();
         inner.vote = Some(*vote);
-        if let Ok(data) = serde_json::to_vec(vote) {
+        if let Ok(data) = rmp_serde::to_vec(vote) {
             inner.persist_meta("vote", &data);
         }
         Ok(())
@@ -435,7 +435,7 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     ) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock();
         inner.committed = committed;
-        if let Ok(data) = serde_json::to_vec(&committed) {
+        if let Ok(data) = rmp_serde::to_vec(&committed) {
             inner.persist_meta("committed", &data);
         }
         Ok(())
@@ -489,7 +489,7 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     async fn purge_logs_upto(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock();
         inner.last_purged = Some(log_id);
-        if let Ok(data) = serde_json::to_vec(&Some(log_id)) {
+        if let Ok(data) = rmp_serde::to_vec(&Some(log_id)) {
             inner.persist_meta("last_purged", &data);
         }
         inner.delete_entries_upto(log_id.index);
@@ -521,7 +521,7 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
             {
                 let mut inner = self.inner.lock();
                 inner.last_applied = Some(log_id);
-                if let Ok(data) = serde_json::to_vec(&Some(log_id)) {
+                if let Ok(data) = rmp_serde::to_vec(&Some(log_id)) {
                     inner.persist_meta("last_applied", &data);
                 }
             }
@@ -537,7 +537,7 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
                 openraft::EntryPayload::Membership(ref membership) => {
                     let mut inner = self.inner.lock();
                     inner.last_membership = StoredMembership::new(Some(log_id), membership.clone());
-                    if let Ok(data) = serde_json::to_vec(&inner.last_membership) {
+                    if let Ok(data) = rmp_serde::to_vec(&inner.last_membership) {
                         inner.persist_meta("last_membership", &data);
                     }
                     responses.push(AppResponse::Ok);
@@ -584,10 +584,10 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
             data,
         });
         // Persist applied state
-        if let Ok(d) = serde_json::to_vec(&inner.last_applied) {
+        if let Ok(d) = rmp_serde::to_vec(&inner.last_applied) {
             inner.persist_meta("last_applied", &d);
         }
-        if let Ok(d) = serde_json::to_vec(&inner.last_membership) {
+        if let Ok(d) = rmp_serde::to_vec(&inner.last_membership) {
             inner.persist_meta("last_membership", &d);
         }
         Ok(())

@@ -16,11 +16,13 @@ async-trait.workspace = true
 
 openraft.workspace = true
 
+# gRPC transport for inter-node Raft RPCs (HTTP/2 + binary).
+tonic.workspace = true
+prost.workspace = true
+
 serde.workspace = true
 serde_json.workspace = true
 rmp-serde.workspace = true
-
-reqwest.workspace = true
 
 thiserror.workspace = true
 anyhow.workspace = true
@@ -32,6 +34,10 @@ chrono.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
 rusqlite.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+protobuf-src.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

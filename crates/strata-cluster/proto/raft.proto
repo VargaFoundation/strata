@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package strata.raft;
+
+// Inter-node Raft transport over gRPC (HTTP/2). Each RPC carries an opaque, binary-serialized
+// (MessagePack) openraft request/response in `data` — we control both ends, so re-modeling
+// openraft's generic types as protobuf would add fragility without value.
+service RaftService {
+  rpc AppendEntries(RaftBytes) returns (RaftBytes);
+  rpc Vote(RaftBytes) returns (RaftBytes);
+  rpc InstallSnapshot(RaftBytes) returns (RaftBytes);
+}
+
+message RaftBytes {
+  bytes data = 1;
+}

@@ -4615,7 +4615,8 @@ dependencies = [
  "metrics",
  "openraft",
  "parking_lot",
- "reqwest",
+ "prost",
+ "protobuf-src",
  "rmp-serde",
  "rusqlite",
  "serde",
@@ -4625,6 +4626,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "tonic",
+ "tonic-build",
  "tracing",
  "uuid",
 ]

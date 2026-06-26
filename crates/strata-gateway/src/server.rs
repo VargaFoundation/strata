@@ -164,14 +164,16 @@ impl GatewayServer {
             );
         }
 
-        // Mount Raft RPC endpoints if cluster mode is active
+        // Mount cluster admin endpoints if cluster mode is active. The hot-path Raft RPCs
+        // (AppendEntries/Vote/InstallSnapshot) are served over gRPC by the coordinator on the
+        // Raft port — only the low-traffic admin routes live on the HTTP app.
         if let Some(ref coord) = coordinator {
             let coord_read = coord.read().await;
             if let Some(raft_instance) = coord_read.raft() {
                 let raft_router =
                     crate::cluster::raft_routes::raft_router(Arc::new(raft_instance.clone()));
                 app = app.merge(raft_router);
-                tracing::info!("Raft RPC endpoints mounted (/raft/*, /cluster/status)");
+                tracing::info!("Cluster admin endpoints mounted (/cluster/status, /cluster/*)");
             }
         }
 

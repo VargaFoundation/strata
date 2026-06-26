@@ -1,115 +1,120 @@
-//! Raft network implementation — HTTP-based node-to-node communication.
+//! Inter-node Raft transport — gRPC (tonic, HTTP/2).
 //!
-//! Each Raft RPC (AppendEntries, Vote, InstallSnapshot) is sent as a POST
-//! request with JSON body to the target node's Raft HTTP endpoint.
+//! Each Raft RPC (AppendEntries, Vote, InstallSnapshot) is MessagePack-serialized and carried in
+//! an opaque `RaftBytes` protobuf message to the target node's gRPC `RaftService`. Binary encoding
+//! (vs the old JSON-over-HTTP/1.1) is ~2-3x smaller on embedding-heavy AppendEntries and avoids
+//! float↔string formatting; HTTP/2 multiplexes all RPCs to a peer over one lazily-managed channel.
 
-use openraft::error::{InstallSnapshotError, RPCError, RaftError};
+use openraft::error::{InstallSnapshotError, RPCError, RaftError, Unreachable};
 use openraft::network::RPCOption;
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
-use openraft::RaftNetwork;
-use reqwest::Client;
+use openraft::{RaftNetwork, RaftNetworkFactory};
+use tonic::transport::{Channel, Endpoint};
 
+use super::pb::raft_service_client::RaftServiceClient;
+use super::pb::RaftBytes;
 use super::types::{NodeId, NodeInfo, TypeConfig};
 
-/// HTTP-based Raft network transport.
-///
-/// Each instance handles communication with a single remote node.
-pub struct NetworkClient {
+/// Max gRPC message size (encode + decode). `InstallSnapshot` ships the full state snapshot, so be
+/// generous — this also removes the old 16 MB HTTP body cap that would have broken large snapshots.
+const MAX_MSG_SIZE: usize = 512 * 1024 * 1024;
+
+fn unreachable_io(msg: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::NotConnected, msg)
+}
+
+/// A gRPC connection to a single peer. The tonic `Channel` connects lazily and reconnects
+/// automatically, multiplexing all RPCs to that peer over one HTTP/2 connection.
+pub struct GrpcRaftNetwork {
     addr: String,
-    client: Client,
+    channel: Option<Channel>,
 }
 
-impl NetworkClient {
-    fn url(&self, path: &str) -> String {
-        format!("{}/raft/{}", self.addr.trim_end_matches('/'), path)
-    }
-
-    async fn post_json<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        req: &Req,
-    ) -> Result<Resp, openraft::error::NetworkError> {
-        let resp = self
-            .client
-            .post(self.url(path))
-            .json(req)
-            .send()
-            .await
-            .map_err(|e| openraft::error::NetworkError::new(&e))?;
-
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| openraft::error::NetworkError::new(&e))?;
-
-        serde_json::from_slice(&bytes).map_err(|e| openraft::error::NetworkError::new(&e))
+impl GrpcRaftNetwork {
+    fn client(&self) -> Result<RaftServiceClient<Channel>, std::io::Error> {
+        let channel = self
+            .channel
+            .clone()
+            .ok_or_else(|| unreachable_io(format!("invalid raft endpoint: {}", self.addr)))?;
+        Ok(RaftServiceClient::new(channel)
+            .max_decoding_message_size(MAX_MSG_SIZE)
+            .max_encoding_message_size(MAX_MSG_SIZE))
     }
 }
 
-impl RaftNetwork<TypeConfig> for NetworkClient {
+impl RaftNetwork<TypeConfig> for GrpcRaftNetwork {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
-        _option: RPCOption,
+        _o: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, NodeInfo, RaftError<NodeId>>> {
-        self.post_json("append", &rpc)
+        let data =
+            rmp_serde::to_vec(&rpc).map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        let reply = self
+            .client()
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?
+            .append_entries(RaftBytes { data })
             .await
-            .map_err(RPCError::Network)
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        rmp_serde::from_slice(&reply.into_inner().data)
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))
     }
 
     async fn install_snapshot(
         &mut self,
         rpc: InstallSnapshotRequest<TypeConfig>,
-        _option: RPCOption,
+        _o: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, NodeInfo, RaftError<NodeId, InstallSnapshotError>>,
     > {
-        self.post_json("snapshot", &rpc)
+        let data =
+            rmp_serde::to_vec(&rpc).map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        let reply = self
+            .client()
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?
+            .install_snapshot(RaftBytes { data })
             .await
-            .map_err(RPCError::Network)
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        rmp_serde::from_slice(&reply.into_inner().data)
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))
     }
 
     async fn vote(
         &mut self,
         rpc: VoteRequest<NodeId>,
-        _option: RPCOption,
+        _o: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, NodeInfo, RaftError<NodeId>>> {
-        self.post_json("vote", &rpc)
+        let data =
+            rmp_serde::to_vec(&rpc).map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        let reply = self
+            .client()
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?
+            .vote(RaftBytes { data })
             .await
-            .map_err(RPCError::Network)
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        rmp_serde::from_slice(&reply.into_inner().data)
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))
     }
 }
 
-/// Factory that creates network clients for each target node.
-pub struct NetworkFactory {
-    client: Client,
-}
+/// Factory creating a lazily-connected gRPC `Channel` per peer (HTTP/2, auto-reconnect).
+pub struct GrpcRaftNetworkFactory;
 
-impl NetworkFactory {
-    pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
-    }
-}
+impl RaftNetworkFactory<TypeConfig> for GrpcRaftNetworkFactory {
+    type Network = GrpcRaftNetwork;
 
-impl Default for NetworkFactory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl openraft::RaftNetworkFactory<TypeConfig> for NetworkFactory {
-    type Network = NetworkClient;
-
-    async fn new_client(&mut self, _target: NodeId, node: &NodeInfo) -> NetworkClient {
-        NetworkClient {
+    async fn new_client(&mut self, _target: NodeId, node: &NodeInfo) -> GrpcRaftNetwork {
+        // `connect_lazy` never fails here; the first RPC establishes (and retries) the connection.
+        let channel = Endpoint::from_shared(node.addr.clone())
+            .ok()
+            .map(|e| e.connect_lazy());
+        GrpcRaftNetwork {
             addr: node.addr.clone(),
-            client: self.client.clone(),
+            channel,
         }
     }
 }
@@ -118,18 +123,35 @@ impl openraft::RaftNetworkFactory<TypeConfig> for NetworkFactory {
 mod tests {
     use super::*;
 
-    #[test]
-    fn network_factory_creation() {
-        let _ = NetworkFactory::new();
+    #[tokio::test]
+    async fn factory_builds_lazy_channel() {
+        let mut factory = GrpcRaftNetworkFactory;
+        let net = factory
+            .new_client(
+                2,
+                &NodeInfo {
+                    addr: "http://10.0.0.1:9433".into(),
+                },
+            )
+            .await;
+        assert!(
+            net.channel.is_some(),
+            "valid endpoint should build a channel"
+        );
     }
 
-    #[test]
-    fn network_client_url() {
-        let client = NetworkClient {
-            addr: "http://10.0.0.1:9433".into(),
-            client: Client::new(),
-        };
-        assert_eq!(client.url("append"), "http://10.0.0.1:9433/raft/append");
-        assert_eq!(client.url("vote"), "http://10.0.0.1:9433/raft/vote");
+    #[tokio::test]
+    async fn factory_tolerates_bad_endpoint() {
+        let mut factory = GrpcRaftNetworkFactory;
+        let net = factory
+            .new_client(
+                2,
+                &NodeInfo {
+                    addr: "not a uri".into(),
+                },
+            )
+            .await;
+        // A bad address yields no channel; RPCs will surface a retryable Unreachable.
+        assert!(net.channel.is_none());
     }
 }

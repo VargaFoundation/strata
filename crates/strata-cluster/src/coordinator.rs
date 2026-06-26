@@ -7,7 +7,8 @@ use openraft::Raft;
 use strata_core::StrataEngine;
 
 use crate::config::ClusterConfig;
-use crate::raft::network::NetworkFactory;
+use crate::raft::network::GrpcRaftNetworkFactory;
+use crate::raft::server::RaftGrpcServer;
 use crate::raft::store::MemStore;
 use crate::raft::types::{AppRequest, AppResponse, NodeId, NodeInfo, TypeConfig};
 
@@ -20,18 +21,57 @@ pub struct ClusterCoordinator {
     config: ClusterConfig,
     /// The openraft Raft instance (None if cluster mode is disabled).
     raft: Option<StrataRaft>,
+    /// Shutdown signal for the inter-node Raft gRPC server (multi-node only).
+    raft_grpc_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl ClusterCoordinator {
     /// Create a coordinator in single-node mode (no Raft, always leader).
     pub fn new(config: ClusterConfig) -> Self {
-        Self { config, raft: None }
+        Self {
+            config,
+            raft: None,
+            raft_grpc_shutdown: None,
+        }
     }
 
-    /// Start the Raft instance with the production HTTP network.
+    /// Start the Raft instance with the production gRPC network, and (in multi-node mode) serve
+    /// this node's Raft instance to peers over gRPC on `cluster.listen`.
     pub async fn start_raft(&mut self, engine: Arc<StrataEngine>) -> crate::Result<()> {
-        self.start_raft_with_network(engine, NetworkFactory::new())
-            .await
+        self.start_raft_with_network(engine, GrpcRaftNetworkFactory)
+            .await?;
+        if !self.config.peers.is_empty() {
+            self.start_raft_grpc_server()?;
+        }
+        Ok(())
+    }
+
+    /// Spawn the inter-node Raft gRPC server bound to `cluster.listen` (e.g. :9433 — the address
+    /// peers actually dial). Single-node mode skips this (no peers contact this node).
+    fn start_raft_grpc_server(&mut self) -> crate::Result<()> {
+        let raft = self.raft.as_ref().expect("raft started").clone();
+        let addr: std::net::SocketAddr = self.config.listen.parse().map_err(|e| {
+            crate::Error::Coordination(format!(
+                "invalid cluster listen '{}': {e}",
+                self.config.listen
+            ))
+        })?;
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let service = RaftGrpcServer::new(Arc::new(raft)).into_service();
+        tokio::spawn(async move {
+            tracing::info!(%addr, "Raft gRPC server listening");
+            let result = tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_shutdown(addr, async {
+                    let _ = rx.await;
+                })
+                .await;
+            if let Err(e) = result {
+                tracing::error!(error = %e, "Raft gRPC server stopped with error");
+            }
+        });
+        self.raft_grpc_shutdown = Some(tx);
+        Ok(())
     }
 
     /// Start the Raft instance with a custom network factory (tests inject an in-process network).
@@ -265,6 +305,10 @@ impl ClusterCoordinator {
 
     /// Graceful shutdown.
     pub async fn shutdown(&mut self) -> crate::Result<()> {
+        // Stop accepting inter-node RPCs first.
+        if let Some(tx) = self.raft_grpc_shutdown.take() {
+            let _ = tx.send(());
+        }
         if let Some(raft) = self.raft.take() {
             raft.shutdown()
                 .await
