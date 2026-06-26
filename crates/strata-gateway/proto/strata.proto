@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package strata;
 
+import "google/protobuf/struct.proto";
+
 // Strata Context Lake gRPC Service
 service Strata {
   // Execute a SQL query
@@ -28,13 +30,13 @@ message QueryRequest {
 }
 
 message QueryResponse {
-  repeated string rows_json = 1; // Each row as a JSON string
+  repeated google.protobuf.Struct rows = 1; // Each row as a structured object
   int64 count = 2;
 }
 
 message IngestRequest {
   string source = 1;
-  repeated string events_json = 2; // Each event as a JSON string
+  repeated google.protobuf.Struct events = 2; // Each event as a structured object
 }
 
 message IngestResponse {
@@ -55,7 +57,7 @@ message SearchResult {
   string id = 1;
   string content = 2;
   float score = 3;
-  string metadata_json = 4;
+  google.protobuf.Struct metadata = 4;
 }
 
 message GetStateRequest {
@@ -66,7 +68,7 @@ message GetStateRequest {
 message GetStateResponse {
   string agent_id = 1;
   string key = 2;
-  string value_json = 3;
+  google.protobuf.Value value = 3;
   uint64 version = 4;
   bool found = 5;
 }
@@ -74,7 +76,7 @@ message GetStateResponse {
 message SetStateRequest {
   string agent_id = 1;
   string key = 2;
-  string value_json = 3;
+  google.protobuf.Value value = 3;
 }
 
 message SetStateResponse {

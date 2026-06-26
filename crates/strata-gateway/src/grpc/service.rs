@@ -63,11 +63,11 @@ impl Strata for StrataGrpcService {
         match result {
             Ok(rows) => {
                 let count = rows.len() as i64;
-                let rows_json: Vec<String> = rows
-                    .iter()
-                    .map(|r| serde_json::to_string(r).unwrap_or_default())
+                let rows = rows
+                    .into_iter()
+                    .map(super::convert::json_to_struct)
                     .collect();
-                Ok(Response::new(proto::QueryResponse { rows_json, count }))
+                Ok(Response::new(proto::QueryResponse { rows, count }))
             }
             Err(e) => Err(Status::internal(e.to_string())),
         }
@@ -80,11 +80,11 @@ impl Strata for StrataGrpcService {
         let tenant = self.tenant_from(&request).await?;
         let req = request.into_inner();
         let events: Vec<strata_core::memory::episodic::Event> = req
-            .events_json
-            .iter()
-            .filter_map(|json_str| {
-                let payload: serde_json::Value = serde_json::from_str(json_str).ok()?;
-                Some(strata_core::memory::episodic::Event {
+            .events
+            .into_iter()
+            .map(|s| {
+                let payload = super::convert::struct_to_json(s);
+                strata_core::memory::episodic::Event {
                     id: uuid::Uuid::new_v4(),
                     source: req.source.clone(),
                     event_type: payload
@@ -98,7 +98,7 @@ impl Strata for StrataGrpcService {
                     trace_id: None,
                     tags: vec![],
                     idempotency_key: None,
-                })
+                }
             })
             .collect();
 
@@ -145,7 +145,7 @@ impl Strata for StrataGrpcService {
                         id: r.entry.id.to_string(),
                         content: r.entry.content.clone(),
                         score: r.score,
-                        metadata_json: serde_json::to_string(&r.entry.metadata).unwrap_or_default(),
+                        metadata: Some(super::convert::json_to_struct(r.entry.metadata.clone())),
                     })
                     .collect();
                 Ok(Response::new(proto::SearchResponse {
@@ -174,14 +174,14 @@ impl Strata for StrataGrpcService {
             Ok(Some(entry)) => Ok(Response::new(proto::GetStateResponse {
                 agent_id: entry.agent_id,
                 key: entry.key,
-                value_json: serde_json::to_string(&entry.value).unwrap_or_default(),
+                value: Some(super::convert::json_to_pvalue(entry.value)),
                 version: entry.version,
                 found: true,
             })),
             Ok(None) => Ok(Response::new(proto::GetStateResponse {
                 agent_id: req.agent_id,
                 key: req.key,
-                value_json: String::new(),
+                value: None,
                 version: 0,
                 found: false,
             })),
@@ -195,8 +195,10 @@ impl Strata for StrataGrpcService {
     ) -> Result<Response<proto::SetStateResponse>, Status> {
         let tenant = self.tenant_from(&request).await?;
         let req = request.into_inner();
-        let value: serde_json::Value = serde_json::from_str(&req.value_json)
-            .unwrap_or(serde_json::Value::String(req.value_json.clone()));
+        let value = req
+            .value
+            .map(super::convert::pvalue_to_json)
+            .unwrap_or(serde_json::Value::Null);
 
         let set = match tenant {
             Some(t) => {
@@ -333,7 +335,9 @@ mod tests {
             .ingest(authed(
                 proto::IngestRequest {
                     source: "sa".into(),
-                    events_json: vec![r#"{"event_type":"e"}"#.into()],
+                    events: vec![crate::grpc::convert::json_to_struct(
+                        serde_json::json!({"event_type": "e"}),
+                    )],
                 },
                 "tenant-a",
             ))
@@ -353,10 +357,8 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(
-            qa.rows_json[0].contains("\"1\""),
-            "tenant-a should see 1 row"
-        );
+        let row_a = crate::grpc::convert::struct_to_json(qa.rows[0].clone());
+        assert_eq!(row_a["c"], "1", "tenant-a should see 1 row");
 
         // tenant-b sees nothing (isolation).
         let qb = service
@@ -369,7 +371,8 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert!(qb.rows_json[0].contains("\"0\""), "tenant-b leaked data!");
+        let row_b = crate::grpc::convert::struct_to_json(qb.rows[0].clone());
+        assert_eq!(row_b["c"], "0", "tenant-b leaked data!");
     }
 
     #[tokio::test]
@@ -380,7 +383,9 @@ mod tests {
                 proto::SetStateRequest {
                     agent_id: "bot".into(),
                     key: "mood".into(),
-                    value_json: "\"happy\"".into(),
+                    value: Some(crate::grpc::convert::json_to_pvalue(serde_json::json!(
+                        "happy"
+                    ))),
                 },
                 "tenant-a",
             ))
@@ -415,5 +420,8 @@ mod tests {
             .into_inner();
         assert!(ga.found);
         assert_eq!(ga.agent_id, "bot");
+        // The typed value round-trips back to "happy".
+        let v = crate::grpc::convert::pvalue_to_json(ga.value.unwrap());
+        assert_eq!(v, serde_json::json!("happy"));
     }
 }
