@@ -35,6 +35,13 @@ impl ClusterCoordinator {
         }
     }
 
+    /// Consistent-hash router for this cluster's write shards (see [`crate::shard`]). Single-group
+    /// clusters (`shards = 1`) route everything to shard 0; the accessor lets call sites compute a
+    /// key's target shard now, ahead of multi-group wiring.
+    pub fn shard_router(&self) -> crate::ShardRouter {
+        crate::ShardRouter::new(self.config.shards, 128)
+    }
+
     /// Start the Raft instance with the production gRPC network, and (in multi-node mode) serve
     /// this node's Raft instance to peers over gRPC on `cluster.listen`.
     pub async fn start_raft(&mut self, engine: Arc<StrataEngine>) -> crate::Result<()> {

@@ -38,6 +38,14 @@ pub struct ClusterConfig {
     /// HTTP/2 (rely on a service mesh / private network for confidentiality).
     #[serde(default)]
     pub tls: Option<RaftTlsConfig>,
+    /// Number of write shards (independent Raft groups). 1 = single group (today's default). >1 is
+    /// the consistent-hash routing foundation for horizontal write scaling.
+    #[serde(default = "default_shards")]
+    pub shards: usize,
+}
+
+fn default_shards() -> usize {
+    1
 }
 
 impl Default for ClusterConfig {
@@ -50,6 +58,7 @@ impl Default for ClusterConfig {
             data_dir: "./data/raft".into(),
             secret: None,
             tls: None,
+            shards: 1,
         }
     }
 }
@@ -99,6 +108,7 @@ mod tests {
             data_dir: "/tmp/raft".into(),
             secret: None,
             tls: None,
+            shards: 1,
         };
         let cloned = config.clone();
         assert_eq!(cloned.node_id, 5);

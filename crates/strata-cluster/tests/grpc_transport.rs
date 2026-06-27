@@ -53,6 +53,7 @@ async fn three_node_grpc_cluster_replicates_over_sockets() {
             // Exercise inter-node auth end-to-end: every node presents this Bearer token over gRPC.
             secret: Some("test-cluster-secret".into()),
             tls: None,
+            shards: 1,
         };
         let mut coord = ClusterCoordinator::new(config);
         // Production path: gRPC network factory + gRPC server bound to cluster.listen.

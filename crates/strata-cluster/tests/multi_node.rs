@@ -263,6 +263,7 @@ async fn cluster_forms_from_config_via_coordinator() {
             data_dir: ":memory:".into(),
             secret: None,
             tls: None,
+            shards: 1,
         };
         let mut coord = ClusterCoordinator::new(config);
         coord
