@@ -125,6 +125,10 @@ pub struct CognitionConfig {
     /// Number of read connections (query concurrency). Min 1.
     #[serde(default = "default_read_pool_size")]
     pub read_pool_size: usize,
+    /// Max active memories retained per scope (count-based forgetting + per-tenant quota). When a
+    /// scope exceeds this after an add, the lowest-importance memories are evicted. 0 = unlimited.
+    #[serde(default)]
+    pub max_memories_per_scope: usize,
 }
 
 impl Default for CognitionConfig {
@@ -139,6 +143,7 @@ impl Default for CognitionConfig {
             decay_half_life_days: 30.0,
             forget_threshold: 0.05,
             read_pool_size: default_read_pool_size(),
+            max_memories_per_scope: 0,
         }
     }
 }

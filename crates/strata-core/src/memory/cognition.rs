@@ -810,6 +810,53 @@ impl MemoryStore {
         Ok(ids)
     }
 
+    /// Evict the lowest-importance active memories in a scope beyond `cap` (count-based forgetting /
+    /// per-tenant quota). Returns the evicted ids so the caller can purge their vectors. cap 0 = no-op.
+    pub async fn enforce_scope_cap(
+        &self,
+        scope: &MemoryScope,
+        cap: usize,
+    ) -> crate::Result<Vec<Uuid>> {
+        if cap == 0 {
+            return Ok(vec![]);
+        }
+        let (where_sql, params) = scope.where_clause();
+        let db = self.write_db.lock();
+        // Highest importance first → keep the top `cap`, evict the tail.
+        let sql = format!(
+            "SELECT id FROM memories WHERE {where_sql} AND state = 'active' \
+             ORDER BY importance DESC, updated_at DESC"
+        );
+        let all_ids: Vec<Uuid> = {
+            let mut stmt = db
+                .prepare(&sql)
+                .map_err(|e| crate::Error::Query(e.to_string()))?;
+            let boxed: Vec<Box<dyn duckdb::ToSql>> = params
+                .iter()
+                .map(|p| Box::new(p.clone()) as Box<dyn duckdb::ToSql>)
+                .collect();
+            let refs: Vec<&dyn duckdb::ToSql> = boxed.iter().map(|b| b.as_ref()).collect();
+            let rows = stmt
+                .query_map(refs.as_slice(), |r| r.get::<_, String>(0))
+                .map_err(|e| crate::Error::Query(e.to_string()))?;
+            rows.filter_map(|r| r.ok())
+                .filter_map(|s| Uuid::parse_str(&s).ok())
+                .collect()
+        };
+        if all_ids.len() <= cap {
+            return Ok(vec![]);
+        }
+        let evict: Vec<Uuid> = all_ids[cap..].to_vec();
+        for id in &evict {
+            db.execute(
+                "DELETE FROM memories WHERE id = ?",
+                duckdb::params![id.to_string()],
+            )
+            .map_err(|e| crate::Error::State(format!("evict memory: {e}")))?;
+        }
+        Ok(evict)
+    }
+
     /// Delete a memory by id, scoped to a tenant. Returns true iff a row was deleted.
     pub async fn delete_scoped(&self, id: Uuid, tenant: &str) -> crate::Result<bool> {
         let db = self.write_db.lock();
