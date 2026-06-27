@@ -223,6 +223,188 @@ impl Strata for StrataGrpcService {
             version: env!("CARGO_PKG_VERSION").into(),
         }))
     }
+
+    // ── Memory cognition layer (tenant-scoped) ──
+
+    async fn add_memory(
+        &self,
+        request: Request<proto::AddMemoryRequest>,
+    ) -> Result<Response<prost_types::Struct>, Status> {
+        let tenant = self.tenant_from(&request).await?;
+        let req = request.into_inner();
+        let input = strata_core::memory::cognition::MemoryInput {
+            scope: scope_from(req.scope, &tenant),
+            subject: req.subject,
+            content: req.content,
+            importance: req.importance,
+            source_event_ids: vec![],
+            metadata: serde_json::json!({}),
+        };
+        let added = self
+            .engine
+            .memory_add(input)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let v = serde_json::to_value(added).unwrap_or_default();
+        Ok(Response::new(super::convert::json_to_struct(v)))
+    }
+
+    async fn search_memory(
+        &self,
+        request: Request<proto::SearchMemoryRequest>,
+    ) -> Result<Response<proto::MemoryHits>, Status> {
+        let tenant = self.tenant_from(&request).await?;
+        let req = request.into_inner();
+        let scope = scope_from(req.scope, &tenant);
+        let k = if req.k == 0 { 5 } else { req.k as usize };
+        let hits = self
+            .engine
+            .memory_search(&req.query, &scope, k)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let hits = hits
+            .into_iter()
+            .map(|h| super::convert::json_to_struct(serde_json::to_value(h).unwrap_or_default()))
+            .collect();
+        Ok(Response::new(proto::MemoryHits { hits }))
+    }
+
+    async fn get_memories(
+        &self,
+        request: Request<proto::GetMemoriesRequest>,
+    ) -> Result<Response<proto::MemoryList>, Status> {
+        let tenant = self.tenant_from(&request).await?;
+        let req = request.into_inner();
+        let scope = scope_from(req.scope, &tenant);
+        let limit = if req.limit == 0 {
+            50
+        } else {
+            req.limit as usize
+        };
+        let mems = self
+            .engine
+            .memory_all(&scope, limit)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let memories = mems
+            .into_iter()
+            .map(|m| super::convert::json_to_struct(serde_json::to_value(m).unwrap_or_default()))
+            .collect();
+        Ok(Response::new(proto::MemoryList { memories }))
+    }
+
+    async fn delete_memory(
+        &self,
+        request: Request<proto::DeleteMemoryRequest>,
+    ) -> Result<Response<proto::DeleteMemoryResponse>, Status> {
+        let tenant = self.tenant_from(&request).await?;
+        let req = request.into_inner();
+        let id = uuid::Uuid::parse_str(&req.id)
+            .map_err(|_| Status::invalid_argument("invalid memory id"))?;
+        let deleted = match tenant {
+            Some(t) => self
+                .engine
+                .memory_delete_scoped(id, &t)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?,
+            None => {
+                self.engine
+                    .memory_delete(id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                true
+            }
+        };
+        Ok(Response::new(proto::DeleteMemoryResponse { deleted }))
+    }
+
+    // ── Sessions (tenant-scoped) ──
+
+    async fn start_session(
+        &self,
+        request: Request<proto::StartSessionRequest>,
+    ) -> Result<Response<proto::SessionResponse>, Status> {
+        let tenant = self.tenant_from(&request).await?;
+        let req = request.into_inner();
+        let parent = req.parent_session_id.as_deref();
+        let res = match &tenant {
+            Some(t) => {
+                self.engine
+                    .session_start_for_tenant(&req.session_id, &req.agent_id, parent, None, t)
+                    .await
+            }
+            None => {
+                self.engine
+                    .session_start(&req.session_id, &req.agent_id, parent, None)
+                    .await
+            }
+        };
+        res.map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(proto::SessionResponse {
+            session_id: req.session_id,
+            status: "started".into(),
+        }))
+    }
+
+    async fn end_session(
+        &self,
+        request: Request<proto::EndSessionRequest>,
+    ) -> Result<Response<proto::SessionResponse>, Status> {
+        let tenant = self.tenant_from(&request).await?;
+        let req = request.into_inner();
+        let summary = req.summary.as_deref();
+        match &tenant {
+            Some(t) => self
+                .engine
+                .session_end_for_tenant(&req.session_id, summary, t)
+                .await
+                .map(|_| ()),
+            None => self.engine.session_end(&req.session_id, summary).await,
+        }
+        .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(proto::SessionResponse {
+            session_id: req.session_id,
+            status: "ended".into(),
+        }))
+    }
+
+    async fn recall_session(
+        &self,
+        request: Request<proto::RecallSessionRequest>,
+    ) -> Result<Response<proto::RecallSessionResponse>, Status> {
+        let tenant = self.tenant_from(&request).await?;
+        let req = request.into_inner();
+        let events = match &tenant {
+            Some(t) => {
+                self.engine
+                    .session_recall_for_tenant(&req.session_id, t)
+                    .await
+            }
+            None => self.engine.session_recall(&req.session_id).await,
+        }
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let events = events
+            .into_iter()
+            .map(super::convert::json_to_struct)
+            .collect();
+        Ok(Response::new(proto::RecallSessionResponse { events }))
+    }
+}
+
+/// Build a cognition scope from a proto scope + the caller's authenticated tenant (which always
+/// wins — a client cannot claim another tenant). Empty user/agent/session fields become None.
+fn scope_from(
+    s: Option<proto::MemoryScope>,
+    tenant: &Option<String>,
+) -> strata_core::memory::cognition::MemoryScope {
+    let s = s.unwrap_or_default();
+    let n = |x: String| if x.is_empty() { None } else { Some(x) };
+    strata_core::memory::cognition::MemoryScope {
+        tenant_id: tenant.clone().unwrap_or_else(|| "default".into()),
+        user_id: n(s.user_id),
+        agent_id: n(s.agent_id),
+        session_id: n(s.session_id),
+    }
 }
 
 /// Handle returned by `start_grpc` to control graceful shutdown.
@@ -423,5 +605,85 @@ mod tests {
         // The typed value round-trips back to "happy".
         let v = crate::grpc::convert::pvalue_to_json(ga.value.unwrap());
         assert_eq!(v, serde_json::json!("happy"));
+    }
+
+    #[tokio::test]
+    async fn grpc_memory_and_sessions_work_and_isolate_tenants() {
+        let service = svc().await;
+        let scope = || {
+            Some(proto::MemoryScope {
+                user_id: "alice".into(),
+                ..Default::default()
+            })
+        };
+
+        // tenant-a adds a memory via gRPC.
+        service
+            .add_memory(authed(
+                proto::AddMemoryRequest {
+                    content: "likes tea".into(),
+                    scope: scope(),
+                    subject: None,
+                    importance: None,
+                },
+                "tenant-a",
+            ))
+            .await
+            .unwrap();
+
+        // tenant-a search finds it.
+        let hits_a = service
+            .search_memory(authed(
+                proto::SearchMemoryRequest {
+                    query: "tea".into(),
+                    scope: scope(),
+                    k: 5,
+                },
+                "tenant-a",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(hits_a.hits.len(), 1);
+
+        // tenant-b sees nothing (isolation).
+        let hits_b = service
+            .search_memory(authed(
+                proto::SearchMemoryRequest {
+                    query: "tea".into(),
+                    scope: scope(),
+                    k: 5,
+                },
+                "tenant-b",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(hits_b.hits.len(), 0, "tenant-b leaked memory!");
+
+        // Session lifecycle over gRPC.
+        service
+            .start_session(authed(
+                proto::StartSessionRequest {
+                    session_id: "s1".into(),
+                    agent_id: "bot".into(),
+                    parent_session_id: None,
+                },
+                "tenant-a",
+            ))
+            .await
+            .unwrap();
+        let recalled = service
+            .recall_session(authed(
+                proto::RecallSessionRequest {
+                    session_id: "s1".into(),
+                },
+                "tenant-a",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        // A fresh session has no events yet — the call succeeds.
+        assert_eq!(recalled.events.len(), 0);
     }
 }

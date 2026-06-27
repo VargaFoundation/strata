@@ -23,6 +23,83 @@ service Strata {
 
   // Health check
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // ── Memory cognition layer ──
+  rpc AddMemory(AddMemoryRequest) returns (google.protobuf.Struct);
+  rpc SearchMemory(SearchMemoryRequest) returns (MemoryHits);
+  rpc GetMemories(GetMemoriesRequest) returns (MemoryList);
+  rpc DeleteMemory(DeleteMemoryRequest) returns (DeleteMemoryResponse);
+
+  // ── Sessions ──
+  rpc StartSession(StartSessionRequest) returns (SessionResponse);
+  rpc EndSession(EndSessionRequest) returns (SessionResponse);
+  rpc RecallSession(RecallSessionRequest) returns (RecallSessionResponse);
+}
+
+// Scope tuple for the memory cognition layer. The server overrides tenant_id with the caller's
+// authenticated tenant (a client cannot claim another tenant); empty user/agent/session = unscoped.
+message MemoryScope {
+  string user_id = 1;
+  string agent_id = 2;
+  string session_id = 3;
+}
+
+message AddMemoryRequest {
+  string content = 1;
+  MemoryScope scope = 2;
+  optional string subject = 3;
+  optional float importance = 4;
+}
+
+message SearchMemoryRequest {
+  string query = 1;
+  MemoryScope scope = 2;
+  uint32 k = 3;
+}
+
+message MemoryHits {
+  repeated google.protobuf.Struct hits = 1;
+}
+
+message GetMemoriesRequest {
+  MemoryScope scope = 1;
+  uint32 limit = 2;
+}
+
+message MemoryList {
+  repeated google.protobuf.Struct memories = 1;
+}
+
+message DeleteMemoryRequest {
+  string id = 1;
+}
+
+message DeleteMemoryResponse {
+  bool deleted = 1;
+}
+
+message StartSessionRequest {
+  string session_id = 1;
+  string agent_id = 2;
+  optional string parent_session_id = 3;
+}
+
+message EndSessionRequest {
+  string session_id = 1;
+  optional string summary = 2;
+}
+
+message SessionResponse {
+  string session_id = 1;
+  string status = 2;
+}
+
+message RecallSessionRequest {
+  string session_id = 1;
+}
+
+message RecallSessionResponse {
+  repeated google.protobuf.Struct events = 1;
 }
 
 message QueryRequest {
