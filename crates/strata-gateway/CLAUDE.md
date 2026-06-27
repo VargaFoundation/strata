@@ -32,7 +32,7 @@ LLM proxy) into calls on `strata_core::StrataEngine`. Also handles authenticatio
 | GET | `/metrics` | Prometheus metrics | No | **Working** |
 | POST | `/api/v1/query` | SQL query via DuckDB | Yes* | **Working** |
 | POST | `/api/v1/ingest` | event ingestion (tenant-aware) | Yes* | **Working** |
-| POST | `/api/v1/webhook/{source}` | webhook ingestion | Yes* | **Working** |
+| POST | `/api/v1/webhook/{source}` | webhook ingestion (HMAC-verified if `webhook_secret` set) | Yes* | **Working** |
 | POST | `/api/v1/search` | semantic vector search | Yes* | **Working** |
 | POST | `/api/v1/embed-and-search` | embed text + search | Yes* | **Working** |
 | GET | `/api/v1/state/{agent_id}/{key}` | get state | Yes* | **Working** |
@@ -46,6 +46,7 @@ LLM proxy) into calls on `strata_core::StrataEngine`. Also handles authenticatio
 | POST | `/api/v1/admin/retention` | enforce retention | Yes* | **Working** |
 | GET/PUT | `/api/v1/admin/retention/policies` | CRUD retention policies | Yes* | **Working** |
 | POST | `/api/v1/admin/backup` | trigger backup | Yes* | **Working** |
+| DELETE | `/api/v1/admin/tenants/{tenant_id}` | GDPR erasure (all stores) | Yes* (admin) | **Working** |
 | GET | `/api/v1/admin/audit` | query audit log | Yes* | **Working** |
 | POST | `/mcp` | MCP JSON-RPC (Streamable HTTP; session id) | No* | **Working** |
 | GET | `/mcp` | MCP server→client SSE stream | No* | **Working** |

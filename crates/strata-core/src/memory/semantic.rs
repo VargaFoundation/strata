@@ -265,6 +265,23 @@ impl SemanticStore {
         Ok(())
     }
 
+    /// Delete every vector whose metadata `tenant_id` matches (GDPR tenant erasure). Returns count.
+    pub async fn delete_by_tenant(&self, tenant: &str) -> crate::Result<u64> {
+        let ids: Vec<Uuid> = self
+            .entries
+            .iter()
+            .filter(|e| {
+                e.value().metadata.get("tenant_id").and_then(|v| v.as_str()) == Some(tenant)
+            })
+            .map(|e| e.value().id)
+            .collect();
+        let n = ids.len() as u64;
+        for id in ids {
+            self.delete(id).await?;
+        }
+        Ok(n)
+    }
+
     /// Save the index and metadata to disk for persistence.
     ///
     /// Saves the USearch index to `{dir}/index.usearch` and metadata to `{dir}/metadata.json`.

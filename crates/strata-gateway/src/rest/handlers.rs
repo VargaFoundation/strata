@@ -30,6 +30,38 @@ fn api_ok(body: serde_json::Value) -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }
 
+/// Configured HMAC secret for verifying incoming webhook signatures (layered as an Extension).
+#[derive(Clone)]
+pub struct WebhookSecret(pub Option<String>);
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
+    if s.len() % 2 != 0 {
+        return Err(());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ()))
+        .collect()
+}
+
+/// Verify a GitHub-style `sha256=<hex>` HMAC-SHA256 signature over the raw body (constant-time).
+fn verify_webhook_signature(secret: &str, signature_header: Option<&str>, body: &[u8]) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let Some(sig) = signature_header else {
+        return false;
+    };
+    let hex = sig.strip_prefix("sha256=").unwrap_or(sig);
+    let Ok(expected) = hex_decode(hex) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    mac.verify_slice(&expected).is_ok()
+}
+
 /// Map a cluster (Raft) write error to an HTTP response. A leadership change is **retryable**
 /// (503) — leader-forwarding will route the retry to the new leader; anything else is a 500.
 fn cluster_write_error(e: strata_cluster::Error) -> Response {
@@ -279,13 +311,38 @@ pub async fn ingest(
 }
 
 /// Webhook ingestion — normalizes vendor payloads into Strata events (tenant-scoped).
+///
+/// When `webhook_secret` is configured, the raw body must carry a valid GitHub-style
+/// `X-Hub-Signature-256: sha256=<hmac>` (HMAC-SHA256 over the body), else the request is rejected.
 pub async fn webhook(
     State(engine): State<Arc<StrataEngine>>,
     auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    webhook_secret: Option<Extension<WebhookSecret>>,
     Path(source): Path<String>,
-    Json(payload): Json<serde_json::Value>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "webhook").increment(1);
+
+    // Verify the HMAC signature over the RAW body if a secret is configured.
+    if let Some(Extension(WebhookSecret(Some(secret)))) = &webhook_secret {
+        let sig = headers
+            .get("x-hub-signature-256")
+            .or_else(|| headers.get("x-signature-256"))
+            .and_then(|v| v.to_str().ok());
+        if !verify_webhook_signature(secret, sig, &body) {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "INVALID_SIGNATURE",
+                "webhook signature verification failed".into(),
+            );
+        }
+    }
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, "INVALID_JSON", e.to_string()),
+    };
 
     match strata_core::ingest::webhook::normalize_webhook(&source, &payload) {
         Ok(events) => {
@@ -549,6 +606,24 @@ pub async fn enforce_retention(State(engine): State<Arc<StrataEngine>>) -> Respo
 }
 
 /// Trigger a backup of all stores to the configured data directory.
+/// GDPR erasure — delete ALL data for a tenant across every store. Admin only (under /admin/).
+///
+/// DELETE /api/v1/admin/tenants/{tenant_id}
+pub async fn delete_tenant(
+    State(engine): State<Arc<StrataEngine>>,
+    Path(tenant_id): Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "delete_tenant").increment(1);
+    match engine.delete_tenant(&tenant_id).await {
+        Ok(summary) => api_ok(summary),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DELETE_TENANT_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
 pub async fn backup(State(engine): State<Arc<StrataEngine>>) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "backup").increment(1);
 
@@ -1184,5 +1259,46 @@ async fn handle_state_ws(mut socket: WebSocket, engine: Arc<StrataEngine>, agent
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn webhook_signature_verifies_and_rejects() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let secret = "supersecret-webhook-key";
+        let body = br#"{"hello":"world"}"#;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let sig = format!("sha256={}", hex_encode(&mac.finalize().into_bytes()));
+
+        assert!(
+            verify_webhook_signature(secret, Some(&sig), body),
+            "valid sig accepted"
+        );
+        assert!(
+            !verify_webhook_signature("wrong", Some(&sig), body),
+            "wrong secret rejected"
+        );
+        assert!(
+            !verify_webhook_signature(secret, Some(&sig), b"tampered"),
+            "tampered body rejected"
+        );
+        assert!(
+            !verify_webhook_signature(secret, None, body),
+            "missing signature rejected"
+        );
+        assert!(
+            !verify_webhook_signature(secret, Some("garbage"), body),
+            "malformed sig rejected"
+        );
     }
 }

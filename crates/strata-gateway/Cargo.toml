@@ -30,6 +30,8 @@ prost-types.workspace = true
 pgwire.workspace = true
 
 jsonwebtoken.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 duckdb.workspace = true
 parking_lot.workspace = true
 

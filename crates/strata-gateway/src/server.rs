@@ -37,6 +37,10 @@ pub struct GatewayConfig {
     /// Durable audit-log path (file-backed DuckDB). Empty/`:memory:` = in-memory (non-durable).
     #[serde(default)]
     pub audit_db_path: String,
+    /// HMAC-SHA256 secret for verifying incoming webhook signatures (GitHub-style
+    /// `X-Hub-Signature-256`). When set, unsigned/mis-signed webhooks are rejected.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -75,6 +79,7 @@ impl Default for GatewayConfig {
             rate_limit_per_key: 0,
             oidc: crate::auth::oidc::OidcConfig::default(),
             audit_db_path: "./data/audit.duckdb".into(),
+            webhook_secret: None,
         }
     }
 }
@@ -118,20 +123,32 @@ impl GatewayServer {
             };
             // Make the audit log durable (file-backed) for compliance.
             let state = state.with_audit_path(&config.audit_db_path);
-            if state.is_empty() {
-                tracing::warn!(
-                    "auth_enabled=true but no api_keys or jwt_secret configured — auth disabled"
-                );
-                None
-            } else {
-                tracing::info!(
-                    api_keys = config.api_keys.len(),
-                    jwt = config.jwt_secret.is_some(),
-                    rate_limit = config.rate_limit_per_key,
-                    "Authentication enabled"
-                );
-                Some(state)
+            // Reject a weak JWT secret (HS256 needs ≥32 bytes of entropy).
+            if let Some(secret) = &config.jwt_secret {
+                if secret.len() < 32 {
+                    return Err(crate::Error::Auth(format!(
+                        "jwt_secret is too short ({} bytes); HS256 requires at least 32 bytes",
+                        secret.len()
+                    )));
+                }
             }
+            // Fail CLOSED: refuse to start unauthenticated when auth was explicitly requested,
+            // rather than silently disabling it (a dangerous misconfiguration otherwise).
+            if state.is_empty() {
+                return Err(crate::Error::Auth(
+                    "auth_enabled=true but no api_keys, jwt_secret, or OIDC configured — refusing \
+                     to start (fail-closed). Configure a credential or set auth_enabled=false."
+                        .into(),
+                ));
+            }
+            tracing::info!(
+                api_keys = config.api_keys.len(),
+                jwt = config.jwt_secret.is_some(),
+                oidc = config.oidc.enabled,
+                rate_limit = config.rate_limit_per_key,
+                "Authentication enabled"
+            );
+            Some(state)
         } else {
             None
         };
@@ -294,6 +311,51 @@ mod tests {
         .await
         .unwrap();
         gateway.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_enabled_without_credentials_fails_closed() {
+        let engine = Arc::new(
+            StrataEngine::new(strata_core::CoreConfig::default())
+                .await
+                .unwrap(),
+        );
+        let config = GatewayConfig {
+            listen: "127.0.0.1:0".into(),
+            auth_enabled: true, // but no api_keys / jwt_secret / OIDC
+            ..Default::default()
+        };
+        let result = GatewayServer::start(
+            engine,
+            config,
+            None,
+            None::<Arc<tokio::sync::RwLock<ClusterCoordinator>>>,
+        )
+        .await;
+        assert!(result.is_err(), "must refuse to start (fail-closed)");
+    }
+
+    #[tokio::test]
+    async fn weak_jwt_secret_is_rejected() {
+        let engine = Arc::new(
+            StrataEngine::new(strata_core::CoreConfig::default())
+                .await
+                .unwrap(),
+        );
+        let config = GatewayConfig {
+            listen: "127.0.0.1:0".into(),
+            auth_enabled: true,
+            jwt_secret: Some("short".into()), // < 32 bytes
+            ..Default::default()
+        };
+        let result = GatewayServer::start(
+            engine,
+            config,
+            None,
+            None::<Arc<tokio::sync::RwLock<ClusterCoordinator>>>,
+        )
+        .await;
+        assert!(result.is_err(), "weak jwt_secret must be rejected");
     }
 
     #[test]

@@ -104,6 +104,10 @@ pub fn router_with_engine_and_auth(
             axum::routing::get(handlers::retention_policies).put(handlers::retention_policies),
         )
         .route("/admin/backup", axum::routing::post(handlers::backup))
+        .route(
+            "/admin/tenants/{tenant_id}",
+            axum::routing::delete(handlers::delete_tenant),
+        )
         .route("/admin/audit", axum::routing::get(handlers::audit_query))
         .route(
             "/state/{agent_id}/watch",
@@ -142,6 +146,11 @@ pub fn router_with_engine_and_auth(
 
     // Keep a handle so MCP + LLM-proxy routes can be authenticated too.
     let protocol_auth = auth_state.clone();
+
+    // Expose the configured webhook HMAC secret to the webhook handler.
+    api_routes = api_routes.layer(axum::Extension(handlers::WebhookSecret(
+        config.webhook_secret.clone(),
+    )));
 
     // Apply auth middleware if configured
     if let Some(state) = auth_state {

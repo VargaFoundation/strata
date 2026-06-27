@@ -382,11 +382,13 @@ impl MemoryStore {
 
     /// Create an in-memory store (testing).
     pub fn new() -> Self {
-        Self::open(Path::new(":memory:")).expect("failed to create in-memory memory store")
+        Self::open(Path::new(":memory:"), Self::DEFAULT_READ_POOL_SIZE)
+            .expect("failed to create in-memory memory store")
     }
 
     /// Open or create a memory store at the given path.
-    pub fn open(path: &Path) -> crate::Result<Self> {
+    pub fn open(path: &Path, read_pool_size: usize) -> crate::Result<Self> {
+        let read_pool_size = read_pool_size.max(1);
         let write_conn = if path.as_os_str() == ":memory:" {
             Connection::open_in_memory()
         } else {
@@ -401,8 +403,8 @@ impl MemoryStore {
 
         Self::init_schema(&write_conn)?;
 
-        let mut read_pool = Vec::with_capacity(Self::DEFAULT_READ_POOL_SIZE);
-        for _ in 0..Self::DEFAULT_READ_POOL_SIZE {
+        let mut read_pool = Vec::with_capacity(read_pool_size);
+        for _ in 0..read_pool_size {
             let conn = write_conn
                 .try_clone()
                 .map_err(|e| crate::Error::Storage(format!("failed to clone read conn: {e}")))?;
@@ -785,6 +787,29 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Delete all memories for a tenant (GDPR erasure). Returns the deleted ids so the caller can
+    /// purge their vectors from the index.
+    pub async fn delete_by_tenant(&self, tenant: &str) -> crate::Result<Vec<Uuid>> {
+        let db = self.write_db.lock();
+        let ids: Vec<Uuid> = {
+            let mut stmt = db
+                .prepare("SELECT id FROM memories WHERE tenant_id = ?")
+                .map_err(|e| crate::Error::Query(e.to_string()))?;
+            let rows = stmt
+                .query_map([tenant], |r| r.get::<_, String>(0))
+                .map_err(|e| crate::Error::Query(e.to_string()))?;
+            rows.filter_map(|r| r.ok())
+                .filter_map(|s| Uuid::parse_str(&s).ok())
+                .collect()
+        };
+        db.execute(
+            "DELETE FROM memories WHERE tenant_id = ?",
+            duckdb::params![tenant],
+        )
+        .map_err(|e| crate::Error::State(format!("delete memories by tenant: {e}")))?;
+        Ok(ids)
+    }
+
     /// Delete a memory by id, scoped to a tenant. Returns true iff a row was deleted.
     pub async fn delete_scoped(&self, id: Uuid, tenant: &str) -> crate::Result<bool> {
         let db = self.write_db.lock();
@@ -1113,12 +1138,12 @@ mod tests {
         let path = dir.path().join("memories.duckdb");
         let mem = Memory::new(scope(), "durable fact");
         {
-            let store = MemoryStore::open(&path).unwrap();
+            let store = MemoryStore::open(&path, 4).unwrap();
             store.insert(&mem, None).await.unwrap();
             assert_eq!(store.count().await.unwrap(), 1);
         }
         {
-            let store = MemoryStore::open(&path).unwrap();
+            let store = MemoryStore::open(&path, 4).unwrap();
             assert_eq!(store.count().await.unwrap(), 1);
             assert_eq!(
                 store.get(mem.id).await.unwrap().unwrap().content,

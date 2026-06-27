@@ -78,7 +78,8 @@ impl std::fmt::Debug for EpisodicStore {
 impl EpisodicStore {
     /// Create an in-memory episodic store.
     pub fn new() -> Self {
-        Self::open(Path::new(":memory:")).expect("failed to create in-memory episodic store")
+        Self::open(Path::new(":memory:"), Self::DEFAULT_READ_POOL_SIZE)
+            .expect("failed to create in-memory episodic store")
     }
 
     /// Number of reader connections in the pool.
@@ -88,7 +89,8 @@ impl EpisodicStore {
     ///
     /// Use `:memory:` for an in-memory store (testing) or a file path for persistence.
     /// For file-backed stores, a pool of read connections is created for concurrent queries.
-    pub fn open(path: &Path) -> crate::Result<Self> {
+    pub fn open(path: &Path, read_pool_size: usize) -> crate::Result<Self> {
+        let read_pool_size = read_pool_size.max(1);
         let write_conn = if path.as_os_str() == ":memory:" {
             Connection::open_in_memory()
         } else {
@@ -104,8 +106,8 @@ impl EpisodicStore {
         Self::init_schema(&write_conn)?;
 
         // Create read connection pool via try_clone (shares the same underlying database)
-        let mut read_pool = Vec::with_capacity(Self::DEFAULT_READ_POOL_SIZE);
-        for _ in 0..Self::DEFAULT_READ_POOL_SIZE {
+        let mut read_pool = Vec::with_capacity(read_pool_size);
+        for _ in 0..read_pool_size {
             let conn = write_conn
                 .try_clone()
                 .map_err(|e| crate::Error::Storage(format!("failed to clone read conn: {e}")))?;
@@ -127,6 +129,22 @@ impl EpisodicStore {
     /// Acquire the write connection (for DDL, backup, retention operations).
     pub fn write_conn(&self) -> parking_lot::MutexGuard<'_, Connection> {
         self.write_db.lock()
+    }
+
+    /// Delete all events and sessions for a tenant (GDPR erasure). Returns events deleted.
+    pub async fn delete_by_tenant(&self, tenant: &str) -> crate::Result<u64> {
+        let db = self.write_db.lock();
+        let n = db
+            .execute(
+                "DELETE FROM episodic WHERE tenant_id = ?",
+                duckdb::params![tenant],
+            )
+            .map_err(|e| crate::Error::Query(format!("delete episodic by tenant: {e}")))?;
+        let _ = db.execute(
+            "DELETE FROM sessions WHERE tenant_id = ?",
+            duckdb::params![tenant],
+        );
+        Ok(n as u64)
     }
 
     /// Acquire a connection for reading from the round-robin pool.
@@ -923,7 +941,7 @@ mod tests {
 
         // Build a source store with two events and EXPORT it.
         {
-            let src = EpisodicStore::open(&dir.path().join("src.duckdb")).unwrap();
+            let src = EpisodicStore::open(&dir.path().join("src.duckdb"), 4).unwrap();
             src.append(&[make_event("snap", "e1"), make_event("snap", "e2")])
                 .await
                 .unwrap();
@@ -1007,14 +1025,14 @@ mod tests {
 
         // Write data
         {
-            let store = EpisodicStore::open(&db_path).unwrap();
+            let store = EpisodicStore::open(&db_path, 4).unwrap();
             store.append(&[make_event("app", "click")]).await.unwrap();
             assert_eq!(store.count().await.unwrap(), 1);
         }
 
         // Reopen and verify data survived
         {
-            let store = EpisodicStore::open(&db_path).unwrap();
+            let store = EpisodicStore::open(&db_path, 4).unwrap();
             assert_eq!(store.count().await.unwrap(), 1);
             let events = store.query_by_source("app", 10).await.unwrap();
             assert_eq!(events.len(), 1);

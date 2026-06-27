@@ -344,7 +344,7 @@ async fn stream_passthrough(
 
 /// Stream from Anthropic, translating its SSE events into OpenAI `chat.completion.chunk`s.
 async fn stream_anthropic(http: &Client, req: &ChatCompletionRequest) -> Response {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let api_key = strata_core::config::resolve_secret("ANTHROPIC_API_KEY");
     if api_key.is_empty() {
         return error_response("ANTHROPIC_API_KEY environment variable not set").into_response();
     }
@@ -664,7 +664,7 @@ async fn forward_to_anthropic(
     req: &ChatCompletionRequest,
 ) -> Json<serde_json::Value> {
     // Translate OpenAI format to Anthropic Messages API format
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let api_key = strata_core::config::resolve_secret("ANTHROPIC_API_KEY");
     if api_key.is_empty() {
         return error_response("ANTHROPIC_API_KEY environment variable not set");
     }

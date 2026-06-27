@@ -122,6 +122,9 @@ pub struct CognitionConfig {
     pub decay_half_life_days: f32,
     /// Memories whose time-decayed importance falls below this are forgotten (expired).
     pub forget_threshold: f32,
+    /// Number of read connections (query concurrency). Min 1.
+    #[serde(default = "default_read_pool_size")]
+    pub read_pool_size: usize,
 }
 
 impl Default for CognitionConfig {
@@ -135,6 +138,7 @@ impl Default for CognitionConfig {
             default_importance: 0.5,
             decay_half_life_days: 30.0,
             forget_threshold: 0.05,
+            read_pool_size: default_read_pool_size(),
         }
     }
 }
@@ -145,6 +149,14 @@ pub struct EpisodicConfig {
     pub db_path: String,
     pub wal_dir: String,
     pub default_retention_days: u32,
+    /// Number of read connections (concurrency for queries). Min 1.
+    #[serde(default = "default_read_pool_size")]
+    pub read_pool_size: usize,
+}
+
+/// Default read-connection pool size for the DuckDB-backed stores.
+fn default_read_pool_size() -> usize {
+    8
 }
 
 impl Default for EpisodicConfig {
@@ -153,6 +165,7 @@ impl Default for EpisodicConfig {
             db_path: "./data/episodic.duckdb".into(),
             wal_dir: "./data/wal".into(),
             default_retention_days: 365,
+            read_pool_size: default_read_pool_size(),
         }
     }
 }

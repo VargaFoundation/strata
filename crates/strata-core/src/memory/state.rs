@@ -293,6 +293,26 @@ impl StateStore {
         Ok(count)
     }
 
+    /// Delete all state whose agent_id starts with the given prefix (GDPR tenant erasure). Returns
+    /// rows deleted; clears the cache (its entries can't be selectively matched cheaply).
+    pub async fn delete_by_prefix(&self, prefix: &str) -> crate::Result<u64> {
+        let esc = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("{esc}%");
+        let n = {
+            let db = self.db.lock();
+            db.execute(
+                "DELETE FROM state WHERE agent_id LIKE ?1 ESCAPE '\\'",
+                rusqlite::params![pattern],
+            )
+            .map_err(|e| crate::Error::State(e.to_string()))?
+        };
+        self.cache.clear();
+        Ok(n as u64)
+    }
+
     /// Delete a key.
     pub async fn delete(&self, agent_id: &str, key: &str) -> crate::Result<()> {
         let db = self.db.lock();

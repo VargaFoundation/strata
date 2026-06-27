@@ -47,10 +47,13 @@ impl StrataEngine {
     pub async fn new(config: CoreConfig) -> Result<Self> {
         // Initialize episodic store (file-backed or in-memory DuckDB)
         let episodic_path = Path::new(&config.memory.episodic.db_path);
-        let episodic = Arc::new(EpisodicStore::open(episodic_path).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "falling back to in-memory episodic store");
-            EpisodicStore::new()
-        }));
+        let episodic = Arc::new(
+            EpisodicStore::open(episodic_path, config.memory.episodic.read_pool_size)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "falling back to in-memory episodic store");
+                    EpisodicStore::new()
+                }),
+        );
         if config.memory.episodic.db_path != ":memory:" {
             tracing::info!(path = %config.memory.episodic.db_path, "episodic store: file-backed");
         }
@@ -70,10 +73,14 @@ impl StrataEngine {
 
         // Initialize memory-cognition store (bi-temporal facts) + its dedicated vector index
         let memory_path = Path::new(&config.memory.cognition.db_path);
-        let memory_store = Arc::new(MemoryStore::open(memory_path).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "falling back to in-memory cognition store");
-            MemoryStore::new()
-        }));
+        let memory_store = Arc::new(
+            MemoryStore::open(memory_path, config.memory.cognition.read_pool_size).unwrap_or_else(
+                |e| {
+                    tracing::warn!(error = %e, "falling back to in-memory cognition store");
+                    MemoryStore::new()
+                },
+            ),
+        );
         let memory_index = Arc::new(
             SemanticStore::with_dimension(config.embedding.dimension)
                 .unwrap_or_else(|_| SemanticStore::new()),
@@ -221,6 +228,7 @@ impl StrataEngine {
 
     /// Query events by source.
     pub async fn query_by_source(&self, source: &str, limit: usize) -> Result<Vec<Event>> {
+        let limit = limit.min(self.config.query.max_rows);
         self.episodic.query_by_source(source, limit).await
     }
 
@@ -458,6 +466,7 @@ impl StrataEngine {
         agent_id: &str,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>> {
+        let limit = limit.min(self.config.query.max_rows);
         self.episodic.list_sessions(agent_id, limit).await
     }
 
@@ -850,16 +859,32 @@ impl StrataEngine {
                 .collect());
         }
 
-        let fused = rrf_fuse(&rankings, Self::MEMORY_RRF_K, k);
-        let mut out = Vec::with_capacity(fused.len());
-        for (id, score) in fused {
-            if let Some(memory) = by_id.remove(&id) {
-                out.push(MemoryHit { memory, score });
-            } else if let Ok(Some(memory)) = self.memory_store.get(id).await {
-                out.push(MemoryHit { memory, score });
-            }
+        // Over-fetch, then re-rank by relevance blended with importance + recency, so a recent or
+        // important memory can outrank a marginally-more-relevant stale one.
+        let fused = rrf_fuse(&rankings, Self::MEMORY_RRF_K, (k * 3).max(k));
+        let now = chrono::Utc::now();
+        let mut scored: Vec<MemoryHit> = Vec::with_capacity(fused.len());
+        for (id, rrf) in fused {
+            let memory = match by_id.remove(&id) {
+                Some(m) => m,
+                None => match self.memory_store.get(id).await {
+                    Ok(Some(m)) => m,
+                    _ => continue,
+                },
+            };
+            // Recency in [0,1] with a 30-day half-life; importance in [0,1].
+            let age_days = (now - memory.updated_at).num_seconds().max(0) as f32 / 86_400.0;
+            let recency = 0.5_f32.powf(age_days / 30.0);
+            let score = rrf * (1.0 + 0.3 * memory.importance + 0.2 * recency);
+            scored.push(MemoryHit { memory, score });
         }
-        Ok(out)
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(k);
+        Ok(scored)
     }
 
     /// Get a memory by id.
@@ -869,7 +894,33 @@ impl StrataEngine {
 
     /// List active memories in a scope (importance/recency order).
     pub async fn memory_all(&self, scope: &MemoryScope, limit: usize) -> Result<Vec<Memory>> {
+        // Clamp to the configured cap so a caller can't request an unbounded result set (OOM).
+        let limit = limit.min(self.config.query.max_rows);
         self.memory_store.list_active(scope, limit).await
+    }
+
+    /// GDPR erasure: delete ALL of a tenant's data across every store — episodic events + sessions,
+    /// memories + their vectors, agent state, and event embeddings. Sequential best-effort (the
+    /// stores are independent engines, so it isn't a single transaction); returns a per-store
+    /// summary. Idempotent.
+    pub async fn delete_tenant(&self, tenant: &str) -> Result<serde_json::Value> {
+        let events = self.episodic.delete_by_tenant(tenant).await?;
+        let mem_ids = self.memory_store.delete_by_tenant(tenant).await?;
+        for id in &mem_ids {
+            let _ = self.memory_index.delete(*id).await;
+        }
+        let state = self
+            .state
+            .delete_by_prefix(&format!("{tenant}{TENANT_AGENT_SEP}"))
+            .await?;
+        let vectors = self.semantic.delete_by_tenant(tenant).await?;
+        Ok(serde_json::json!({
+            "tenant": tenant,
+            "events_deleted": events,
+            "memories_deleted": mem_ids.len(),
+            "state_deleted": state,
+            "vectors_deleted": vectors,
+        }))
     }
 
     /// Full temporal history for a `(scope, subject)` — every version, oldest first.
@@ -1571,6 +1622,85 @@ mod tests {
         c.memory.state.db_path = ":memory:".into();
         c.memory.cognition.db_path = ":memory:".into();
         c
+    }
+
+    #[tokio::test]
+    async fn delete_tenant_erases_all_stores() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let ta = crate::config::TenantContext::new("tenant-a");
+
+        // tenant-a data across stores.
+        engine
+            .ingest_for_tenant(vec![Event::new("s", "e", serde_json::json!({"x": 1}))], &ta)
+            .await
+            .unwrap();
+        engine
+            .memory_add(MemoryInput::new(
+                MemoryScope::tenant("tenant-a"),
+                "likes tea",
+            ))
+            .await
+            .unwrap();
+        engine
+            .state_set_for_tenant("tenant-a", "bot", "mood", serde_json::json!("happy"))
+            .await
+            .unwrap();
+        // tenant-b control data that must survive.
+        engine
+            .memory_add(MemoryInput::new(MemoryScope::tenant("tenant-b"), "b-fact"))
+            .await
+            .unwrap();
+
+        let summary = engine.delete_tenant("tenant-a").await.unwrap();
+        assert_eq!(summary["events_deleted"], 1);
+        assert_eq!(summary["memories_deleted"], 1);
+        assert_eq!(summary["state_deleted"], 1);
+
+        // tenant-a is gone…
+        let a_events = engine
+            .query_sql_for_tenant("SELECT count(*)::VARCHAR AS c FROM episodic", "tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(a_events[0]["c"], "0");
+        assert_eq!(
+            engine
+                .memory_all(&MemoryScope::tenant("tenant-a"), 100)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(engine
+            .state_get_for_tenant("tenant-a", "bot", "mood")
+            .await
+            .unwrap()
+            .is_none());
+        // …but tenant-b survives.
+        assert_eq!(
+            engine
+                .memory_all(&MemoryScope::tenant("tenant-b"), 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_all_clamps_to_max_rows() {
+        let mut cfg = inmem_config();
+        cfg.query.max_rows = 2; // hard cap
+        let engine = StrataEngine::new(cfg).await.unwrap();
+        let scope = MemoryScope::user("alice");
+        for i in 0..5 {
+            engine
+                .memory_add(MemoryInput::new(scope.clone(), format!("fact {i}")))
+                .await
+                .unwrap();
+        }
+        // A huge requested limit is clamped to max_rows.
+        let mems = engine.memory_all(&scope, usize::MAX).await.unwrap();
+        assert_eq!(mems.len(), 2, "memory_all must clamp to query.max_rows");
     }
 
     #[tokio::test]

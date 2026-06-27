@@ -9,6 +9,11 @@ pub struct ClusterConfig {
     pub peers: Vec<String>,
     /// Directory for persistent Raft log storage. Use ":memory:" for in-memory (testing).
     pub data_dir: String,
+    /// Shared secret authenticating inter-node Raft RPCs. When set, every node must present it
+    /// (Bearer token on the gRPC transport) or its RPCs are rejected — prevents an unauthorized
+    /// node from injecting AppendEntries/Vote and corrupting the cluster. `None` = no auth.
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 impl Default for ClusterConfig {
@@ -19,6 +24,7 @@ impl Default for ClusterConfig {
             listen: "0.0.0.0:9433".into(),
             peers: vec![],
             data_dir: "./data/raft".into(),
+            secret: None,
         }
     }
 }
@@ -66,6 +72,7 @@ mod tests {
             listen: "localhost:9433".into(),
             peers: vec!["peer1:9433".into()],
             data_dir: "/tmp/raft".into(),
+            secret: None,
         };
         let cloned = config.clone();
         assert_eq!(cloned.node_id, 5);
