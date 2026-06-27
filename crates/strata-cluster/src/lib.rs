@@ -8,4 +8,4 @@ pub mod shard;
 pub use config::ClusterConfig;
 pub use coordinator::ClusterCoordinator;
 pub use error::{Error, Result};
-pub use shard::ShardRouter;
+pub use shard::{ShardRouter, ShardedCluster};

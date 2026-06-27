@@ -53,6 +53,61 @@ impl ShardRouter {
     }
 }
 
+/// A set of independent Raft groups (shards), each its own [`crate::ClusterCoordinator`], with
+/// writes routed by key via consistent hashing. This is the multi-group composition for horizontal
+/// write scaling: each shard has its own leader, so write throughput scales with shard count.
+///
+/// Callers start N single-group coordinators (one per partition) and wrap them here. `client_write`
+/// hashes the key to a shard and proposes the write through that shard's Raft group. Reads remain
+/// per-shard (a future cross-shard read-aggregation layer can fan out via `coordinator(i)`).
+pub struct ShardedCluster {
+    coordinators: Vec<crate::ClusterCoordinator>,
+    router: ShardRouter,
+}
+
+impl ShardedCluster {
+    /// Wrap N already-started single-group coordinators as shards `0..N`.
+    pub fn new(coordinators: Vec<crate::ClusterCoordinator>) -> Self {
+        let router = ShardRouter::new(coordinators.len(), 128);
+        Self {
+            coordinators,
+            router,
+        }
+    }
+
+    /// Number of shards.
+    pub fn shards(&self) -> usize {
+        self.coordinators.len()
+    }
+
+    /// The shard owning `key`.
+    pub fn shard_for(&self, key: &str) -> usize {
+        self.router.shard_for(key)
+    }
+
+    /// Access a shard's coordinator (e.g. for per-shard reads / status).
+    pub fn coordinator(&self, shard: usize) -> Option<&crate::ClusterCoordinator> {
+        self.coordinators.get(shard)
+    }
+
+    /// Route a write to the shard owning `key` and propose it through that shard's Raft group.
+    pub async fn client_write(
+        &self,
+        key: &str,
+        request: crate::raft::types::AppRequest,
+    ) -> crate::Result<crate::raft::types::AppResponse> {
+        let s = self.router.shard_for(key);
+        self.coordinators[s].client_write(request).await
+    }
+
+    /// Gracefully shut down every shard.
+    pub async fn shutdown(self) {
+        for mut c in self.coordinators {
+            let _ = c.shutdown().await;
+        }
+    }
+}
+
 /// FNV-1a 64-bit — deterministic, dependency-free, good enough spread for routing (not security).
 fn hash(s: &str) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
