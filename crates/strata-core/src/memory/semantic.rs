@@ -432,6 +432,78 @@ impl Default for SemanticStore {
     }
 }
 
+/// Multi-modal vector store: one HNSW index **per modality**, each with its own dimension fixed on
+/// first upsert. This lets different modalities (e.g. 768-d text + 512-d CLIP image vectors) coexist
+/// — they can't share a single index because HNSW requires a uniform dimension.
+#[derive(Debug, Default)]
+pub struct MultiModalStore {
+    indexes: DashMap<String, std::sync::Arc<SemanticStore>>,
+}
+
+impl MultiModalStore {
+    pub fn new() -> Self {
+        Self {
+            indexes: DashMap::new(),
+        }
+    }
+
+    /// Get (or lazily create, with `dim`) the index for a modality.
+    fn index_for(&self, modality: &str, dim: usize) -> std::sync::Arc<SemanticStore> {
+        self.indexes
+            .entry(modality.to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(
+                    SemanticStore::with_dimension(dim).unwrap_or_else(|_| SemanticStore::new()),
+                )
+            })
+            .clone()
+    }
+
+    /// Upsert into the modality's index (created with this vector's dimension if new).
+    pub async fn upsert(&self, modality: &str, entry: &SemanticEntry) -> crate::Result<()> {
+        let idx = self.index_for(modality, entry.embedding.len());
+        idx.upsert(entry).await
+    }
+
+    /// Search one modality's index. Empty if the modality has no entries yet.
+    pub async fn search(
+        &self,
+        modality: &str,
+        vector: &[f32],
+        k: usize,
+    ) -> crate::Result<Vec<SearchResult>> {
+        match self.indexes.get(modality) {
+            Some(idx) => idx.search(vector, k).await,
+            None => Ok(vec![]),
+        }
+    }
+
+    /// Search across every modality whose dimension matches the query vector, merged by score.
+    pub async fn search_all(&self, vector: &[f32], k: usize) -> crate::Result<Vec<SearchResult>> {
+        let stores: Vec<_> = self.indexes.iter().map(|e| e.value().clone()).collect();
+        let mut merged = Vec::new();
+        for store in stores {
+            if store.dimension() == vector.len() {
+                if let Ok(hits) = store.search(vector, k).await {
+                    merged.extend(hits);
+                }
+            }
+        }
+        merged.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        merged.truncate(k);
+        Ok(merged)
+    }
+
+    /// Known modalities.
+    pub fn modalities(&self) -> Vec<String> {
+        self.indexes.iter().map(|e| e.key().clone()).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

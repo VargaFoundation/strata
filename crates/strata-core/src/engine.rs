@@ -27,6 +27,8 @@ pub struct StrataEngine {
     memory_store: Arc<MemoryStore>,
     /// Vector index over memories only (kept separate from event embeddings).
     memory_index: Arc<SemanticStore>,
+    /// Per-modality vector indexes (mixed-dimension multi-modal embeddings).
+    modal: crate::memory::semantic::MultiModalStore,
     ingest: IngestPipeline,
     /// Shared embedding provider for embed-and-search operations.
     embedding: Option<Arc<dyn EmbeddingProvider>>,
@@ -185,6 +187,7 @@ impl StrataEngine {
             state,
             memory_store,
             memory_index,
+            modal: crate::memory::semantic::MultiModalStore::new(),
             ingest,
             completion,
         })
@@ -327,17 +330,21 @@ impl StrataEngine {
             metadata = serde_json::json!({});
         }
         metadata["modality"] = serde_json::json!(modality);
-        self.semantic
-            .upsert(&SemanticEntry {
-                id,
-                content: content.into(),
-                embedding,
-                metadata,
-            })
+        // Route to the per-modality index so mixed dimensions (e.g. 512-d CLIP, 768-d text) coexist.
+        self.modal
+            .upsert(
+                modality,
+                &SemanticEntry {
+                    id,
+                    content: content.into(),
+                    embedding,
+                    metadata,
+                },
+            )
             .await
     }
 
-    /// Vector search restricted to one modality (or all when `modality` is None).
+    /// Vector search restricted to one modality (or all matching-dimension modalities when None).
     pub async fn semantic_search_modal(
         &self,
         vector: &[f32],
@@ -345,16 +352,14 @@ impl StrataEngine {
         modality: Option<&str>,
     ) -> Result<Vec<SearchResult>> {
         match modality {
-            Some(m) => {
-                let m = m.to_string();
-                self.semantic
-                    .search_filtered(vector, k, move |e| {
-                        e.metadata.get("modality").and_then(|v| v.as_str()) == Some(&m)
-                    })
-                    .await
-            }
-            None => self.semantic.search(vector, k).await,
+            Some(m) => self.modal.search(m, vector, k).await,
+            None => self.modal.search_all(vector, k).await,
         }
+    }
+
+    /// Modalities that currently have a vector index.
+    pub fn modalities(&self) -> Vec<String> {
+        self.modal.modalities()
     }
 
     /// Search semantic memory with metadata filters.
@@ -2014,18 +2019,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multimodal_upsert_and_search_by_modality() {
+    async fn multimodal_indexes_support_mixed_dimensions() {
         let engine = StrataEngine::new(inmem_config()).await.unwrap();
-        let mut text_vec = vec![0.0f32; 768];
-        text_vec[0] = 1.0;
-        let mut img_vec = vec![0.0f32; 768];
-        img_vec[1] = 1.0;
+        // Different modalities can have DIFFERENT vector dimensions (separate per-modality indexes).
+        let text_vec = vec![0.1f32; 768]; // e.g. a text embedder
+        let img_vec = vec![0.2f32; 512]; // e.g. CLIP image embeddings
         engine
             .semantic_upsert_modal(
                 uuid::Uuid::new_v4(),
                 "text",
                 "a caption",
-                text_vec,
+                text_vec.clone(),
                 serde_json::json!({}),
             )
             .await
@@ -2040,19 +2044,32 @@ mod tests {
             )
             .await
             .unwrap();
-        // Filtered to images → only the image entry, regardless of vector proximity.
-        let hits = engine
+        assert_eq!(
+            engine.modalities().len(),
+            2,
+            "two independent modality indexes"
+        );
+
+        // Each modality searches with its own dimension.
+        let img_hits = engine
             .semantic_search_modal(&img_vec, 5, Some("image"))
             .await
             .unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].entry.content, "cat.png");
-        // Filtering to text excludes the image.
+        assert_eq!(img_hits.len(), 1);
+        assert_eq!(img_hits[0].entry.content, "cat.png");
         let text_hits = engine
-            .semantic_search_modal(&img_vec, 5, Some("text"))
+            .semantic_search_modal(&text_vec, 5, Some("text"))
             .await
             .unwrap();
-        assert!(text_hits.iter().all(|h| h.entry.content != "cat.png"));
+        assert_eq!(text_hits.len(), 1);
+        assert_eq!(text_hits[0].entry.content, "a caption");
+
+        // search_all with a 512-d vector only hits the matching-dimension (image) index.
+        let all = engine
+            .semantic_search_modal(&img_vec, 5, None)
+            .await
+            .unwrap();
+        assert!(all.iter().all(|h| h.entry.content == "cat.png"));
     }
 
     #[tokio::test]
