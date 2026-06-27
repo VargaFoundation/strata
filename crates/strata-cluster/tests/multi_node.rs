@@ -261,6 +261,7 @@ async fn cluster_forms_from_config_via_coordinator() {
             listen: "0.0.0.0:9433".into(),
             peers: peers.clone(),
             data_dir: ":memory:".into(),
+            secret: None,
         };
         let mut coord = ClusterCoordinator::new(config);
         coord

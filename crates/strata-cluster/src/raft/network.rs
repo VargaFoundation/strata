@@ -26,11 +26,23 @@ fn unreachable_io(msg: String) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::NotConnected, msg)
 }
 
+/// Build a request carrying the optional cluster auth token (Bearer) in gRPC metadata.
+fn auth_request(data: Vec<u8>, secret: &Option<String>) -> tonic::Request<RaftBytes> {
+    let mut req = tonic::Request::new(RaftBytes { data });
+    if let Some(s) = secret {
+        if let Ok(value) = format!("Bearer {s}").parse() {
+            req.metadata_mut().insert("authorization", value);
+        }
+    }
+    req
+}
+
 /// A gRPC connection to a single peer. The tonic `Channel` connects lazily and reconnects
 /// automatically, multiplexing all RPCs to that peer over one HTTP/2 connection.
 pub struct GrpcRaftNetwork {
     addr: String,
     channel: Option<Channel>,
+    secret: Option<String>,
 }
 
 impl GrpcRaftNetwork {
@@ -56,7 +68,7 @@ impl RaftNetwork<TypeConfig> for GrpcRaftNetwork {
         let reply = self
             .client()
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?
-            .append_entries(RaftBytes { data })
+            .append_entries(auth_request(data, &self.secret))
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
         rmp_serde::from_slice(&reply.into_inner().data)
@@ -76,7 +88,7 @@ impl RaftNetwork<TypeConfig> for GrpcRaftNetwork {
         let reply = self
             .client()
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?
-            .install_snapshot(RaftBytes { data })
+            .install_snapshot(auth_request(data, &self.secret))
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
         rmp_serde::from_slice(&reply.into_inner().data)
@@ -93,7 +105,7 @@ impl RaftNetwork<TypeConfig> for GrpcRaftNetwork {
         let reply = self
             .client()
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?
-            .vote(RaftBytes { data })
+            .vote(auth_request(data, &self.secret))
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
         rmp_serde::from_slice(&reply.into_inner().data)
@@ -101,8 +113,11 @@ impl RaftNetwork<TypeConfig> for GrpcRaftNetwork {
     }
 }
 
-/// Factory creating a lazily-connected gRPC `Channel` per peer (HTTP/2, auto-reconnect).
-pub struct GrpcRaftNetworkFactory;
+/// Factory creating a lazily-connected gRPC `Channel` per peer (HTTP/2, auto-reconnect). Carries
+/// the optional cluster auth token attached to every outbound RPC.
+pub struct GrpcRaftNetworkFactory {
+    pub secret: Option<String>,
+}
 
 impl RaftNetworkFactory<TypeConfig> for GrpcRaftNetworkFactory {
     type Network = GrpcRaftNetwork;
@@ -115,6 +130,7 @@ impl RaftNetworkFactory<TypeConfig> for GrpcRaftNetworkFactory {
         GrpcRaftNetwork {
             addr: node.addr.clone(),
             channel,
+            secret: self.secret.clone(),
         }
     }
 }
@@ -125,7 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_builds_lazy_channel() {
-        let mut factory = GrpcRaftNetworkFactory;
+        let mut factory = GrpcRaftNetworkFactory { secret: None };
         let net = factory
             .new_client(
                 2,
@@ -142,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_tolerates_bad_endpoint() {
-        let mut factory = GrpcRaftNetworkFactory;
+        let mut factory = GrpcRaftNetworkFactory { secret: None };
         let net = factory
             .new_client(
                 2,

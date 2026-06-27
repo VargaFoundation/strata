@@ -38,8 +38,13 @@ impl ClusterCoordinator {
     /// Start the Raft instance with the production gRPC network, and (in multi-node mode) serve
     /// this node's Raft instance to peers over gRPC on `cluster.listen`.
     pub async fn start_raft(&mut self, engine: Arc<StrataEngine>) -> crate::Result<()> {
-        self.start_raft_with_network(engine, GrpcRaftNetworkFactory)
-            .await?;
+        self.start_raft_with_network(
+            engine,
+            GrpcRaftNetworkFactory {
+                secret: self.config.secret.clone(),
+            },
+        )
+        .await?;
         if !self.config.peers.is_empty() {
             self.start_raft_grpc_server()?;
         }
@@ -57,7 +62,8 @@ impl ClusterCoordinator {
             ))
         })?;
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let service = RaftGrpcServer::new(Arc::new(raft)).into_service();
+        let service =
+            RaftGrpcServer::new(Arc::new(raft), self.config.secret.clone()).into_service();
         tokio::spawn(async move {
             tracing::info!(%addr, "Raft gRPC server listening");
             let result = tonic::transport::Server::builder()
