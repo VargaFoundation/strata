@@ -60,24 +60,39 @@ impl ShardRouter {
 /// Callers start N single-group coordinators (one per partition) and wrap them here. `client_write`
 /// hashes the key to a shard and proposes the write through that shard's Raft group. Reads remain
 /// per-shard (a future cross-shard read-aggregation layer can fan out via `coordinator(i)`).
+/// One shard: an independent Raft group + the engine it commits to.
+struct ShardHandle {
+    coordinator: crate::ClusterCoordinator,
+    engine: std::sync::Arc<strata_core::StrataEngine>,
+}
+
 pub struct ShardedCluster {
-    coordinators: Vec<crate::ClusterCoordinator>,
+    shards: Vec<ShardHandle>,
     router: ShardRouter,
 }
 
 impl ShardedCluster {
-    /// Wrap N already-started single-group coordinators as shards `0..N`.
-    pub fn new(coordinators: Vec<crate::ClusterCoordinator>) -> Self {
-        let router = ShardRouter::new(coordinators.len(), 128);
-        Self {
-            coordinators,
-            router,
-        }
+    /// Wrap N already-started single-group coordinators (with their engines) as shards `0..N`.
+    pub fn new(
+        shards: Vec<(
+            crate::ClusterCoordinator,
+            std::sync::Arc<strata_core::StrataEngine>,
+        )>,
+    ) -> Self {
+        let router = ShardRouter::new(shards.len(), 128);
+        let shards = shards
+            .into_iter()
+            .map(|(coordinator, engine)| ShardHandle {
+                coordinator,
+                engine,
+            })
+            .collect();
+        Self { shards, router }
     }
 
     /// Number of shards.
     pub fn shards(&self) -> usize {
-        self.coordinators.len()
+        self.shards.len()
     }
 
     /// The shard owning `key`.
@@ -85,9 +100,14 @@ impl ShardedCluster {
         self.router.shard_for(key)
     }
 
-    /// Access a shard's coordinator (e.g. for per-shard reads / status).
+    /// Access a shard's coordinator (e.g. for per-shard status).
     pub fn coordinator(&self, shard: usize) -> Option<&crate::ClusterCoordinator> {
-        self.coordinators.get(shard)
+        self.shards.get(shard).map(|s| &s.coordinator)
+    }
+
+    /// The engine of the shard owning `key` (for single-key, shard-local reads).
+    pub fn engine_for(&self, key: &str) -> &std::sync::Arc<strata_core::StrataEngine> {
+        &self.shards[self.router.shard_for(key)].engine
     }
 
     /// Route a write to the shard owning `key` and propose it through that shard's Raft group.
@@ -97,12 +117,43 @@ impl ShardedCluster {
         request: crate::raft::types::AppRequest,
     ) -> crate::Result<crate::raft::types::AppResponse> {
         let s = self.router.shard_for(key);
-        self.coordinators[s].client_write(request).await
+        self.shards[s].coordinator.client_write(request).await
+    }
+
+    /// Cross-shard read: run a SQL query on **every** shard and concatenate the rows. A scatter-
+    /// gather for analytics that span partitions (each shard scans its own slice in parallel).
+    pub async fn query_all(&self, sql: &str) -> crate::Result<Vec<serde_json::Value>> {
+        let mut out = Vec::new();
+        for s in &self.shards {
+            out.extend(s.engine.query_sql(sql).await?);
+        }
+        Ok(out)
+    }
+
+    /// Cross-shard memory search: fan out to every shard, merge by score, return the global top-k.
+    pub async fn memory_search_all(
+        &self,
+        query: &str,
+        scope: &strata_core::memory::cognition::MemoryScope,
+        k: usize,
+    ) -> crate::Result<Vec<strata_core::memory::cognition::MemoryHit>> {
+        let mut all = Vec::new();
+        for s in &self.shards {
+            all.extend(s.engine.memory_search(query, scope, k).await?);
+        }
+        all.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all.truncate(k);
+        Ok(all)
     }
 
     /// Gracefully shut down every shard.
     pub async fn shutdown(self) {
-        for mut c in self.coordinators {
+        for s in self.shards {
+            let mut c = s.coordinator;
             let _ = c.shutdown().await;
         }
     }

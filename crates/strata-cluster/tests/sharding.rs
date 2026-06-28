@@ -55,7 +55,7 @@ async fn writes_route_to_owning_shard() {
     await_leader(&c0).await;
     await_leader(&c1).await;
 
-    let cluster = ShardedCluster::new(vec![c0, c1]);
+    let cluster = ShardedCluster::new(vec![(c0, e0.clone()), (c1, e1.clone())]);
     assert_eq!(cluster.shards(), 2);
 
     // Write one event per key; track which shard each routes to.
@@ -85,6 +85,23 @@ async fn writes_route_to_owning_shard() {
         expected[0] > 0 && expected[1] > 0,
         "load did not split across shards"
     );
+
+    // Cross-shard read: scatter-gather over both shards' engines returns every event.
+    let all_rows = cluster.query_all("SELECT * FROM episodic").await.unwrap();
+    assert_eq!(
+        all_rows.len(),
+        12,
+        "cross-shard query must aggregate all shards"
+    );
+
+    // engine_for routes a key's reads to its owning shard.
+    let key = "tenant-3";
+    let owner = cluster.shard_for(key);
+    let owner_engine = if owner == 0 { &e0 } else { &e1 };
+    assert!(std::sync::Arc::ptr_eq(
+        cluster.engine_for(key),
+        owner_engine
+    ));
 
     cluster.shutdown().await;
 }
