@@ -1079,7 +1079,13 @@ impl StrataEngine {
     ) -> Result<usize> {
         let memories = self.export_tenant_memories(tenant).await?;
         let n = dest.import_memories(&memories).await?;
-        let _ = self.delete_tenant(tenant).await?;
+        // Remove ONLY the moved memories (+ their vectors and graph edges) from the source — NOT the
+        // tenant's episodic events / state. A cascade `delete_tenant` here would lose events/state
+        // that were never copied to the destination.
+        let removed = self.memory_store.delete_by_tenant(tenant).await?;
+        for id in removed {
+            let _ = self.memory_index.delete(id).await;
+        }
         Ok(n)
     }
 
@@ -2202,6 +2208,44 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn migrate_tenant_memories_preserves_source_events() {
+        // A rebalance memory-move must NOT cascade-delete the tenant's episodic events on the source.
+        let a = StrataEngine::new(inmem_config()).await.unwrap();
+        let b = StrataEngine::new(inmem_config()).await.unwrap();
+        let ta = crate::config::TenantContext::new("t");
+        a.ingest_for_tenant(vec![Event::new("s", "e", serde_json::json!({"x": 1}))], &ta)
+            .await
+            .unwrap();
+        a.memory_add(MemoryInput::new(MemoryScope::tenant("t"), "fact"))
+            .await
+            .unwrap();
+
+        a.migrate_tenant_memories_to(&b, "t").await.unwrap();
+
+        // Memories moved off the source, onto the destination.
+        assert_eq!(
+            a.memory_all(&MemoryScope::tenant("t"), 10)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            b.memory_all(&MemoryScope::tenant("t"), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Episodic events stay on the source (not cascade-deleted).
+        let ev = a
+            .query_sql_for_tenant("SELECT count(*)::VARCHAR AS c FROM episodic", "t")
+            .await
+            .unwrap();
+        assert_eq!(ev[0]["c"], "1");
     }
 
     #[tokio::test]

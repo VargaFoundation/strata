@@ -19,6 +19,27 @@ pub struct ShardMove {
     pub to: usize,
 }
 
+/// What a rebalancing operator should do to converge from `actual` to `desired` shards: the target
+/// shard count to scale the StatefulSets to, and the tenant data movements (consistent hashing keeps
+/// the move set small). The pure brain of a Kubernetes operator — fully unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReconcilePlan {
+    pub scale_to: usize,
+    pub moves: Vec<ShardMove>,
+}
+
+/// Compute the reconcile plan for `tenants` when resharding `actual` → `desired` shards.
+pub fn reconcile_plan(desired: usize, actual: usize, tenants: &[String]) -> ReconcilePlan {
+    let desired = desired.max(1);
+    let actual = actual.max(1);
+    let old = ShardRouter::new(actual, 128);
+    let new = ShardRouter::new(desired, 128);
+    ReconcilePlan {
+        scale_to: desired,
+        moves: old.reshard_moves(&new, tenants),
+    }
+}
+
 /// Maps keys to shard ids on a consistent-hash ring (virtual nodes for balance).
 #[derive(Debug, Clone)]
 pub struct ShardRouter {
@@ -242,6 +263,27 @@ mod tests {
         // Fair share is 2000/shard; assert none is starved or dominant (well within FNV+vnode noise).
         for c in counts {
             assert!(c > 1000 && c < 3000, "imbalanced shard count: {c}");
+        }
+    }
+
+    #[test]
+    fn reconcile_plan_scales_and_lists_moves() {
+        let tenants: Vec<String> = (0..2000).map(|i| format!("tenant-{i}")).collect();
+        // No change → scale stays, no moves.
+        let same = reconcile_plan(4, 4, &tenants);
+        assert_eq!(same.scale_to, 4);
+        assert!(same.moves.is_empty());
+        // Scale up 4 → 5 → a fraction of tenants move, each to a valid shard, none staying put.
+        let up = reconcile_plan(5, 4, &tenants);
+        assert_eq!(up.scale_to, 5);
+        assert!(
+            !up.moves.is_empty() && up.moves.len() < tenants.len() / 2,
+            "expected a small non-empty move set, got {}",
+            up.moves.len()
+        );
+        for m in &up.moves {
+            assert_ne!(m.from, m.to);
+            assert!(m.to < 5);
         }
     }
 
