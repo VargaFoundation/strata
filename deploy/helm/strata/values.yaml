@@ -2,6 +2,12 @@
 
 replicaCount: 3
 
+# -- Pod annotations. Use this to trigger rolling restarts on cert/secret rotation, e.g. with
+# Stakater Reloader: `reloader.stakater.com/auto: "true"` (cert-manager renews the TLS Secret →
+# Reloader restarts the pods → tonic rebuilds its TLS config with the new cert). tonic builds TLS
+# once at startup, so cert rotation is a rolling-restart concern, not in-process hot reload.
+podAnnotations: {}
+
 # -- Write sharding: deploy N independent Raft groups (StatefulSets), each its own cluster, for
 # horizontal write scaling. Disabled by default (single group = `replicaCount` nodes). When enabled,
 # each shard is `<fullname>-shard-<i>` with `replicasPerShard` nodes + its own headless service.
