@@ -57,6 +57,20 @@ only do that on a trusted network.
   TLS is a future option; the shared secret above gives authentication today.)
 - The Raft log + wire format are binary (MessagePack). On a version upgrade that changes the format,
   **wipe each node's Raft data dir** (the log rebuilds from the leader/snapshot).
+- **Certificate rotation:** tonic builds its TLS config **once at startup**, so rotating the Raft
+  certs is a **rolling-restart** concern, not in-process hot reload. Recommended: cert-manager renews
+  the TLS Secret + [Stakater Reloader](https://github.com/stakater/Reloader) restarts the pods on
+  Secret change. The chart exposes `podAnnotations` for this (set `reloader.stakater.com/auto: "true"`).
+
+## Sharded mode (multi-shard write scaling)
+
+- Writes route **by tenant** to the owning shard; a tenant's data lives entirely on one shard.
+  **REST + MCP + the LLM proxy** are shard-routed at the gateway. **gRPC (:9432) and the PostgreSQL
+  wire (:5432) are NOT shard-routed** — connect those clients to the owning shard's service directly
+  (or route by tenant at a gRPC/L4-aware load balancer). Admin endpoints are served locally;
+  `/admin/audit` aggregates across shards.
+- The shard ring (`cluster.shards`) and per-shard URLs (`shard_base_urls`) must be **uniform across
+  the fleet** so every pod hashes tenants to the same shard. The Helm chart sets these.
 
 ## Data lifecycle / compliance
 

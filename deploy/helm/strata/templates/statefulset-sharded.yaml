@@ -23,6 +23,10 @@ spec:
       labels:
         {{- include "strata.selectorLabels" $root | nindent 8 }}
         strata.io/shard: "{{ $shard }}"
+      {{- with $root.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- with $root.Values.nodeSelector }}
       nodeSelector:

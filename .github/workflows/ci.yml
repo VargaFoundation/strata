@@ -59,6 +59,20 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  go-sdk:
+    name: Go SDK (build + vet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+      # Compile-verify the Go client (no local Go toolchain in the dev env, so CI is the gate).
+      - run: go build ./...
+        working-directory: sdk/go
+      - run: go vet ./...
+        working-directory: sdk/go
+
   build:
     name: Build
     runs-on: ubuntu-latest
