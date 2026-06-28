@@ -3,7 +3,7 @@
 //! Run locally: cargo bench -p strata-core
 //! CI runs these on every PR and posts a comparison comment.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use strata_core::{CoreConfig, StrataEngine};
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -22,25 +22,32 @@ fn bench_ingest(c: &mut Criterion) {
     let rt = runtime();
     let engine = make_engine(&rt);
 
-    let events: Vec<strata_core::memory::episodic::Event> = (0..100)
-        .map(|i| strata_core::memory::episodic::Event {
-            id: uuid::Uuid::new_v4(),
-            source: "bench".into(),
-            event_type: "test".into(),
-            payload: serde_json::json!({"i": i, "data": "benchmark payload"}),
-            timestamp: chrono::Utc::now(),
-            parent_id: None,
-            trace_id: None,
-            tags: vec!["bench".into()],
-            idempotency_key: None,
-        })
-        .collect();
+    // Fresh events (new ids) per iteration via iter_batched — otherwise re-ingesting the same ids
+    // would measure the INSERT-OR-IGNORE duplicate-PK skip path, not real inserts.
+    let make_batch = || -> Vec<strata_core::memory::episodic::Event> {
+        (0..100)
+            .map(|i| strata_core::memory::episodic::Event {
+                id: uuid::Uuid::new_v4(),
+                source: "bench".into(),
+                event_type: "test".into(),
+                payload: serde_json::json!({"i": i, "data": "benchmark payload"}),
+                timestamp: chrono::Utc::now(),
+                parent_id: None,
+                trace_id: None,
+                tags: vec!["bench".into()],
+                idempotency_key: None,
+            })
+            .collect()
+    };
 
     c.bench_function("ingest_100_events", |b| {
-        b.iter(|| {
-            rt.block_on(engine.ingest(black_box(events.clone())))
-                .unwrap();
-        });
+        b.iter_batched(
+            make_batch,
+            |events| {
+                rt.block_on(engine.ingest(black_box(events))).unwrap();
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -103,7 +110,11 @@ fn bench_memory_search(c: &mut Criterion) {
         for i in 0..500 {
             let input = strata_core::memory::cognition::MemoryInput::new(
                 scope.clone(),
-                format!("user preference {i}: likes topic {} and tool {}", i % 17, i % 7),
+                format!(
+                    "user preference {i}: likes topic {} and tool {}",
+                    i % 17,
+                    i % 7
+                ),
             );
             engine.memory_add(input).await.unwrap();
         }
