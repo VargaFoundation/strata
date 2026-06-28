@@ -788,6 +788,18 @@ impl MemoryStore {
         self.query_memories(&sql, &params)
     }
 
+    /// All active memories for a tenant (across every user/agent/session scope) — used for
+    /// rebalancing data between shards.
+    pub async fn list_by_tenant(&self, tenant: &str, limit: usize) -> crate::Result<Vec<Memory>> {
+        let sql = format!(
+            "SELECT {} FROM memories WHERE tenant_id = ? AND state = 'active' \
+             ORDER BY updated_at DESC LIMIT {}",
+            Self::SELECT_COLS,
+            limit.clamp(1, 1_000_000)
+        );
+        self.query_memories(&sql, &[tenant.to_string()])
+    }
+
     /// Full temporal history for a `(scope, subject)` — every version, oldest first.
     pub async fn history(&self, scope: &MemoryScope, subject: &str) -> crate::Result<Vec<Memory>> {
         let (where_sql, mut params) = scope.where_clause();

@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use strata_cluster::raft::types::AppRequest;
+use strata_cluster::shard::ShardMove;
 use strata_cluster::{ClusterConfig, ClusterCoordinator, ShardedCluster};
+use strata_core::memory::cognition::{MemoryInput, MemoryScope};
 use strata_core::StrataEngine;
 
 async fn inmem_engine() -> Arc<StrataEngine> {
@@ -102,6 +104,47 @@ async fn writes_route_to_owning_shard() {
         cluster.engine_for(key),
         owner_engine
     ));
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebalance_moves_tenant_data_between_shards() {
+    let e0 = inmem_engine().await;
+    let e1 = inmem_engine().await;
+    // Seed tenant-a's memories directly on shard 0.
+    for i in 0..3 {
+        e0.memory_add(MemoryInput::new(
+            MemoryScope::tenant("tenant-a"),
+            format!("fact {i}"),
+        ))
+        .await
+        .unwrap();
+    }
+    let c0 = single_node(e0.clone()).await;
+    let c1 = single_node(e1.clone()).await;
+    await_leader(&c0).await;
+    await_leader(&c1).await;
+    let cluster = ShardedCluster::new(vec![(c0, e0.clone()), (c1, e1.clone())]);
+
+    // Operator computed that tenant-a now belongs on shard 1 → execute the move.
+    let moved = cluster
+        .apply_moves(&[ShardMove {
+            key: "tenant-a".into(),
+            from: 0,
+            to: 1,
+        }])
+        .await
+        .unwrap();
+    assert_eq!(moved, 3);
+    assert_eq!(
+        e0.export_tenant_memories("tenant-a").await.unwrap().len(),
+        0
+    );
+    assert_eq!(
+        e1.export_tenant_memories("tenant-a").await.unwrap().len(),
+        3
+    );
 
     cluster.shutdown().await;
 }

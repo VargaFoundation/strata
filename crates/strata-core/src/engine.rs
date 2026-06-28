@@ -1054,6 +1054,35 @@ impl StrataEngine {
         self.memory_store.count().await
     }
 
+    /// Export all active memories for a tenant (for moving a tenant between shards on a reshard).
+    pub async fn export_tenant_memories(&self, tenant: &str) -> Result<Vec<Memory>> {
+        self.memory_store
+            .list_by_tenant(tenant, self.config.query.max_rows)
+            .await
+    }
+
+    /// Import memories verbatim (ids/scope/timestamps preserved) — the receiving side of a tenant
+    /// move. Vectors are rebuilt lazily (via reindex). Returns the count imported.
+    pub async fn import_memories(&self, memories: &[Memory]) -> Result<usize> {
+        for m in memories {
+            self.memory_store.upsert_raw(m, None).await?;
+        }
+        Ok(memories.len())
+    }
+
+    /// Move a tenant's memories from this engine to `dest`, then remove them here (a rebalance move).
+    /// Returns the number moved. Best-effort across two independent engines (not a single txn).
+    pub async fn migrate_tenant_memories_to(
+        &self,
+        dest: &StrataEngine,
+        tenant: &str,
+    ) -> Result<usize> {
+        let memories = self.export_tenant_memories(tenant).await?;
+        let n = dest.import_memories(&memories).await?;
+        let _ = self.delete_tenant(tenant).await?;
+        Ok(n)
+    }
+
     /// Forget low-value memories via time-decay of importance (configurable half-life /
     /// threshold). Forgotten memories are expired (kept for history) and dropped from the
     /// vector index. Returns the number forgotten.
@@ -2121,6 +2150,58 @@ mod tests {
         // Reindex without a provider is a no-op (nothing to embed), leaving them recoverable.
         assert_eq!(engine.reindex_unembedded(100).await.unwrap(), 0);
         assert_eq!(engine.unembedded_count().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn migrate_tenant_memories_moves_between_engines() {
+        // Simulates a rebalance move: tenant-a's memories move from shard A to shard B.
+        let shard_a = StrataEngine::new(inmem_config()).await.unwrap();
+        let shard_b = StrataEngine::new(inmem_config()).await.unwrap();
+        for i in 0..3 {
+            shard_a
+                .memory_add(MemoryInput::new(
+                    MemoryScope::tenant("tenant-a"),
+                    format!("fact {i}"),
+                ))
+                .await
+                .unwrap();
+        }
+        // A different tenant on B must be untouched.
+        shard_b
+            .memory_add(MemoryInput::new(MemoryScope::tenant("tenant-b"), "b-fact"))
+            .await
+            .unwrap();
+
+        let moved = shard_a
+            .migrate_tenant_memories_to(&shard_b, "tenant-a")
+            .await
+            .unwrap();
+        assert_eq!(moved, 3);
+        // tenant-a is gone from A, present on B; tenant-b on B survives.
+        assert_eq!(
+            shard_a
+                .export_tenant_memories("tenant-a")
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            shard_b
+                .export_tenant_memories("tenant-a")
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            shard_b
+                .export_tenant_memories("tenant-b")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

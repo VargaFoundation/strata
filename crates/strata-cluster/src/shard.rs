@@ -11,6 +11,14 @@
 
 use std::collections::BTreeMap;
 
+/// A key whose owning shard changes on a reshard — one data movement a rebalance must perform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardMove {
+    pub key: String,
+    pub from: usize,
+    pub to: usize,
+}
+
 /// Maps keys to shard ids on a consistent-hash ring (virtual nodes for balance).
 #[derive(Debug, Clone)]
 pub struct ShardRouter {
@@ -36,6 +44,23 @@ impl ShardRouter {
     /// Number of shards.
     pub fn shards(&self) -> usize {
         self.shards
+    }
+
+    /// Given the current keys and a NEW router (different shard count), list the keys whose owning
+    /// shard changes — i.e. the data movements a rebalance must perform. Consistent hashing keeps
+    /// this set small (only a fraction of keys move when shard count changes).
+    pub fn reshard_moves(&self, new_router: &ShardRouter, keys: &[String]) -> Vec<ShardMove> {
+        keys.iter()
+            .filter_map(|k| {
+                let from = self.shard_for(k);
+                let to = new_router.shard_for(k);
+                (from != to).then(|| ShardMove {
+                    key: k.clone(),
+                    from,
+                    to,
+                })
+            })
+            .collect()
     }
 
     /// The shard a key routes to (first ring point clockwise of the key's hash, wrapping around).
@@ -150,6 +175,22 @@ impl ShardedCluster {
         Ok(all)
     }
 
+    /// Execute a set of rebalance moves: for each, migrate the tenant's memories from the source
+    /// shard's engine to the destination's, then drop them from the source. Returns memories moved.
+    /// (Compute the moves with [`ShardRouter::reshard_moves`] after the operator adds/removes shards.)
+    pub async fn apply_moves(&self, moves: &[ShardMove]) -> crate::Result<usize> {
+        let mut migrated = 0;
+        for m in moves {
+            if m.from == m.to || m.from >= self.shards.len() || m.to >= self.shards.len() {
+                continue;
+            }
+            let from = self.shards[m.from].engine.clone();
+            let to = self.shards[m.to].engine.clone();
+            migrated += from.migrate_tenant_memories_to(&to, &m.key).await?;
+        }
+        Ok(migrated)
+    }
+
     /// Gracefully shut down every shard.
     pub async fn shutdown(self) {
         for s in self.shards {
@@ -202,6 +243,21 @@ mod tests {
         for c in counts {
             assert!(c > 1000 && c < 3000, "imbalanced shard count: {c}");
         }
+    }
+
+    #[test]
+    fn reshard_moves_lists_only_changed_keys() {
+        let keys: Vec<String> = (0..2000).map(|i| format!("tenant-{i}")).collect();
+        let r4 = ShardRouter::new(4, 128);
+        let r5 = ShardRouter::new(5, 128);
+        let moves = r4.reshard_moves(&r5, &keys);
+        // Every listed key genuinely changed shard, and consistent hashing keeps the set small.
+        for m in &moves {
+            assert_ne!(m.from, m.to);
+            assert_eq!(r4.shard_for(&m.key), m.from);
+            assert_eq!(r5.shard_for(&m.key), m.to);
+        }
+        assert!(!moves.is_empty() && moves.len() < keys.len() / 2);
     }
 
     #[test]
