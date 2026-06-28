@@ -666,6 +666,8 @@ pub async fn backup(State(engine): State<Arc<StrataEngine>>) -> Response {
 /// GET /api/v1/admin/audit?since=2026-01-01
 pub async fn audit_query(
     audit_log: Option<Extension<crate::auth::audit::AuditLog>>,
+    shard: Option<Extension<crate::cluster::shard_route::ShardRoutingState>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<super::models::AuditQueryParams>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "audit").increment(1);
@@ -678,17 +680,51 @@ pub async fn audit_query(
         );
     };
 
-    match log.query_since(&params.since) {
-        Ok(entries) => {
-            let count = entries.len();
-            api_ok(serde_json::json!({ "entries": entries, "count": count, "since": params.since }))
+    // Local entries first.
+    let mut entries = match log.query_since(&params.since) {
+        Ok(e) => serde_json::to_value(e).unwrap_or_else(|_| serde_json::json!([])),
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "AUDIT_ERROR",
+                e.to_string(),
+            )
         }
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "AUDIT_ERROR",
-            e.to_string(),
-        ),
+    };
+    let mut entries_vec: Vec<serde_json::Value> = entries.as_array().cloned().unwrap_or_default();
+
+    // Cross-shard fan-out: audit is per-pod, so aggregate every shard's log into one cluster-wide
+    // view. Skip self (already local) and skip when this call is itself a forwarded sub-request
+    // (the `x-strata-shard-forwarded` marker), which would otherwise recurse.
+    if let Some(Extension(s)) = shard {
+        if s.router.shards() > 1 && !headers.contains_key("x-strata-shard-forwarded") {
+            for (i, base) in s.base_urls.iter().enumerate() {
+                if i == s.my_shard {
+                    continue;
+                }
+                let url = format!("{}/api/v1/admin/audit", base.trim_end_matches('/'));
+                let mut rb = s
+                    .http
+                    .get(url)
+                    .query(&[("since", params.since.as_str())])
+                    .header("x-strata-shard-forwarded", "1");
+                if let Some(auth) = headers.get("authorization") {
+                    rb = rb.header("authorization", auth.clone());
+                }
+                if let Ok(resp) = rb.send().await {
+                    if let Ok(v) = resp.json::<serde_json::Value>().await {
+                        if let Some(arr) = v.get("entries").and_then(|e| e.as_array()) {
+                            entries_vec.extend(arr.iter().cloned());
+                        }
+                    }
+                }
+            }
+            entries = serde_json::Value::Array(entries_vec.clone());
+        }
     }
+
+    let count = entries_vec.len();
+    api_ok(serde_json::json!({ "entries": entries, "count": count, "since": params.since }))
 }
 
 // ── WebSocket state watcher ─────────────────────────────────────────
