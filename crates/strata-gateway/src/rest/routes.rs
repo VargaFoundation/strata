@@ -200,6 +200,8 @@ pub fn router_with_engine_and_auth(
     // 2. Shard routing (middle) — only when actually sharded; routes each request to its tenant's shard.
     if let Some(shard_state) = shard_state {
         if shard_state.router.shards() > 1 {
+            // Also expose the state to handlers that scatter-gather across shards (e.g. admin audit).
+            api_routes = api_routes.layer(axum::Extension(shard_state.clone()));
             api_routes = api_routes.route_layer(axum::middleware::from_fn_with_state(
                 shard_state,
                 crate::cluster::shard_route::route_to_owning_shard,

@@ -126,11 +126,14 @@ the leader-forward 307 has no usable Location). Middleware order: `auth → shar
 Tenant-deletion routes by the path tenant. Verified by unit tests + a single-process reverse-proxy
 e2e test (`crates/strata-gateway/src/cluster/shard_route.rs`).
 
-**Known limits of the routing increment (documented, not bugs):** (1) cross-tenant **admin** reads
-(`/admin/audit|backup|reindex|retention|memory/*`) route by the caller's tenant → see only one shard;
-true cross-tenant aggregation needs scatter-gather (`ShardedCluster::query_all`/`memory_search_all`
-exist as the model). (2) **MCP/LLM-proxy/gRPC/PG** are outside `/api/v1` → not yet shard-routed
-(REST-first). (3) A cross-shard write landing on a destination follower relies on the proxy's bounded
-307-retry + Service balancing to reach the leader. (4) The token-bucket rate limiter runs on both hops
-of a cross-shard request (minor double-decrement). Cross-shard 307 convergence + Raft-group isolation
-need a live multi-pod cluster to validate.
+**Admin endpoints** are served **locally** (not tenant-routed) since they're cluster-wide concerns;
+`/admin/audit` **scatter-gathers** every shard's audit log into one cluster-wide view (marker-guarded
+to avoid recursion). The exception is `DELETE /admin/tenants/{id}`, which routes by the path tenant.
+**MCP + LLM-proxy** are shard-routed by tenant too. **Rate-limiting** is skipped on reverse-proxied
+requests (origin pod already counted them).
+
+**Known limits (documented, not bugs):** (1) admin **writes** that span shards (backup, reindex,
+retention) run per-shard — hit each shard, or use the operator. (2) **gRPC + PG wire** are separate
+listeners → not yet shard-routed. (3) A cross-shard write landing on a destination follower relies on
+the proxy's bounded 307-retry + Service balancing to reach the leader. Cross-shard 307 convergence +
+Raft-group isolation need a live multi-pod cluster to validate.

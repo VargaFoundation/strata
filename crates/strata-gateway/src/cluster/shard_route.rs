@@ -103,6 +103,15 @@ pub async fn route_to_owning_shard(
     req: Request,
     next: Next,
 ) -> Response {
+    // Admin endpoints are cluster-wide concerns, not tenant data — serve them locally rather than
+    // mis-routing to the caller's tenant shard. The one exception is tenant-deletion, which must
+    // reach the target tenant's shard (handled by routing_key's path-tenant rule below).
+    let path = req.uri().path();
+    let is_delete_tenant = req.method() == Method::DELETE && path.contains("/admin/tenants/");
+    if path.contains("/admin/") && !is_delete_tenant {
+        return next.run(req).await;
+    }
+
     let tenant = routing_key(&req);
     match route_decision(&tenant, &state.router, state.my_shard, &state.base_urls) {
         ShardTarget::Local => next.run(req).await,
@@ -291,6 +300,50 @@ mod tests {
         assert!(is_hop_by_hop("transfer-encoding"));
         assert!(!is_hop_by_hop("authorization"));
         assert!(!is_hop_by_hop("content-type"));
+    }
+
+    #[tokio::test]
+    async fn admin_paths_are_served_locally_not_proxied() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // base_urls point at an unreachable shard-1 — if admin were proxied this would fail/hang.
+        let state = ShardRoutingState {
+            router: Arc::new(ShardRouter::new(2, 128)),
+            my_shard: 0,
+            base_urls: Arc::new(vec![
+                "http://unused".into(),
+                "http://127.0.0.1:9".into(), // discard port — would fail if proxied
+            ]),
+            http: reqwest::Client::new(),
+        };
+        let app = axum::Router::new()
+            .route(
+                "/admin/audit",
+                axum::routing::get(|| async { "LOCAL_ADMIN" }),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                state,
+                route_to_owning_shard,
+            ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/admin/audit")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            &body[..],
+            b"LOCAL_ADMIN",
+            "admin path must be served locally"
+        );
     }
 
     /// End-to-end (single process, real socket): a request for a tenant owned by another shard is
