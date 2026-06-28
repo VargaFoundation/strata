@@ -67,9 +67,75 @@ fn bench_query(c: &mut Criterion) {
     c.bench_function("query_select_100", |b| {
         b.iter(|| {
             rt.block_on(engine.query_sql(black_box(
-                "SELECT * FROM events ORDER BY timestamp DESC LIMIT 100",
+                "SELECT * FROM episodic ORDER BY ts DESC LIMIT 100",
             )))
             .unwrap();
+        });
+    });
+}
+
+fn bench_memory_add(c: &mut Criterion) {
+    let rt = runtime();
+    let engine = make_engine(&rt);
+    let scope = strata_core::memory::cognition::MemoryScope::user("bench");
+    let mut n = 0u64;
+
+    // The flagship cognition path: dedup / contradiction / importance on each add.
+    c.bench_function("memory_add", |b| {
+        b.iter(|| {
+            n += 1;
+            let input = strata_core::memory::cognition::MemoryInput::new(
+                scope.clone(),
+                format!("fact number {n}"),
+            );
+            rt.block_on(engine.memory_add(black_box(input))).unwrap();
+        });
+    });
+}
+
+fn bench_memory_search(c: &mut Criterion) {
+    let rt = runtime();
+    let engine = make_engine(&rt);
+    let scope = strata_core::memory::cognition::MemoryScope::user("bench");
+
+    // Seed a realistic corpus of memories.
+    rt.block_on(async {
+        for i in 0..500 {
+            let input = strata_core::memory::cognition::MemoryInput::new(
+                scope.clone(),
+                format!("user preference {i}: likes topic {} and tool {}", i % 17, i % 7),
+            );
+            engine.memory_add(input).await.unwrap();
+        }
+    });
+
+    // Hybrid BM25 + recency/importance re-ranking (no embedding provider → lexical path).
+    c.bench_function("memory_search_hybrid_k5", |b| {
+        b.iter(|| {
+            rt.block_on(engine.memory_search(black_box("likes topic 3"), &scope, 5))
+                .unwrap();
+        });
+    });
+}
+
+fn bench_graph_neighbors(c: &mut Criterion) {
+    let rt = runtime();
+    let engine = make_engine(&rt);
+
+    // Seed a graph: a hub entity linked to many others.
+    rt.block_on(async {
+        for i in 0..1000 {
+            engine
+                .memory_link("default", "hub", "rel", &format!("node-{i}"), None)
+                .await
+                .unwrap();
+        }
+    });
+
+    c.bench_function("graph_neighbors_hub", |b| {
+        b.iter(|| {
+            rt.block_on(engine.memory_neighbors(black_box("default"), "hub", 50))
+                .unwrap();
         });
     });
 }
@@ -124,6 +190,9 @@ criterion_group!(
     bench_ingest,
     bench_query,
     bench_state,
-    bench_semantic_search
+    bench_semantic_search,
+    bench_memory_add,
+    bench_memory_search,
+    bench_graph_neighbors
 );
 criterion_main!(benches);
