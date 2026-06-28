@@ -111,3 +111,10 @@ rebuildable from the leader/snapshot.
 `STRATA_CLUSTER__NODE_ID` is this node's id. The Helm StatefulSet derives both from the pod
 ordinal automatically. The lowest-id node forms the cluster; the rest are pulled in by the leader.
 Each node serves the Raft gRPC transport on `STRATA_CLUSTER__LISTEN` (:9433).
+
+**Sharded deployment (horizontal write scaling):** set `sharding.enabled=true` in the Helm chart to
+deploy N **independent Raft groups** (one StatefulSet `…-shard-<i>` + headless service each,
+`replicasPerShard` nodes), with `STRATA_CLUSTER__SHARDS` uniform across the fleet so every node hashes
+keys identically (`ShardRouter`). Each shard has its own leader, so write throughput scales with shard
+count; `ShardedCluster` routes writes by key and scatter-gathers cross-shard reads (`query_all` /
+`memory_search_all`). Single-group (`sharding.enabled=false`, default) is unchanged.
