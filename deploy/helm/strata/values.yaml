@@ -2,6 +2,14 @@
 
 replicaCount: 3
 
+# -- Write sharding: deploy N independent Raft groups (StatefulSets), each its own cluster, for
+# horizontal write scaling. Disabled by default (single group = `replicaCount` nodes). When enabled,
+# each shard is `<fullname>-shard-<i>` with `replicasPerShard` nodes + its own headless service.
+sharding:
+  enabled: false
+  shards: 2
+  replicasPerShard: 3
+
 image:
   repository: ghcr.io/vargafoundation/strata
   tag: latest

@@ -1195,6 +1195,9 @@ pub async fn memory_history(
 pub async fn memory_consolidate(
     State(engine): State<Arc<StrataEngine>>,
     auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    cluster: Option<
+        Extension<std::sync::Arc<tokio::sync::RwLock<strata_cluster::ClusterCoordinator>>>,
+    >,
     Json(req): Json<MemoryConsolidateRequest>,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "memory_consolidate")
@@ -1206,10 +1209,50 @@ pub async fn memory_consolidate(
         req.agent_id.as_deref(),
         req.session_id.as_deref(),
     );
-    match engine
-        .memory_consolidate(&scope, req.keep.unwrap_or(20))
-        .await
-    {
+    let keep = req.keep.unwrap_or(20);
+
+    // Cluster mode: plan on the leader (summary + originals to expire), then replicate both through
+    // the Raft log (summary as MemoryUpsert, originals as MemoryExpire) so followers converge.
+    if let Some(Extension(coord)) = cluster {
+        let plan = match engine.memory_consolidate_plan(&scope, keep).await {
+            Ok(Some(p)) => p,
+            Ok(None) => return api_ok(serde_json::json!({ "consolidated": null })),
+            Err(e) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "MEMORY_ERROR",
+                    e.to_string(),
+                )
+            }
+        };
+        let (input, expired) = plan;
+        let (result, rows) = match engine.memory_plan(input).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "MEMORY_ERROR",
+                    e.to_string(),
+                )
+            }
+        };
+        let coord = coord.read().await;
+        if let Err(e) = coord
+            .client_write(strata_cluster::raft::types::AppRequest::MemoryUpsert { rows })
+            .await
+        {
+            return cluster_write_error(e);
+        }
+        return match coord
+            .client_write(strata_cluster::raft::types::AppRequest::MemoryExpire { ids: expired })
+            .await
+        {
+            Ok(_) => api_ok(serde_json::json!({ "consolidated": result })),
+            Err(e) => cluster_write_error(e),
+        };
+    }
+
+    match engine.memory_consolidate(&scope, keep).await {
         Ok(Some(m)) => api_ok(serde_json::json!({ "consolidated": m })),
         Ok(None) => api_ok(serde_json::json!({ "consolidated": null })),
         Err(e) => api_error(

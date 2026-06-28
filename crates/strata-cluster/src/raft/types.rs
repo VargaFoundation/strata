@@ -62,6 +62,9 @@ pub enum AppRequest {
         tenant: Option<String>,
         edge: strata_core::memory::cognition::Edge,
     },
+    /// Expire memories by id (bi-temporal soft-delete). Used to replicate consolidation: the leader
+    /// proposes a `MemoryUpsert` of the summary plus this to retire the folded originals.
+    MemoryExpire { ids: Vec<uuid::Uuid> },
 }
 
 /// Application-level response from applying a Raft log entry.

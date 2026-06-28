@@ -22,8 +22,9 @@ spec:
   selector:
     {{- include "strata.selectorLabels" . | nindent 4 }}
 ---
-# Headless service for StatefulSet peer discovery and Raft communication
-{{- if .Values.headlessService.enabled }}
+# Headless service for StatefulSet peer discovery and Raft communication (single-group mode;
+# sharded mode uses a per-shard headless service in service-sharded.yaml).
+{{- if and .Values.headlessService.enabled (not .Values.sharding.enabled) }}
 apiVersion: v1
 kind: Service
 metadata:

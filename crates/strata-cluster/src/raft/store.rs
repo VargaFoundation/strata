@@ -337,6 +337,10 @@ impl MemStore {
                 let _ = engine.graph_apply_edge(tenant.as_deref(), edge).await;
                 AppResponse::Ok
             }
+            AppRequest::MemoryExpire { ids } => {
+                let _ = engine.memory_expire(ids).await;
+                AppResponse::MemoryCount(ids.len() as u64)
+            }
         }
     }
 }
@@ -666,6 +670,29 @@ mod tests {
             .await;
         assert!(matches!(resp, AppResponse::MemoryCount(1)));
         assert_eq!(engine.memory_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_memory_expire_replicates_to_engine() {
+        let engine = inmem_engine().await;
+        let store = MemStore::new(Some(engine.clone()));
+        let scope = strata_core::memory::cognition::MemoryScope::user("alice");
+        let added = engine
+            .memory_add(strata_core::memory::cognition::MemoryInput::new(
+                scope.clone(),
+                "a fact",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 1);
+        let resp = store
+            .apply_request(&AppRequest::MemoryExpire {
+                ids: vec![added.memory.id],
+            })
+            .await;
+        assert!(matches!(resp, AppResponse::MemoryCount(1)));
+        // The expired memory is no longer active.
+        assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 0);
     }
 
     #[tokio::test]

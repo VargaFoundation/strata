@@ -1025,6 +1025,16 @@ impl StrataEngine {
         self.memory_store.delete(id).await
     }
 
+    /// Expire memories by id (bi-temporal soft-delete + drop their vectors). Deterministic — used by
+    /// Raft apply to replicate consolidation's retirement of the folded originals.
+    pub async fn memory_expire(&self, ids: &[uuid::Uuid]) -> Result<()> {
+        for id in ids {
+            let _ = self.memory_store.expire(*id).await;
+            let _ = self.memory_index.delete(*id).await;
+        }
+        Ok(())
+    }
+
     /// Get a memory by id, scoped to a tenant (None if owned by another tenant).
     pub async fn memory_get_scoped(&self, id: uuid::Uuid, tenant: &str) -> Result<Option<Memory>> {
         self.memory_store.get_scoped(id, tenant).await
@@ -1104,6 +1114,23 @@ impl StrataEngine {
         scope: &MemoryScope,
         keep: usize,
     ) -> Result<Option<MemoryAdd>> {
+        let Some((input, expired)) = self.memory_consolidate_plan(scope, keep).await? else {
+            return Ok(None);
+        };
+        let added = self.memory_add(input).await?;
+        self.memory_expire(&expired).await?;
+        Ok(Some(added))
+    }
+
+    /// Compute a consolidation **without writing**: the summary memory input + the ids of the
+    /// originals to expire. Returns None if the scope is within `keep`. The gateway uses this in
+    /// cluster mode to replicate consolidation through the Raft log (summary `MemoryUpsert` + the
+    /// originals via `MemoryExpire`) instead of applying it only locally.
+    pub async fn memory_consolidate_plan(
+        &self,
+        scope: &MemoryScope,
+        keep: usize,
+    ) -> Result<Option<(MemoryInput, Vec<uuid::Uuid>)>> {
         let actives = self
             .memory_store
             .list_active(scope, self.config.query.max_rows)
@@ -1116,7 +1143,6 @@ impl StrataEngine {
         if to_fold.is_empty() {
             return Ok(None);
         }
-
         let summary = self.summarize_memories(&to_fold).await;
         let source_ids: Vec<String> = to_fold.iter().map(|m| m.id.to_string()).collect();
         let mut input = MemoryInput::new(scope.clone(), summary);
@@ -1125,14 +1151,8 @@ impl StrataEngine {
             "consolidated": true,
             "source_memory_ids": source_ids,
         });
-        let added = self.memory_add(input).await?;
-
-        // Retire the folded originals (soft-delete + drop their vectors).
-        for m in &to_fold {
-            let _ = self.memory_store.expire(m.id).await;
-            let _ = self.memory_index.delete(m.id).await;
-        }
-        Ok(Some(added))
+        let expired: Vec<uuid::Uuid> = to_fold.iter().map(|m| m.id).collect();
+        Ok(Some((input, expired)))
     }
 
     /// Summarize a set of memories (opt-in LLM, else a deterministic bullet list).
