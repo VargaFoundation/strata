@@ -161,6 +161,20 @@ impl GatewayServer {
                     coordinator: coord.clone(),
                 });
 
+        // Build shard-routing state from the cluster config (the router gates on shards > 1).
+        let shard_state = match coordinator.as_ref() {
+            Some(coord) => {
+                let c = coord.read().await;
+                Some(crate::cluster::shard_route::ShardRoutingState {
+                    router: std::sync::Arc::new(c.shard_router()),
+                    my_shard: c.shard_index(),
+                    base_urls: std::sync::Arc::new(c.shard_base_urls()),
+                    http: reqwest::Client::new(),
+                })
+            }
+            None => None,
+        };
+
         // gRPC shares the same auth state (tenant scoping + token validation).
         let grpc_auth = auth_state.clone();
 
@@ -168,6 +182,7 @@ impl GatewayServer {
             engine.clone(),
             auth_state,
             cluster_state,
+            shard_state,
             &config,
         );
 

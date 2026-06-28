@@ -46,14 +46,21 @@ pub fn router() -> Router {
 ///
 /// If `auth_state` is provided, all `/api/v1/*` routes require authentication.
 pub fn router_with_engine(engine: Arc<StrataEngine>) -> Router {
-    router_with_engine_and_auth(engine, None, None, &crate::server::GatewayConfig::default())
+    router_with_engine_and_auth(
+        engine,
+        None,
+        None,
+        None,
+        &crate::server::GatewayConfig::default(),
+    )
 }
 
-/// Build the full REST API router with optional auth and cluster middleware.
+/// Build the full REST API router with optional auth, cluster, and shard-routing middleware.
 pub fn router_with_engine_and_auth(
     engine: Arc<StrataEngine>,
     auth_state: Option<crate::auth::middleware::AuthState>,
     cluster_state: Option<crate::cluster::leader_forward::ClusterState>,
+    shard_state: Option<crate::cluster::shard_route::ShardRoutingState>,
     config: &crate::server::GatewayConfig,
 ) -> Router {
     // Public routes (no auth required) — health/ready need engine state
@@ -170,28 +177,41 @@ pub fn router_with_engine_and_auth(
         config.webhook_secret.clone(),
     )));
 
-    // Apply auth middleware if configured
+    // Coordinator handle for write replication (also handed to the MCP protocol routes below).
+    let coordinator = cluster_state.as_ref().map(|cs| cs.coordinator.clone());
+
+    // Middleware execution order (request flows outer→inner): auth → shard-route → leader-forward →
+    // handler. In axum the LAST-applied route_layer is the OUTERMOST (runs first), so apply them in
+    // reverse: leader-forward first (innermost), then shard-route, then auth last (outermost).
+    // Auth must run before shard-route because shard-route reads the tenant from `AuthContext`.
+
+    // 1. Leader-forwarding (innermost) — applied first.
+    if let Some(cluster_state) = cluster_state {
+        api_routes = api_routes.layer(axum::Extension(cluster_state.coordinator.clone()));
+        api_routes = api_routes.route_layer(axum::middleware::from_fn_with_state(
+            cluster_state,
+            crate::cluster::leader_forward::require_leader_for_writes,
+        ));
+    }
+
+    // 2. Shard routing (middle) — only when actually sharded; routes each request to its tenant's shard.
+    if let Some(shard_state) = shard_state {
+        if shard_state.router.shards() > 1 {
+            api_routes = api_routes.route_layer(axum::middleware::from_fn_with_state(
+                shard_state,
+                crate::cluster::shard_route::route_to_owning_shard,
+            ));
+        }
+    }
+
+    // 3. Auth (outermost) — applied last, so it runs first and populates AuthContext for shard routing.
     if let Some(state) = auth_state {
-        // Expose audit log to the admin audit handler
         if let Some(audit_log) = state.audit_log() {
             api_routes = api_routes.layer(axum::Extension(audit_log.clone()));
         }
         api_routes = api_routes.route_layer(axum::middleware::from_fn_with_state(
             state,
             crate::auth::middleware::require_auth,
-        ));
-    }
-
-    // Coordinator handle for write replication (also handed to the MCP protocol routes below).
-    let coordinator = cluster_state.as_ref().map(|cs| cs.coordinator.clone());
-
-    // Apply leader-forwarding middleware if cluster mode is active
-    if let Some(cluster_state) = cluster_state {
-        // Expose the coordinator to write handlers so they replicate through the Raft log.
-        api_routes = api_routes.layer(axum::Extension(cluster_state.coordinator.clone()));
-        api_routes = api_routes.route_layer(axum::middleware::from_fn_with_state(
-            cluster_state,
-            crate::cluster::leader_forward::require_leader_for_writes,
         ));
     }
 

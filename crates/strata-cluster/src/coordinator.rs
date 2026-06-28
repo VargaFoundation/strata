@@ -42,6 +42,27 @@ impl ClusterCoordinator {
         crate::ShardRouter::new(self.config.shards, 128)
     }
 
+    /// Number of write shards in this fleet.
+    pub fn shards(&self) -> usize {
+        self.config.shards
+    }
+
+    /// This pod's 0-based shard index.
+    pub fn shard_index(&self) -> usize {
+        self.config.shard_index
+    }
+
+    /// Base URLs of every shard's HTTP gateway, indexed by shard (empty/whitespace entries dropped).
+    pub fn shard_base_urls(&self) -> Vec<String> {
+        self.config
+            .shard_base_urls
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
     /// Start the Raft instance with the production gRPC network, and (in multi-node mode) serve
     /// this node's Raft instance to peers over gRPC on `cluster.listen`.
     pub async fn start_raft(&mut self, engine: Arc<StrataEngine>) -> crate::Result<()> {

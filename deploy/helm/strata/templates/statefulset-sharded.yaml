@@ -65,6 +65,11 @@ spec:
             # The shard count is uniform across the fleet so every node hashes keys identically.
             - name: STRATA_CLUSTER__SHARDS
               value: "{{ $root.Values.sharding.shards }}"
+            # This pod's shard, and the HTTP base URL of every shard (for cross-shard request routing).
+            - name: STRATA_CLUSTER__SHARD_INDEX
+              value: "{{ $shard }}"
+            - name: STRATA_CLUSTER__SHARD_BASE_URLS
+              value: "{{- range $i := until (int $root.Values.sharding.shards) }}{{ if $i }},{{ end }}http://{{ include "strata.fullname" $root }}-shard-{{ $i }}-headless.{{ $root.Release.Namespace }}.svc.cluster.local:8432{{- end }}"
             - name: STRATA_EMBEDDING__PROVIDER
               value: {{ $root.Values.config.embedding.provider | quote }}
             - name: STRATA_EMBEDDING__MODEL

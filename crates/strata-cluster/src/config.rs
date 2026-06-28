@@ -42,6 +42,14 @@ pub struct ClusterConfig {
     /// the consistent-hash routing foundation for horizontal write scaling.
     #[serde(default = "default_shards")]
     pub shards: usize,
+    /// This pod's 0-based shard index (only meaningful when `shards > 1`).
+    #[serde(default)]
+    pub shard_index: usize,
+    /// Comma-separated base URLs of every shard's HTTP gateway, indexed by shard. Used by the
+    /// gateway to reverse-proxy a request to its tenant's owning shard. Stored as a String (split in
+    /// Rust) — the `config` crate's env→Vec parsing is fragile and can silently drop the whole config.
+    #[serde(default)]
+    pub shard_base_urls: String,
 }
 
 fn default_shards() -> usize {
@@ -59,6 +67,8 @@ impl Default for ClusterConfig {
             secret: None,
             tls: None,
             shards: 1,
+            shard_index: 0,
+            shard_base_urls: String::new(),
         }
     }
 }
@@ -109,6 +119,8 @@ mod tests {
             secret: None,
             tls: None,
             shards: 1,
+            shard_index: 0,
+            shard_base_urls: String::new(),
         };
         let cloned = config.clone();
         assert_eq!(cloned.node_id, 5);

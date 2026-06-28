@@ -116,5 +116,21 @@ Each node serves the Raft gRPC transport on `STRATA_CLUSTER__LISTEN` (:9433).
 deploy N **independent Raft groups** (one StatefulSet `…-shard-<i>` + headless service each,
 `replicasPerShard` nodes), with `STRATA_CLUSTER__SHARDS` uniform across the fleet so every node hashes
 keys identically (`ShardRouter`). Each shard has its own leader, so write throughput scales with shard
-count; `ShardedCluster` routes writes by key and scatter-gathers cross-shard reads (`query_all` /
-`memory_search_all`). Single-group (`sharding.enabled=false`, default) is unchanged.
+count. Single-group (`sharding.enabled=false`, default) is unchanged.
+
+**Runtime routing (gateway):** in sharded mode each pod knows its `STRATA_CLUSTER__SHARD_INDEX` and the
+HTTP base URL of every shard (`STRATA_CLUSTER__SHARD_BASE_URLS`). The gateway middleware
+`cluster/shard_route.rs` routes each `/api/v1/*` request **by tenant** to the owning shard
+(`route_decision`): served locally if owned, else **reverse-proxied** to the owning shard (not a 307 —
+the leader-forward 307 has no usable Location). Middleware order: `auth → shard-route → leader-forward`.
+Tenant-deletion routes by the path tenant. Verified by unit tests + a single-process reverse-proxy
+e2e test (`crates/strata-gateway/src/cluster/shard_route.rs`).
+
+**Known limits of the routing increment (documented, not bugs):** (1) cross-tenant **admin** reads
+(`/admin/audit|backup|reindex|retention|memory/*`) route by the caller's tenant → see only one shard;
+true cross-tenant aggregation needs scatter-gather (`ShardedCluster::query_all`/`memory_search_all`
+exist as the model). (2) **MCP/LLM-proxy/gRPC/PG** are outside `/api/v1` → not yet shard-routed
+(REST-first). (3) A cross-shard write landing on a destination follower relies on the proxy's bounded
+307-retry + Service balancing to reach the leader. (4) The token-bucket rate limiter runs on both hops
+of a cross-shard request (minor double-decrement). Cross-shard 307 convergence + Raft-group isolation
+need a live multi-pod cluster to validate.

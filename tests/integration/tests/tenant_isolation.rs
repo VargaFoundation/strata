@@ -44,7 +44,7 @@ async fn authed_router() -> axum::Router {
         auth_enabled: true,
         ..Default::default()
     };
-    strata_gateway::rest::router_with_engine_and_auth(engine, Some(auth), None, &gw)
+    strata_gateway::rest::router_with_engine_and_auth(engine, Some(auth), None, None, &gw)
 }
 
 async fn send(

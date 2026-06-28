@@ -264,6 +264,8 @@ async fn cluster_forms_from_config_via_coordinator() {
             secret: None,
             tls: None,
             shards: 1,
+            shard_index: 0,
+            shard_base_urls: String::new(),
         };
         let mut coord = ClusterCoordinator::new(config);
         coord
