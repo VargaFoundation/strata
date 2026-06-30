@@ -198,7 +198,7 @@ async fn webhook_fires_trigger_into_run() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = json_body(resp).await;
     assert!(
-        body["triggered_runs"].as_array().unwrap().len() >= 1,
+        !body["triggered_runs"].as_array().unwrap().is_empty(),
         "webhook should have fired the catch-all trigger: {body}"
     );
 
