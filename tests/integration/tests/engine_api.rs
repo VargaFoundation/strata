@@ -14,8 +14,111 @@ async fn engine_router() -> axum::Router {
     config.memory.episodic.db_path = ":memory:".into();
     config.memory.state.db_path = ":memory:".into();
     config.memory.cognition.db_path = ":memory:".into();
+    config.runtime.db_path = ":memory:".into();
     let engine = Arc::new(StrataEngine::new(config).await.unwrap());
     strata_gateway::rest::router_with_engine(engine)
+}
+
+async fn json_body(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn run_lifecycle_via_rest() {
+    let app = engine_router().await;
+
+    // Create a run.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/runs")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"agent_id":"a1","input":{"q":1}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let created = json_body(resp).await;
+    assert_eq!(created["run"]["status"], "pending");
+    assert_eq!(created["run"]["agent_id"], "a1");
+    let id = created["run"]["id"].as_str().unwrap().to_string();
+
+    // Get it back.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/runs/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_body(resp).await["run"]["id"], id);
+
+    // List runs.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/runs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_body(resp).await["runs"].as_array().unwrap().len(), 1);
+
+    // Cancel it.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/runs/{id}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // It is now cancelled, and the trace endpoint works (empty — no steps appended).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/runs/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(json_body(resp).await["run"]["status"], "cancelled");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/runs/{id}/trace"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_body(resp).await["steps"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]

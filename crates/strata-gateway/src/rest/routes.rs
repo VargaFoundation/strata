@@ -176,6 +176,16 @@ pub fn router_with_engine_and_auth(
             "/sessions/{session_id}/recall",
             axum::routing::get(handlers::session_recall),
         )
+        .route(
+            "/runs",
+            axum::routing::post(handlers::run_create).get(handlers::run_list),
+        )
+        .route("/runs/{id}", axum::routing::get(handlers::run_get))
+        .route("/runs/{id}/trace", axum::routing::get(handlers::run_trace))
+        .route(
+            "/runs/{id}/cancel",
+            axum::routing::post(handlers::run_cancel),
+        )
         .with_state(engine.clone());
 
     // Keep a handle so MCP + LLM-proxy routes can be authenticated too.

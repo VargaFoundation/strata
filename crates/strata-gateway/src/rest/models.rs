@@ -169,6 +169,26 @@ pub struct MemoryLinkRequest {
     pub supersede: bool,
 }
 
+/// Create an agent/workflow run.
+#[derive(Debug, Deserialize)]
+pub struct CreateRunRequest {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub parent_run_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub input: serde_json::Value,
+}
+
+/// List runs, optionally filtered by status.
+#[derive(Debug, Deserialize)]
+pub struct ListRunsQuery {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 /// Query a memory entity's neighborhood (1 hop by default, `depth` for multi-hop traversal).
 #[derive(Debug, Deserialize)]
 pub struct MemoryGraphQuery {

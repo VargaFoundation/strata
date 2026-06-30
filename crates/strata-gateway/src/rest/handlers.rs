@@ -1572,6 +1572,236 @@ pub async fn memory_graph(
     }
 }
 
+/// Create an agent/workflow run (tenant-scoped). Cluster-replicated through Raft.
+pub async fn run_create(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    cluster: Option<
+        Extension<std::sync::Arc<tokio::sync::RwLock<strata_cluster::ClusterCoordinator>>>,
+    >,
+    Json(req): Json<CreateRunRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_create").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    // Materialize the run (id + timestamps) once; cluster mode replicates the identical row.
+    let now = chrono::Utc::now();
+    let run = strata_core::runtime::Run {
+        id: uuid::Uuid::new_v4(),
+        tenant_id: tenant,
+        agent_id: req.agent_id,
+        parent_run_id: req.parent_run_id,
+        status: strata_core::runtime::RunStatus::Pending,
+        input: req.input,
+        result: serde_json::Value::Null,
+        error: None,
+        cursor: serde_json::Value::Null,
+        created_at: now,
+        updated_at: now,
+        started_at: None,
+        ended_at: None,
+    };
+    if let Some(Extension(coord)) = cluster {
+        let coord = coord.read().await;
+        let ar = strata_cluster::raft::types::AppRequest::RunCreate { run: run.clone() };
+        return match coord.client_write(ar).await {
+            Ok(_) => api_ok(serde_json::json!({ "run": run })),
+            Err(e) => cluster_write_error(e),
+        };
+    }
+    match engine.run_apply_create(&run).await {
+        Ok(()) => api_ok(serde_json::json!({ "run": run })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// List a tenant's runs (newest first), optionally `?status=` filtered.
+pub async fn run_list(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Query(params): axum::extract::Query<ListRunsQuery>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_list").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let status = match params.status.as_deref() {
+        Some("pending") => Some(strata_core::runtime::RunStatus::Pending),
+        Some("running") => Some(strata_core::runtime::RunStatus::Running),
+        Some("succeeded") => Some(strata_core::runtime::RunStatus::Succeeded),
+        Some("failed") => Some(strata_core::runtime::RunStatus::Failed),
+        Some("cancelled") => Some(strata_core::runtime::RunStatus::Cancelled),
+        _ => None,
+    };
+    match engine
+        .run_list(&tenant, status, params.limit.unwrap_or(50))
+        .await
+    {
+        Ok(runs) => api_ok(serde_json::json!({ "runs": runs })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// Get a run by id (tenant-scoped).
+pub async fn run_get(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_get").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let id = match uuid::Uuid::parse_str(&id) {
+        Ok(i) => i,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                "run id must be a UUID".to_string(),
+            )
+        }
+    };
+    match engine.run_get(id).await {
+        Ok(Some(run)) if run.tenant_id == tenant => api_ok(serde_json::json!({ "run": run })),
+        Ok(_) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "run not found".to_string(),
+        ),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// Full step trace of a run (episodic events tagged with the run id), tenant-scoped.
+pub async fn run_trace(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_trace").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let id = match uuid::Uuid::parse_str(&id) {
+        Ok(i) => i,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                "run id must be a UUID".to_string(),
+            )
+        }
+    };
+    match engine.run_get(id).await {
+        Ok(Some(run)) if run.tenant_id == tenant => match engine.run_trace(id).await {
+            Ok(steps) => api_ok(serde_json::json!({ "run_id": id, "steps": steps })),
+            Err(e) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUN_ERROR",
+                e.to_string(),
+            ),
+        },
+        Ok(_) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "run not found".to_string(),
+        ),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// Cancel a run (tenant-scoped). Cluster-replicated through Raft.
+pub async fn run_cancel(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    cluster: Option<
+        Extension<std::sync::Arc<tokio::sync::RwLock<strata_cluster::ClusterCoordinator>>>,
+    >,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_cancel").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let id = match uuid::Uuid::parse_str(&id) {
+        Ok(i) => i,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                "run id must be a UUID".to_string(),
+            )
+        }
+    };
+    // Ownership check — never cancel another tenant's run.
+    match engine.run_get(id).await {
+        Ok(Some(run)) if run.tenant_id == tenant => {}
+        Ok(_) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                "run not found".to_string(),
+            )
+        }
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUN_ERROR",
+                e.to_string(),
+            )
+        }
+    }
+    let now = chrono::Utc::now();
+    let patch = strata_core::runtime::RunPatch {
+        status: Some(strata_core::runtime::RunStatus::Cancelled),
+        ended_at: Some(now),
+        ..Default::default()
+    };
+    if let Some(Extension(coord)) = cluster {
+        let coord = coord.read().await;
+        let ar = strata_cluster::raft::types::AppRequest::RunUpdate {
+            id,
+            patch,
+            updated_at: now,
+        };
+        return match coord.client_write(ar).await {
+            Ok(_) => api_ok(serde_json::json!({ "status": "cancelled" })),
+            Err(e) => cluster_write_error(e),
+        };
+    }
+    match engine.run_apply_update(id, &patch, now).await {
+        Ok(_) => api_ok(serde_json::json!({ "status": "cancelled" })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
 pub async fn memory_decay(State(engine): State<Arc<StrataEngine>>) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "memory_decay").increment(1);
     match engine.memory_enforce_decay().await {
