@@ -412,6 +412,88 @@ impl StrataEngine {
         Ok(fired)
     }
 
+    // ── Human-in-the-loop (HITL) ─────────────────────────────────────
+
+    /// Pause a run for human approval: set it `WaitingApproval`, record a `pending` approval in the
+    /// state store (keyed by run id, so a watcher can wake the driver), and journal a `hitl_request`.
+    pub async fn run_request_approval(
+        &self,
+        run_id: uuid::Uuid,
+        tenant: &str,
+        prompt: &str,
+    ) -> Result<()> {
+        self.state_set(
+            &format!("__approval:{run_id}"),
+            "status",
+            serde_json::json!({ "state": "pending", "prompt": prompt }),
+        )
+        .await?;
+        self.run_update(
+            run_id,
+            RunPatch {
+                status: Some(RunStatus::WaitingApproval),
+                ..Default::default()
+            },
+        )
+        .await?;
+        self.run_log_step(
+            run_id,
+            tenant,
+            "hitl_request",
+            serde_json::json!({ "prompt": prompt }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Resolve a pending approval: record the verdict and move the run back to `Running` (approved)
+    /// or `Cancelled` (rejected); journal a `hitl_resolve` step.
+    pub async fn run_resolve_approval(
+        &self,
+        run_id: uuid::Uuid,
+        tenant: &str,
+        approved: bool,
+    ) -> Result<()> {
+        self.state_set(
+            &format!("__approval:{run_id}"),
+            "status",
+            serde_json::json!({ "state": if approved { "approved" } else { "rejected" } }),
+        )
+        .await?;
+        let patch = if approved {
+            RunPatch {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            }
+        } else {
+            RunPatch {
+                status: Some(RunStatus::Cancelled),
+                ended_at: Some(chrono::Utc::now()),
+                ..Default::default()
+            }
+        };
+        self.run_update(run_id, patch).await?;
+        self.run_log_step(
+            run_id,
+            tenant,
+            "hitl_resolve",
+            serde_json::json!({ "approved": approved }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Current approval state for a run (`pending` / `approved` / `rejected`), if any.
+    pub async fn run_approval_status(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<Option<serde_json::Value>> {
+        Ok(self
+            .state_get(&format!("__approval:{run_id}"), "status")
+            .await?
+            .map(|e| e.value))
+    }
+
     /// Append one durable step to a run's trace: an episodic event tagged `_session_id = run_id`
     /// (so `run_trace` recalls it) and `_tenant_id`. The step is the unit of agent observability.
     pub async fn run_log_step(
@@ -3455,6 +3537,42 @@ mod tests {
         assert_eq!(fired2.len(), 1);
 
         assert_eq!(engine.run_list("default", None, 10).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn hitl_request_then_approve() {
+        use crate::runtime::RunStatus;
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let run = engine
+            .run_create("default", Some("a".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        engine
+            .run_request_approval(run.id, "default", "ship it?")
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.run_get(run.id).await.unwrap().unwrap().status,
+            RunStatus::WaitingApproval
+        );
+        assert_eq!(
+            engine.run_approval_status(run.id).await.unwrap().unwrap()["state"],
+            "pending"
+        );
+
+        engine
+            .run_resolve_approval(run.id, "default", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.run_get(run.id).await.unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        assert_eq!(
+            engine.run_approval_status(run.id).await.unwrap().unwrap()["state"],
+            "approved"
+        );
     }
 
     #[test]

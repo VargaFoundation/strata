@@ -1638,6 +1638,7 @@ pub async fn run_list(
         Some("succeeded") => Some(strata_core::runtime::RunStatus::Succeeded),
         Some("failed") => Some(strata_core::runtime::RunStatus::Failed),
         Some("cancelled") => Some(strata_core::runtime::RunStatus::Cancelled),
+        Some("waiting_approval") => Some(strata_core::runtime::RunStatus::WaitingApproval),
         _ => None,
     };
     match engine
@@ -1879,6 +1880,73 @@ pub async fn call_tool(
     match gw.call(&server, &req.tool, req.arguments).await {
         Ok(result) => api_ok(serde_json::json!({ "result": result })),
         Err(e) => api_error(StatusCode::BAD_GATEWAY, "TOOL_CALL_FAILED", e),
+    }
+}
+
+/// Pause a run awaiting human approval (HITL).
+pub async fn run_request_approval(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<RequestApprovalRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_request_approval")
+        .increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let id = match uuid::Uuid::parse_str(&id) {
+        Ok(i) => i,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                "run id must be a UUID".to_string(),
+            )
+        }
+    };
+    match engine.run_request_approval(id, &tenant, &req.prompt).await {
+        Ok(()) => api_ok(serde_json::json!({ "status": "waiting_approval" })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// Approve or reject a run awaiting approval (HITL).
+pub async fn run_approve(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<ApproveRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_approve").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let id = match uuid::Uuid::parse_str(&id) {
+        Ok(i) => i,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                "run id must be a UUID".to_string(),
+            )
+        }
+    };
+    match engine.run_resolve_approval(id, &tenant, req.approve).await {
+        Ok(()) => api_ok(serde_json::json!({
+            "status": if req.approve { "approved" } else { "rejected" }
+        })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
     }
 }
 

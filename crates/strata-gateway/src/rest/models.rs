@@ -204,6 +204,20 @@ pub struct RunAgentRequest {
     pub max_turns: Option<usize>,
 }
 
+/// Request human approval for a run (HITL).
+#[derive(Debug, Deserialize)]
+pub struct RequestApprovalRequest {
+    #[serde(default)]
+    pub prompt: String,
+}
+
+/// Approve or reject a run awaiting approval (HITL).
+#[derive(Debug, Deserialize)]
+pub struct ApproveRequest {
+    #[serde(default)]
+    pub approve: bool,
+}
+
 /// List runs, optionally filtered by status.
 #[derive(Debug, Deserialize)]
 pub struct ListRunsQuery {

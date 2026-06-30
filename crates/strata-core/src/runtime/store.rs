@@ -22,6 +22,8 @@ pub enum RunStatus {
     #[default]
     Pending,
     Running,
+    /// Paused awaiting a human-in-the-loop approval.
+    WaitingApproval,
     Succeeded,
     Failed,
     Cancelled,
@@ -32,6 +34,7 @@ impl RunStatus {
         match self {
             RunStatus::Pending => "pending",
             RunStatus::Running => "running",
+            RunStatus::WaitingApproval => "waiting_approval",
             RunStatus::Succeeded => "succeeded",
             RunStatus::Failed => "failed",
             RunStatus::Cancelled => "cancelled",
@@ -41,6 +44,7 @@ impl RunStatus {
     fn from_str(s: &str) -> Self {
         match s {
             "running" => RunStatus::Running,
+            "waiting_approval" => RunStatus::WaitingApproval,
             "succeeded" => RunStatus::Succeeded,
             "failed" => RunStatus::Failed,
             "cancelled" => RunStatus::Cancelled,

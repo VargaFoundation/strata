@@ -187,6 +187,14 @@ pub fn router_with_engine_and_auth(
             axum::routing::post(handlers::run_cancel),
         )
         .route(
+            "/runs/{id}/request-approval",
+            axum::routing::post(handlers::run_request_approval),
+        )
+        .route(
+            "/runs/{id}/approve",
+            axum::routing::post(handlers::run_approve),
+        )
+        .route(
             "/agents/run",
             axum::routing::post(handlers::run_agent_endpoint),
         )
