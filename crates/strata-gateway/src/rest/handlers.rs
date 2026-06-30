@@ -1489,6 +1489,8 @@ pub async fn memory_link(
             dst: req.dst,
             weight: 1.0,
             source_memory_id: None,
+            valid_from: Some(chrono::Utc::now()),
+            ..Default::default()
         };
         let coord = coord.read().await;
         let ar = strata_cluster::raft::types::AppRequest::GraphAddEdge {

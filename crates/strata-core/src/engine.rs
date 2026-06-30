@@ -1448,8 +1448,24 @@ impl StrataEngine {
             dst: dst.to_string(),
             weight: 1.0,
             source_memory_id: source,
+            valid_from: Some(chrono::Utc::now()),
+            ..Default::default()
         };
         self.memory_store.add_edge(tenant, &edge).await
+    }
+
+    /// Edges incident to `entity` that were valid at instant `at` — the bi-temporal "what did the
+    /// graph look like at time T" query (parallels [`Self::memory_as_of`] for memories).
+    pub async fn memory_neighbors_as_of(
+        &self,
+        tenant: &str,
+        entity: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::cognition::Edge>> {
+        self.memory_store
+            .neighbors_as_of(tenant, entity, at, limit.min(self.config.query.max_rows))
+            .await
     }
 
     /// Apply a fully-materialized graph edge (deterministic — used by Raft apply so every node
