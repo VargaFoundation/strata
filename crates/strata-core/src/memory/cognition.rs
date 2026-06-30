@@ -291,14 +291,29 @@ pub fn extract_triples(text: &str) -> Vec<(String, String, String)> {
             let lw = w.to_lowercase();
             let (rel, obj_start) = match lw.as_str() {
                 "likes" | "is" | "are" | "has" | "have" | "uses" | "knows" | "owns" | "prefers"
-                | "loves" | "hates" | "wants" => (lw.clone(), i + 1),
-                "works" | "lives"
+                | "loves" | "hates" | "wants" | "plays" | "teaches" | "visited" | "met"
+                | "speaks" | "joined" | "manages" | "leads" | "drives" | "founded" | "created"
+                | "wrote" | "enjoys" | "dislikes" | "needs" | "avoids" => (lw.clone(), i + 1),
+                "works" | "lives" | "moved" | "born" | "based" | "studied" | "studies"
+                | "traveled"
                     if words
                         .get(i + 1)
-                        .map(|x| x.eq_ignore_ascii_case("at") || x.eq_ignore_ascii_case("in"))
+                        .map(|x| {
+                            ["at", "in", "to", "from"]
+                                .iter()
+                                .any(|p| x.eq_ignore_ascii_case(p))
+                        })
                         .unwrap_or(false) =>
                 {
                     (format!("{lw}_{}", words[i + 1].to_lowercase()), i + 2)
+                }
+                "married"
+                    if words
+                        .get(i + 1)
+                        .map(|x| x.eq_ignore_ascii_case("to"))
+                        .unwrap_or(false) =>
+                {
+                    ("married_to".into(), i + 2)
                 }
                 _ => continue,
             };
@@ -1348,10 +1363,16 @@ mod tests {
 
     #[test]
     fn extract_triples_matches_simple_patterns() {
-        let t = extract_triples("Alice likes coffee. Bob works at Acme. Carol is happy");
+        let t = extract_triples(
+            "Alice likes coffee. Bob works at Acme. Carol is happy. \
+             Dave moved to Lisbon. Tina teaches math. Sam married to Jo",
+        );
         assert!(t.contains(&("Alice".into(), "likes".into(), "coffee".into())));
         assert!(t.contains(&("Bob".into(), "works_at".into(), "Acme".into())));
         assert!(t.contains(&("Carol".into(), "is".into(), "happy".into())));
+        assert!(t.contains(&("Dave".into(), "moved_to".into(), "Lisbon".into())));
+        assert!(t.contains(&("Tina".into(), "teaches".into(), "math".into())));
+        assert!(t.contains(&("Sam".into(), "married_to".into(), "Jo".into())));
         // No verb → no triple.
         assert!(extract_triples("a quiet morning").is_empty());
     }
