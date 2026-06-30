@@ -131,6 +131,11 @@ pub struct CognitionConfig {
     /// scope exceeds this after an add, the lowest-importance memories are evicted. 0 = unlimited.
     #[serde(default)]
     pub max_memories_per_scope: usize,
+    /// Enable query-time knowledge-graph expansion in `memory_search` (read-path only): also pull
+    /// memories linked by a graph edge to an entity mentioned in the query, so multi-hop facts that
+    /// lexical/vector retrieval miss can surface. Off by default.
+    #[serde(default)]
+    pub graph_expansion: bool,
 }
 
 impl Default for CognitionConfig {
@@ -146,6 +151,7 @@ impl Default for CognitionConfig {
             forget_threshold: 0.05,
             read_pool_size: default_read_pool_size(),
             max_memories_per_scope: 0,
+            graph_expansion: false,
         }
     }
 }
