@@ -53,7 +53,10 @@ fn main() {
         .filter_map(|c| c.get("qa").and_then(|v| v.as_array()).map(|a| a.len()))
         .sum();
     eprintln!("→ {} conversations, {qa_total} questions", convos.len());
-    println!("{}", serde_json::to_string_pretty(&convos).expect("serialize"));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&convos).expect("serialize")
+    );
 }
 
 /// Auto-detect the source format from the presence of LongMemEval-specific keys.
