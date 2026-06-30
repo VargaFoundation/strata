@@ -81,3 +81,21 @@ embedding round-trip).
 - **A cross-encoder reranker** (vs the LLM baseline) — relevance gain without the latency.
 - **An LLM judge** for QA scoring (vs token-F1) — the metric that is actually comparable to the leaderboards.
 - A stronger answerer/embedding model than a CPU-hosted 7B.
+
+## Harness knobs (all env-toggled, so the levers above are runnable)
+
+| env | effect |
+|---|---|
+| `STRATA_EMBEDDING__PROVIDER` / `__MODEL` | hybrid retrieval (BM25 + vector) |
+| `STRATA_RERANK__PROVIDER=llm` / `__MODEL` | second-stage LLM reranking (slow — see latency note) |
+| `STRATA_COGNITION__GRAPH_EXPANSION=1` | query-time knowledge-graph expansion |
+| `STRATA_COGNITION__AUTO_GRAPH=1` | deterministic auto-population of graph edges from each memory |
+| `STRATA_COGNITION__EXTRACTION=llm` (+ `__EXTRACTION_PROVIDER` / `__EXTRACTION_MODEL`) | **LLM fact extraction** at ingest — distils each turn into atomic facts |
+| `STRATA_EVAL__PROVIDER` / `__MODEL` | end-to-end QA answerer (token-F1) |
+| `STRATA_EVAL__JUDGE=1` | add an **LLM judge** (`QA-judge` column) — the leniency-matched, leaderboard-comparable metric |
+
+**Extraction sanity check** (Ollama `glm-4.7-flash`): on a 3-turn / 4-QA micro set,
+`extraction=llm` split the 3 multi-fact turns into **7 atomic memories**, and the run reported
+`QA-F1 = QA-judge = 75%`. This confirms the extraction + judge paths end-to-end; the *scaled* lift on
+full LoCoMo (~5882 turns ⇒ ~5882 extraction LLM calls, hours) is the owner's run to make — the
+harness is now ready for it.

@@ -62,6 +62,8 @@ struct Record {
     rank: Option<usize>,
     /// token-F1 of the generated answer vs gold (None when QA mode is off).
     f1: Option<f64>,
+    /// LLM-judge verdict (Some(true) = judged correct) when STRATA_EVAL__JUDGE is set.
+    judge: Option<bool>,
 }
 
 fn embedded_dataset() -> Vec<Conversation> {
@@ -133,6 +135,19 @@ fn apply_env(config: &mut CoreConfig) {
     set(&mut config.rerank.provider, "STRATA_RERANK__PROVIDER");
     set(&mut config.rerank.backend, "STRATA_RERANK__BACKEND");
     set(&mut config.rerank.model, "STRATA_RERANK__MODEL");
+    // LLM fact extraction at ingest (the biggest recall lever): "none" or "llm".
+    set(
+        &mut config.memory.cognition.extraction,
+        "STRATA_COGNITION__EXTRACTION",
+    );
+    set(
+        &mut config.memory.cognition.extraction_provider,
+        "STRATA_COGNITION__EXTRACTION_PROVIDER",
+    );
+    set(
+        &mut config.memory.cognition.extraction_model,
+        "STRATA_COGNITION__EXTRACTION_MODEL",
+    );
     let flag = |key: &str| matches!(std::env::var(key).as_deref(), Ok("1") | Ok("true"));
     if std::env::var("STRATA_COGNITION__GRAPH_EXPANSION").is_ok() {
         config.memory.cognition.graph_expansion = flag("STRATA_COGNITION__GRAPH_EXPANSION");
@@ -250,6 +265,26 @@ async fn answer_question(
         .ok()
 }
 
+/// LLM judge: does `pred` convey the same information as the reference `gold` answer? Returns the
+/// leaderboard-style binary verdict (more lenient than token-F1, which penalizes rewording).
+async fn judge_correct(
+    model: &dyn CompletionProvider,
+    question: &str,
+    gold: &str,
+    pred: &str,
+) -> Option<bool> {
+    let user = format!(
+        "Question: {question}\nReference answer: {gold}\nCandidate answer: {pred}\n\nDoes the \
+         candidate convey the same information as the reference (ignore wording and formatting)? \
+         Reply with only \"yes\" or \"no\"."
+    );
+    let reply = model
+        .complete("You are a strict grader.", &user)
+        .await
+        .ok()?;
+    Some(reply.trim().to_lowercase().starts_with("yes"))
+}
+
 /// Print one metrics line for a set of question records.
 fn report(label: &str, recs: &[&Record]) {
     let n = recs.len().max(1) as f64;
@@ -278,6 +313,14 @@ fn report(label: &str, recs: &[&Record]) {
             100.0 * f1s.iter().sum::<f64>() / f1s.len() as f64
         );
     }
+    let judged: Vec<bool> = recs.iter().filter_map(|r| r.judge).collect();
+    if !judged.is_empty() {
+        let correct = judged.iter().filter(|&&v| v).count();
+        print!(
+            "  QA-judge={:>5.1}%",
+            100.0 * correct as f64 / judged.len() as f64
+        );
+    }
     println!();
 }
 
@@ -295,6 +338,10 @@ async fn run() {
     apply_env(&mut config);
     let engine = StrataEngine::new(config).await.expect("engine");
     let answerer = build_answerer();
+    let judge_enabled = matches!(
+        std::env::var("STRATA_EVAL__JUDGE").as_deref(),
+        Ok("1") | Ok("true")
+    );
 
     let dataset = load_dataset();
     // Retrieve a deeper top-K so we can report recall@{1,3,5} + MRR from a single search.
@@ -334,24 +381,37 @@ async fn run() {
                 println!("  MISS: q={:?} expected={:?}", qa.question, qa.expected);
             }
 
-            // Optional end-to-end QA-accuracy: answer from the retrieved facts, score by token-F1.
-            let f1 = match &answerer {
+            // Optional end-to-end QA: answer from the retrieved facts, score by token-F1 (and, when
+            // enabled, an LLM judge — the metric comparable to published leaderboards).
+            let (f1, judge) = match &answerer {
                 Some(model) => {
                     let facts: Vec<String> = results
                         .iter()
                         .take(QA_FACTS)
                         .map(|h| h.memory.content.clone())
                         .collect();
-                    let ans = answer_question(model.as_ref(), &qa.question, &facts).await;
-                    Some(ans.map(|a| token_f1(&a, &qa.expected)).unwrap_or(0.0))
+                    match answer_question(model.as_ref(), &qa.question, &facts).await {
+                        Some(ans) => {
+                            let f1 = token_f1(&ans, &qa.expected);
+                            let judge = if judge_enabled {
+                                judge_correct(model.as_ref(), &qa.question, &qa.expected, &ans)
+                                    .await
+                            } else {
+                                None
+                            };
+                            (Some(f1), judge)
+                        }
+                        None => (Some(0.0), judge_enabled.then_some(false)),
+                    }
                 }
-                None => None,
+                None => (None, None),
             };
 
             records.push(Record {
                 category: qa.category.clone().unwrap_or_else(|| "all".into()),
                 rank,
                 f1,
+                judge,
             });
         }
     }

@@ -330,3 +330,111 @@ async fn cluster_forms_from_config_via_coordinator() {
         let _ = c.shutdown().await;
     }
 }
+
+/// Bring up a real 3-node cluster and replicate a **GraphSupersede**: seed an active edge, then
+/// close it through quorum commit, and assert every node converges to the identical superseded
+/// state. Proves the bi-temporal edge supersession is replication-correct on a live (in-process)
+/// cluster, not just in the two-engine apply unit test.
+#[tokio::test]
+async fn three_node_cluster_replicates_graph_supersede() {
+    let router = Router::default();
+    let mut engines: BTreeMap<NodeId, Arc<StrataEngine>> = BTreeMap::new();
+    let mut rafts: BTreeMap<NodeId, RaftHandle> = BTreeMap::new();
+    for id in 1..=3u64 {
+        let engine = inmem_engine().await;
+        let (log, sm) = Adaptor::new(MemStore::new(Some(engine.clone())));
+        let raft = Raft::new(
+            id,
+            raft_config(),
+            Factory {
+                router: router.clone(),
+            },
+            log,
+            sm,
+        )
+        .await
+        .unwrap();
+        router.register(id, raft.clone());
+        engines.insert(id, engine);
+        rafts.insert(id, raft);
+    }
+    let members: BTreeMap<NodeId, NodeInfo> = (1..=3u64)
+        .map(|id| {
+            (
+                id,
+                NodeInfo {
+                    addr: format!("mem://{id}"),
+                },
+            )
+        })
+        .collect();
+    rafts[&1].initialize(members).await.unwrap();
+    let mut leader = None;
+    for _ in 0..100 {
+        if let Some(l) = rafts[&1].metrics().borrow().current_leader {
+            leader = Some(l);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let leader = leader.expect("a leader should be elected");
+
+    // Seed an active edge, then supersede it — both committed via quorum.
+    let edge_id = uuid::Uuid::new_v4();
+    let by = uuid::Uuid::new_v4();
+    let at = chrono::Utc::now();
+    rafts[&leader]
+        .client_write(AppRequest::GraphAddEdge {
+            tenant: None,
+            edge: strata_core::memory::cognition::Edge {
+                id: edge_id,
+                src: "Alice".into(),
+                relation: "lives_in".into(),
+                dst: "Berlin".into(),
+                weight: 1.0,
+                valid_from: Some(at - chrono::Duration::hours(1)),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+    rafts[&leader]
+        .client_write(AppRequest::GraphSupersede {
+            tenant: None,
+            src: "Alice".into(),
+            relation: "lives_in".into(),
+            at,
+            by: Some(by),
+        })
+        .await
+        .unwrap();
+
+    // Every node converges to the identical closed edge (same id, superseded, attributed to `by`).
+    for id in 1..=3u64 {
+        let engine = &engines[&id];
+        let mut converged = false;
+        for _ in 0..100 {
+            let edges = engine
+                .memory_neighbors("default", "Alice", 10)
+                .await
+                .unwrap();
+            if edges.len() == 1
+                && edges[0].id == edge_id
+                && edges[0].state == strata_core::memory::cognition::EdgeState::Superseded
+                && edges[0].invalidated_by == Some(by)
+            {
+                converged = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            converged,
+            "node {id} did not converge to the superseded edge"
+        );
+    }
+
+    for raft in rafts.into_values() {
+        let _ = raft.shutdown().await;
+    }
+}
