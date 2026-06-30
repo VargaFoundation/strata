@@ -1106,6 +1106,33 @@ impl MemoryStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// All edges for a tenant (bounded, highest-weight first) — used for query-time graph
+    /// expansion, where the caller filters edges whose endpoints mention the query's entities.
+    pub async fn list_edges(&self, tenant: &str, limit: usize) -> crate::Result<Vec<Edge>> {
+        let db = self.read_conn();
+        let mut stmt = db
+            .prepare(
+                "SELECT id, src, relation, dst, weight, source_memory_id FROM memory_edges \
+                 WHERE tenant_id = ? ORDER BY weight DESC LIMIT ?",
+            )
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map(duckdb::params![tenant, limit as i64], |r| {
+                Ok(Edge {
+                    id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+                    src: r.get(1)?,
+                    relation: r.get(2)?,
+                    dst: r.get(3)?,
+                    weight: r.get::<_, f64>(4)? as f32,
+                    source_memory_id: r
+                        .get::<_, Option<String>>(5)?
+                        .and_then(|s| Uuid::parse_str(&s).ok()),
+                })
+            })
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// Export the `memories` table to a DuckDB `EXPORT DATABASE` directory (backup/snapshot).
     pub fn export_to(&self, dir: &Path) -> crate::Result<()> {
         let db = self.write_db.lock();

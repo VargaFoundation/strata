@@ -922,6 +922,8 @@ impl StrataEngine {
     const MEMORY_LEXICAL_SCAN_CAP: usize = 512;
     /// Reciprocal Rank Fusion constant (standard default).
     const MEMORY_RRF_K: f32 = 60.0;
+    /// Max graph edges scanned per scope for query-time graph expansion.
+    const MEMORY_GRAPH_EDGE_CAP: usize = 512;
 
     /// Hybrid search over a scope's memories: deterministic BM25 lexical ranking fused
     /// (via Reciprocal Rank Fusion) with vector search when an embedding provider is
@@ -981,12 +983,57 @@ impl StrataEngine {
             }
         }
 
+        // Graph expansion (read-path, gated): also pull memories connected by a knowledge-graph
+        // edge to an entity mentioned in the query, surfacing facts lexical/vector retrieval miss.
+        let mut graph_ids: Vec<uuid::Uuid> = Vec::new();
+        if self.config.memory.cognition.graph_expansion {
+            use crate::memory::cognition::tokenize;
+            let tenant = if scope.tenant_id.is_empty() {
+                "default"
+            } else {
+                scope.tenant_id.as_str()
+            };
+            if let Ok(edges) = self
+                .memory_store
+                .list_edges(tenant, Self::MEMORY_GRAPH_EDGE_CAP)
+                .await
+            {
+                let q_terms: std::collections::HashSet<String> =
+                    tokenize(query).into_iter().collect();
+                let mut seen = std::collections::HashSet::new();
+                for e in &edges {
+                    let Some(mid) = e.source_memory_id else {
+                        continue;
+                    };
+                    let matches = tokenize(&e.src).iter().any(|t| q_terms.contains(t))
+                        || tokenize(&e.dst).iter().any(|t| q_terms.contains(t));
+                    if !matches || !seen.insert(mid) {
+                        continue;
+                    }
+                    // Scope-safe: only surface a graph-linked memory if it is in this exact scope.
+                    let mem = match by_id.get(&mid) {
+                        Some(m) => Some(m.clone()),
+                        None => self.memory_store.get(mid).await.ok().flatten(),
+                    };
+                    if let Some(m) = mem {
+                        if m.state == MemoryState::Active && m.scope == *scope {
+                            by_id.entry(mid).or_insert(m);
+                            graph_ids.push(mid);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut rankings: Vec<Vec<uuid::Uuid>> = Vec::new();
         if !vec_ids.is_empty() {
             rankings.push(vec_ids);
         }
         if !lex_ids.is_empty() {
             rankings.push(lex_ids);
+        }
+        if !graph_ids.is_empty() {
+            rankings.push(graph_ids);
         }
 
         // Nothing matched lexically or by vector → fall back to importance/recency.
@@ -2707,6 +2754,63 @@ mod tests {
         assert_eq!(
             reranked[0].memory.content,
             "alice loves hiking in the mountains"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_search_graph_expansion_surfaces_linked_memory() {
+        // Set up two memories + an edge; return the id of the graph-linked (lexically-unmatched) one.
+        async fn setup(graph_expansion: bool) -> (StrataEngine, uuid::Uuid) {
+            let mut cfg = inmem_config();
+            cfg.memory.cognition.graph_expansion = graph_expansion;
+            let engine = StrataEngine::new(cfg).await.unwrap();
+            let scope = MemoryScope::user("alice");
+            // Linked fact: shares NO term with the query "Acme".
+            let linked = engine
+                .memory_add(MemoryInput::new(
+                    scope.clone(),
+                    "The Q3 offsite is in Lisbon",
+                ))
+                .await
+                .unwrap();
+            // Decoy that DOES match "Acme" lexically (so rankings are non-empty → no recency fallback).
+            engine
+                .memory_add(MemoryInput::new(
+                    scope.clone(),
+                    "Acme reported strong revenue",
+                ))
+                .await
+                .unwrap();
+            // Edge: Acme --hosts--> offsite, sourced from the Lisbon memory.
+            engine
+                .memory_link(
+                    "default",
+                    "Acme",
+                    "hosts",
+                    "offsite",
+                    Some(linked.memory.id),
+                )
+                .await
+                .unwrap();
+            (engine, linked.memory.id)
+        }
+
+        let scope = MemoryScope::user("alice");
+
+        // Off: the query "Acme" matches only the decoy; the Lisbon memory is not retrieved.
+        let (off, off_id) = setup(false).await;
+        let off_hits = off.memory_search("Acme", &scope, 5).await.unwrap();
+        assert!(
+            !off_hits.iter().any(|h| h.memory.id == off_id),
+            "without graph expansion the edge-linked memory is not surfaced"
+        );
+
+        // On: the Acme→offsite edge surfaces the Lisbon memory despite no lexical/vector match.
+        let (on, on_id) = setup(true).await;
+        let on_hits = on.memory_search("Acme", &scope, 5).await.unwrap();
+        assert!(
+            on_hits.iter().any(|h| h.memory.id == on_id),
+            "graph expansion should surface the edge-linked memory"
         );
     }
 

@@ -7,6 +7,7 @@ pub mod llm;
 pub mod materialized;
 pub mod memory;
 pub mod query;
+pub mod rerank;
 pub mod storage;
 
 pub use config::CoreConfig;

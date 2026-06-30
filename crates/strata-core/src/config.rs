@@ -33,6 +33,7 @@ pub struct CoreConfig {
     pub storage: StorageConfig,
     pub memory: MemoryConfig,
     pub embedding: EmbeddingConfig,
+    pub rerank: RerankConfig,
     pub query: QueryConfig,
     pub backup: BackupConfig,
 }
@@ -43,6 +44,7 @@ impl std::fmt::Debug for CoreConfig {
             .field("storage", &self.storage)
             .field("memory", &self.memory)
             .field("embedding", &self.embedding)
+            .field("rerank", &self.rerank)
             .field("query", &self.query)
             .field("backup", &self.backup)
             .finish()
@@ -129,6 +131,11 @@ pub struct CognitionConfig {
     /// scope exceeds this after an add, the lowest-importance memories are evicted. 0 = unlimited.
     #[serde(default)]
     pub max_memories_per_scope: usize,
+    /// Enable query-time knowledge-graph expansion in `memory_search` (read-path only): also pull
+    /// memories linked by a graph edge to an entity mentioned in the query, so multi-hop facts that
+    /// lexical/vector retrieval miss can surface. Off by default.
+    #[serde(default)]
+    pub graph_expansion: bool,
 }
 
 impl Default for CognitionConfig {
@@ -144,6 +151,7 @@ impl Default for CognitionConfig {
             forget_threshold: 0.05,
             read_pool_size: default_read_pool_size(),
             max_memories_per_scope: 0,
+            graph_expansion: false,
         }
     }
 }
@@ -244,6 +252,37 @@ impl Default for EmbeddingConfig {
     }
 }
 
+/// Configuration for optional second-stage reranking of `memory_search` results.
+///
+/// Reranking runs only on the read path (no Raft/determinism impact) and is off by default.
+/// When `provider = "llm"` it reuses a chat-completion backend (`backend`) to score the top
+/// `candidates` fused hits and reorder them; network failures degrade gracefully to the
+/// unreranked order.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RerankConfig {
+    /// Reranking strategy: `none` (off) or `llm` (LLM relevance judge).
+    pub provider: String,
+    /// Chat-completion backend for `provider = "llm"`: `ollama` or `openai`
+    /// (reuses `embedding.ollama_url` / `embedding.openai_api_key`).
+    pub backend: String,
+    /// Model name used by the reranker.
+    pub model: String,
+    /// Number of fused candidates to over-fetch and rerank before truncating to `k`.
+    pub candidates: usize,
+}
+
+impl Default for RerankConfig {
+    fn default() -> Self {
+        Self {
+            provider: "none".into(),
+            backend: "ollama".into(),
+            model: "llama3.2".into(),
+            candidates: 50,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct QueryConfig {
@@ -320,6 +359,30 @@ mod tests {
         assert_eq!(config.embedding.batch_size, 64);
         assert_eq!(config.query.max_rows, 10_000);
         assert_eq!(config.query.timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn default_rerank_config() {
+        let config = CoreConfig::default();
+        assert_eq!(config.rerank.provider, "none");
+        assert_eq!(config.rerank.backend, "ollama");
+        assert_eq!(config.rerank.candidates, 50);
+    }
+
+    #[test]
+    fn deserialize_rerank_from_toml() {
+        let toml_str = r#"
+            [rerank]
+            provider = "llm"
+            backend = "openai"
+            model = "gpt-4o-mini"
+            candidates = 30
+        "#;
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.rerank.provider, "llm");
+        assert_eq!(config.rerank.backend, "openai");
+        assert_eq!(config.rerank.model, "gpt-4o-mini");
+        assert_eq!(config.rerank.candidates, 30);
     }
 
     #[test]
