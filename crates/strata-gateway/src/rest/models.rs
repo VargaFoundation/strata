@@ -180,6 +180,15 @@ pub struct CreateRunRequest {
     pub input: serde_json::Value,
 }
 
+/// Run an agent end-to-end (durable LLM↔tool loop).
+#[derive(Debug, Deserialize)]
+pub struct RunAgentRequest {
+    pub agent_id: String,
+    pub question: String,
+    #[serde(default)]
+    pub max_turns: Option<usize>,
+}
+
 /// List runs, optionally filtered by status.
 #[derive(Debug, Deserialize)]
 pub struct ListRunsQuery {

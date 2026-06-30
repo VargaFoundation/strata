@@ -1802,6 +1802,36 @@ pub async fn run_cancel(
     }
 }
 
+/// Run an agent end-to-end (durable LLM↔tool loop) and return the resulting run. Requires a
+/// completion provider; the run + its step trace are persisted (see `/runs/{id}/trace`).
+pub async fn run_agent_endpoint(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    Json(req): Json<RunAgentRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_agent").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    match engine
+        .run_agent(
+            &tenant,
+            &req.agent_id,
+            &req.question,
+            req.max_turns.unwrap_or(8),
+        )
+        .await
+    {
+        Ok(run) => api_ok(serde_json::json!({ "run": run })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AGENT_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
 pub async fn memory_decay(State(engine): State<Arc<StrataEngine>>) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "memory_decay").increment(1);
     match engine.memory_enforce_decay().await {

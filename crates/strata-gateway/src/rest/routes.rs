@@ -186,6 +186,10 @@ pub fn router_with_engine_and_auth(
             "/runs/{id}/cancel",
             axum::routing::post(handlers::run_cancel),
         )
+        .route(
+            "/agents/run",
+            axum::routing::post(handlers::run_agent_endpoint),
+        )
         .with_state(engine.clone());
 
     // Keep a handle so MCP + LLM-proxy routes can be authenticated too.
