@@ -14,7 +14,10 @@ services:
       STRATA_CLUSTER__ENABLED: "true"
       STRATA_CLUSTER__NODE_ID: "1"
       STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
-      STRATA_CLUSTER__PEERS: "strata-2:9433,strata-3:9433"
+      # Full voter membership as id@addr, INCLUDING this node (lowest id bootstraps).
+      STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
+      STRATA_CLUSTER__DATA_DIR: "/data/raft"
+      STRATA_STORAGE__DATA_DIR: "/data"
       STRATA_EMBEDDING__PROVIDER: ollama
       STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
     volumes:
@@ -33,7 +36,9 @@ services:
       STRATA_CLUSTER__ENABLED: "true"
       STRATA_CLUSTER__NODE_ID: "2"
       STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
-      STRATA_CLUSTER__PEERS: "strata-1:9433,strata-3:9433"
+      STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
+      STRATA_CLUSTER__DATA_DIR: "/data/raft"
+      STRATA_STORAGE__DATA_DIR: "/data"
       STRATA_EMBEDDING__PROVIDER: ollama
       STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
     volumes:
@@ -52,7 +57,9 @@ services:
       STRATA_CLUSTER__ENABLED: "true"
       STRATA_CLUSTER__NODE_ID: "3"
       STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
-      STRATA_CLUSTER__PEERS: "strata-1:9433,strata-2:9433"
+      STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
+      STRATA_CLUSTER__DATA_DIR: "/data/raft"
+      STRATA_STORAGE__DATA_DIR: "/data"
       STRATA_EMBEDDING__PROVIDER: ollama
       STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
     volumes:
