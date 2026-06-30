@@ -71,25 +71,25 @@ pub struct Run {
     pub id: Uuid,
     #[serde(default = "default_tenant")]
     pub tenant_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub parent_run_id: Option<Uuid>,
     pub status: RunStatus,
     #[serde(default)]
     pub input: serde_json::Value,
     #[serde(default)]
     pub result: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<String>,
     /// Opaque driver position (e.g. the next workflow node) — reconstructable run state.
     #[serde(default)]
     pub cursor: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ended_at: Option<DateTime<Utc>>,
 }
 
@@ -97,17 +97,17 @@ pub struct Run {
 /// `updated_at` is supplied separately by the writer) so it is deterministic to replicate.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub status: Option<RunStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub result: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cursor: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ended_at: Option<DateTime<Utc>>,
 }
 

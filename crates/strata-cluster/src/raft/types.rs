@@ -189,6 +189,54 @@ mod tests {
     }
 
     #[test]
+    fn run_request_roundtrip_with_none_fields() {
+        // Regression: Run/RunPatch must round-trip through MessagePack (positional encoding) even
+        // with None optionals. `skip_serializing_if` would omit fields and misalign the positional
+        // decoder over the real gRPC transport ("invalid type: string \"pending\", expected a 16
+        // byte array") — only caught by serialization, not by in-process multi-node tests.
+        use strata_core::runtime::{Run, RunPatch, RunStatus};
+        let now = chrono::Utc::now();
+        let run = Run {
+            id: uuid::Uuid::new_v4(),
+            tenant_id: "default".into(),
+            agent_id: None,
+            parent_run_id: None,
+            status: RunStatus::Pending,
+            input: serde_json::json!({}),
+            result: serde_json::Value::Null,
+            error: None,
+            cursor: serde_json::Value::Null,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            ended_at: None,
+        };
+        let bytes = rmp_serde::to_vec(&AppRequest::RunCreate { run }).unwrap();
+        match rmp_serde::from_slice::<AppRequest>(&bytes).unwrap() {
+            AppRequest::RunCreate { run } => {
+                assert_eq!(run.status, RunStatus::Pending);
+                assert!(run.agent_id.is_none());
+                assert!(run.parent_run_id.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let req = AppRequest::RunUpdate {
+            id: uuid::Uuid::new_v4(),
+            patch: RunPatch {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
+            updated_at: now,
+        };
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        assert!(matches!(
+            rmp_serde::from_slice::<AppRequest>(&bytes).unwrap(),
+            AppRequest::RunUpdate { .. }
+        ));
+    }
+
+    #[test]
     fn app_response_roundtrip() {
         let resp = AppResponse::Ingested(42);
         let json = serde_json::to_string(&resp).unwrap();

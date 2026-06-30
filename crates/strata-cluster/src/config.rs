@@ -20,12 +20,51 @@ fn default_tls_domain() -> String {
     "strata".into()
 }
 
+/// Deserialize `peers` from either a sequence (TOML array) or a comma-separated string (env var).
+fn de_string_or_seq<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{SeqAccess, Visitor};
+    use std::fmt;
+
+    struct StringOrSeq;
+    impl<'de> Visitor<'de> for StringOrSeq {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a comma-separated string or a sequence of strings")
+        }
+        fn visit_str<E>(self, s: &str) -> Result<Self::Value, E> {
+            Ok(s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect())
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut out = Vec::new();
+            while let Some(x) = seq.next_element::<String>()? {
+                out.push(x);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_any(StringOrSeq)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ClusterConfig {
     pub enabled: bool,
     pub node_id: u64,
     pub listen: String,
+    /// Full voter membership as `id@addr`. Accepts a TOML array **or** a comma-separated string, so
+    /// it works via `STRATA_CLUSTER__PEERS="1@http://a:9433,2@http://b:9433"` — the `config` crate
+    /// cannot deserialize a plain env string into a `Vec` on its own (it errors, and with
+    /// `unwrap_or_default` that silently wipes the whole config). This custom deserializer fixes it.
+    #[serde(deserialize_with = "de_string_or_seq")]
     pub peers: Vec<String>,
     /// Directory for persistent Raft log storage. Use ":memory:" for in-memory (testing).
     pub data_dir: String,
@@ -99,6 +138,18 @@ mod tests {
         assert_eq!(config.node_id, 3);
         assert_eq!(config.peers.len(), 2);
         assert_eq!(config.peers[0], "10.0.0.2:9433");
+    }
+
+    #[test]
+    fn peers_from_comma_separated_string() {
+        // The env-var shape (`STRATA_CLUSTER__PEERS="1@..,2@.."`): a single comma-separated string.
+        // Previously this failed to deserialize into Vec and wiped the whole config.
+        let config: ClusterConfig =
+            toml::from_str(r#"peers = "1@http://a:9433, 2@http://b:9433, 3@http://c:9433""#)
+                .unwrap();
+        assert_eq!(config.peers.len(), 3);
+        assert_eq!(config.peers[0], "1@http://a:9433");
+        assert_eq!(config.peers[2], "3@http://c:9433");
     }
 
     #[test]
