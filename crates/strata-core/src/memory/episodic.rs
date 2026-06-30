@@ -18,17 +18,20 @@ pub struct Event {
     pub payload: serde_json::Value,
     pub timestamp: DateTime<Utc>,
     /// Optional parent event for causal chains.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // NB: no `skip_serializing_if` — the Raft transport encodes structs positionally (MessagePack
+    // compact), so omitting a None field shifts the array and misaligns the decoder. Keep constant
+    // arity. See the round-trip regression test in strata-cluster raft::types.
+    #[serde(default)]
     pub parent_id: Option<Uuid>,
     /// Optional trace ID for grouping related events across agents.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub trace_id: Option<String>,
     /// Tags for structured filtering.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub tags: Vec<String>,
     /// Optional idempotency key for deduplication.
     /// If set, duplicate inserts with the same key are silently skipped.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub idempotency_key: Option<String>,
 }
 

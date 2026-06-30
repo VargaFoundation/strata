@@ -39,6 +39,11 @@ async fn main() -> anyhow::Result<()> {
         let mut coord = coordinator.write().await;
         coord.start_raft(engine.clone()).await?;
         drop(coord);
+        // Route the agent driver's run/step writes through Raft so runs started via /agents/run
+        // (and their traces) replicate and survive leader failover.
+        engine.set_run_replicator(Arc::new(strata_cluster::CoordinatorRunReplicator::new(
+            coordinator.clone(),
+        )));
     }
 
     let cluster_handle = if server_config.cluster.enabled {

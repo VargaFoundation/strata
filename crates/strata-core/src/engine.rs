@@ -16,7 +16,9 @@ use crate::memory::semantic::{SearchResult, SemanticEntry, SemanticStore};
 use crate::memory::state::StateStore;
 use crate::query::{QueryExecutor, QueryPlanner};
 use crate::rerank::Reranker;
-use crate::runtime::{Run, RunPatch, RunStatus, RunStore, ToolExecutor, WorkflowNode};
+use crate::runtime::{
+    Run, RunPatch, RunReplicator, RunStatus, RunStore, ToolExecutor, WorkflowNode,
+};
 use crate::Result;
 
 /// Top-level engine that owns all subsystems of the Strata context lake.
@@ -42,6 +44,9 @@ pub struct StrataEngine {
     runs: Arc<RunStore>,
     /// Optional executor for external tools (e.g. downstream MCP servers), injected by the gateway.
     tool_executor: parking_lot::RwLock<Option<Arc<dyn ToolExecutor>>>,
+    /// Optional replicator routing run-ledger writes through Raft (cluster mode), injected by the
+    /// server. Absent → the agent driver writes runs/steps locally.
+    run_replicator: parking_lot::RwLock<Option<Arc<dyn RunReplicator>>>,
 }
 
 impl std::fmt::Debug for StrataEngine {
@@ -262,6 +267,7 @@ impl StrataEngine {
             reranker,
             runs,
             tool_executor: parking_lot::RwLock::new(None),
+            run_replicator: parking_lot::RwLock::new(None),
         })
     }
 
@@ -274,6 +280,12 @@ impl StrataEngine {
     /// external tools via `TOOL call <server> <tool>: {args}`. Replaces any previous executor.
     pub fn set_tool_executor(&self, executor: Arc<dyn ToolExecutor>) {
         *self.tool_executor.write() = Some(executor);
+    }
+
+    /// Inject a run replicator (cluster mode) so the agent driver's run/step writes go through Raft
+    /// and survive leader failover. Absent → writes are local.
+    pub fn set_run_replicator(&self, replicator: Arc<dyn RunReplicator>) {
+        *self.run_replicator.write() = Some(replicator);
     }
 
     // ---- Agent-run ledger (agentic-platform substrate) ----
@@ -307,7 +319,12 @@ impl StrataEngine {
             started_at: None,
             ended_at: None,
         };
-        self.run_apply_create(&run).await?;
+        // Cluster mode: replicate through Raft (apply writes on every node). Else write locally.
+        let replicator = self.run_replicator.read().clone();
+        match replicator {
+            Some(r) => r.replicate_run_create(&run).await?,
+            None => self.run_apply_create(&run).await?,
+        }
         Ok(run)
     }
 
@@ -317,9 +334,17 @@ impl StrataEngine {
         self.runs.create(run).await
     }
 
-    /// Patch a run, stamping `updated_at = now` (single-node convenience).
+    /// Patch a run, stamping `updated_at = now`. Replicates through Raft in cluster mode.
     pub async fn run_update(&self, id: uuid::Uuid, patch: RunPatch) -> Result<bool> {
-        self.run_apply_update(id, &patch, chrono::Utc::now()).await
+        let now = chrono::Utc::now();
+        let replicator = self.run_replicator.read().clone();
+        match replicator {
+            Some(r) => {
+                r.replicate_run_update(id, &patch, now).await?;
+                Ok(true)
+            }
+            None => self.run_apply_update(id, &patch, now).await,
+        }
     }
 
     /// Apply a run patch with a leader-supplied `updated_at` (deterministic — used by Raft apply).
@@ -544,7 +569,12 @@ impl StrataEngine {
             tags: vec![],
             idempotency_key: None,
         };
-        self.ingest(vec![ev]).await.map(|_| ())
+        // Cluster mode: replicate the step through Raft so the trace survives failover.
+        let replicator = self.run_replicator.read().clone();
+        match replicator {
+            Some(r) => r.replicate_step(ev).await,
+            None => self.ingest(vec![ev]).await.map(|_| ()),
+        }
     }
 
     /// Run a minimal **durable agent loop** on the leader: drive an LLM↔tool loop until it answers,
@@ -3993,6 +4023,71 @@ mod tests {
         assert!(steps
             .iter()
             .any(|s| s["event_type"] == "tool_call" && s["payload"]["tool"] == "gh/create_issue"));
+    }
+
+    #[tokio::test]
+    async fn run_writes_route_through_replicator_when_set() {
+        use crate::runtime::{Run, RunPatch, RunReplicator};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Recorder {
+            creates: AtomicUsize,
+            updates: AtomicUsize,
+            steps: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl RunReplicator for Recorder {
+            async fn replicate_run_create(&self, _run: &Run) -> crate::Result<()> {
+                self.creates.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn replicate_run_update(
+                &self,
+                _id: uuid::Uuid,
+                _patch: &RunPatch,
+                _updated_at: chrono::DateTime<chrono::Utc>,
+            ) -> crate::Result<()> {
+                self.updates.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn replicate_step(
+                &self,
+                _event: crate::memory::episodic::Event,
+            ) -> crate::Result<()> {
+                self.steps.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let rec = std::sync::Arc::new(Recorder::default());
+        engine.set_run_replicator(rec.clone());
+
+        let run = engine
+            .run_create("default", Some("a".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        engine
+            .run_update(
+                run.id,
+                RunPatch {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .run_log_step(run.id, "default", "test", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert_eq!(rec.creates.load(Ordering::SeqCst), 1);
+        assert_eq!(rec.updates.load(Ordering::SeqCst), 1);
+        assert_eq!(rec.steps.load(Ordering::SeqCst), 1);
+        // The recorder doesn't apply, so the local store was bypassed (apply happens via Raft).
+        assert!(engine.run_get(run.id).await.unwrap().is_none());
     }
 
     #[test]
