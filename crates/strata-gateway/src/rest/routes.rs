@@ -206,6 +206,10 @@ pub fn router_with_engine_and_auth(
             "/tools/{server}/call",
             axum::routing::post(handlers::call_tool),
         )
+        .route(
+            "/triggers",
+            axum::routing::post(handlers::trigger_register).get(handlers::trigger_list),
+        )
         .with_state(engine.clone());
 
     // Keep a handle so MCP + LLM-proxy routes can be authenticated too.

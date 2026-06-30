@@ -162,6 +162,61 @@ async fn tool_gateway_register_and_list_via_rest() {
 }
 
 #[tokio::test]
+async fn webhook_fires_trigger_into_run() {
+    let app = engine_router().await;
+
+    // Register a catch-all event trigger.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/triggers")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"any","source":"*","event_type":"*","agent_id":"catch"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // A webhook ingests an event, which fires the trigger → starts a run.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/webhook/myapp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"event_type":"thing","data":{"x":1}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert!(
+        body["triggered_runs"].as_array().unwrap().len() >= 1,
+        "webhook should have fired the catch-all trigger: {body}"
+    );
+
+    // The fired run exists.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/runs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!json_body(resp).await["runs"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn ingest_then_query() {
     let app = engine_router().await;
 

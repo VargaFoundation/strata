@@ -204,6 +204,21 @@ pub struct RunAgentRequest {
     pub max_turns: Option<usize>,
 }
 
+/// Register an event trigger.
+#[derive(Debug, Deserialize)]
+pub struct RegisterTriggerRequest {
+    pub name: String,
+    #[serde(default = "wildcard")]
+    pub source: String,
+    #[serde(default = "wildcard")]
+    pub event_type: String,
+    pub agent_id: String,
+}
+
+fn wildcard() -> String {
+    "*".into()
+}
+
 /// Request human approval for a run (HITL).
 #[derive(Debug, Deserialize)]
 pub struct RequestApprovalRequest {

@@ -349,19 +349,36 @@ pub async fn webhook(
             let count = events.len();
             // Tag with the caller's tenant so webhook data is isolated like everything else.
             let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
-            let ingest_result = match tenant {
+            // Capture (source, event_type, payload) so we can evaluate event triggers after ingest.
+            let trigger_inputs: Vec<(String, String, serde_json::Value)> = events
+                .iter()
+                .map(|e| (e.source.clone(), e.event_type.clone(), e.payload.clone()))
+                .collect();
+            let ingest_result = match &tenant {
                 Some(t) => {
-                    let tc = strata_core::config::TenantContext::new(t);
+                    let tc = strata_core::config::TenantContext::new(t.clone());
                     engine.ingest_for_tenant(events, &tc).await
                 }
                 None => engine.ingest(events).await,
             };
             match ingest_result {
-                Ok(ingested) => api_ok(serde_json::json!({
-                    "source": source,
-                    "normalized": count,
-                    "ingested": ingested,
-                })),
+                Ok(ingested) => {
+                    // Event-driven agents: fire any matching triggers → start agent runs.
+                    let tenant_str = tenant.as_deref().unwrap_or("default");
+                    let mut triggered_runs = Vec::new();
+                    for (src, evt, payload) in trigger_inputs {
+                        if let Ok(ids) = engine.fire_triggers(tenant_str, &src, &evt, payload).await
+                        {
+                            triggered_runs.extend(ids.into_iter().map(|i| i.to_string()));
+                        }
+                    }
+                    api_ok(serde_json::json!({
+                        "source": source,
+                        "normalized": count,
+                        "ingested": ingested,
+                        "triggered_runs": triggered_runs,
+                    }))
+                }
                 Err(e) => api_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "INGEST_ERROR",
@@ -1942,6 +1959,38 @@ pub async fn run_approve(
         Ok(()) => api_ok(serde_json::json!({
             "status": if req.approve { "approved" } else { "rejected" }
         })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// Register an event trigger (source/event_type `*` = any) → starts a run of `agent_id`.
+pub async fn trigger_register(
+    State(engine): State<Arc<StrataEngine>>,
+    Json(req): Json<RegisterTriggerRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "trigger_register").increment(1);
+    match engine
+        .trigger_register(&req.name, &req.source, &req.event_type, &req.agent_id)
+        .await
+    {
+        Ok(()) => api_ok(serde_json::json!({ "status": "registered", "name": req.name })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// List the registered event triggers.
+pub async fn trigger_list(State(engine): State<Arc<StrataEngine>>) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "trigger_list").increment(1);
+    match engine.trigger_list().await {
+        Ok(triggers) => api_ok(serde_json::json!({ "triggers": triggers })),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "RUN_ERROR",
