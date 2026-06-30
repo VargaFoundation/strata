@@ -438,3 +438,110 @@ async fn three_node_cluster_replicates_graph_supersede() {
         let _ = raft.shutdown().await;
     }
 }
+
+/// Replicate the agent-run ledger across a real 3-node cluster: create a run then patch it to
+/// Succeeded through quorum, and assert every node converges to the identical run row. Proves the
+/// agentic-platform run ledger is HA (survives failover), not single-node.
+#[tokio::test]
+async fn three_node_cluster_replicates_runs() {
+    use strata_core::runtime::{RunPatch, RunStatus};
+
+    let router = Router::default();
+    let mut engines: BTreeMap<NodeId, Arc<StrataEngine>> = BTreeMap::new();
+    let mut rafts: BTreeMap<NodeId, RaftHandle> = BTreeMap::new();
+    for id in 1..=3u64 {
+        let engine = inmem_engine().await;
+        let (log, sm) = Adaptor::new(MemStore::new(Some(engine.clone())));
+        let raft = Raft::new(
+            id,
+            raft_config(),
+            Factory {
+                router: router.clone(),
+            },
+            log,
+            sm,
+        )
+        .await
+        .unwrap();
+        router.register(id, raft.clone());
+        engines.insert(id, engine);
+        rafts.insert(id, raft);
+    }
+    let members: BTreeMap<NodeId, NodeInfo> = (1..=3u64)
+        .map(|id| {
+            (
+                id,
+                NodeInfo {
+                    addr: format!("mem://{id}"),
+                },
+            )
+        })
+        .collect();
+    rafts[&1].initialize(members).await.unwrap();
+    let mut leader = None;
+    for _ in 0..100 {
+        if let Some(l) = rafts[&1].metrics().borrow().current_leader {
+            leader = Some(l);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let leader = leader.expect("a leader should be elected");
+
+    // A fully-materialized run (id + timestamps fixed once on the leader), replicated via quorum.
+    let now = chrono::Utc::now();
+    let run = strata_core::runtime::Run {
+        id: uuid::Uuid::new_v4(),
+        tenant_id: "default".into(),
+        agent_id: Some("agent-x".into()),
+        parent_run_id: None,
+        status: RunStatus::Pending,
+        input: serde_json::json!({"q": "hi"}),
+        result: serde_json::Value::Null,
+        error: None,
+        cursor: serde_json::Value::Null,
+        created_at: now,
+        updated_at: now,
+        started_at: None,
+        ended_at: None,
+    };
+    rafts[&leader]
+        .client_write(AppRequest::RunCreate { run: run.clone() })
+        .await
+        .unwrap();
+    rafts[&leader]
+        .client_write(AppRequest::RunUpdate {
+            id: run.id,
+            patch: RunPatch {
+                status: Some(RunStatus::Succeeded),
+                result: Some(serde_json::json!({"ok": true})),
+                ..Default::default()
+            },
+            updated_at: now + chrono::Duration::seconds(1),
+        })
+        .await
+        .unwrap();
+
+    // Every node converges to the identical succeeded run.
+    for id in 1..=3u64 {
+        let engine = &engines[&id];
+        let mut converged = false;
+        for _ in 0..100 {
+            if let Some(r) = engine.run_get(run.id).await.unwrap() {
+                if r.status == RunStatus::Succeeded
+                    && r.result == serde_json::json!({"ok": true})
+                    && r.agent_id.as_deref() == Some("agent-x")
+                {
+                    converged = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(converged, "node {id} did not converge to the succeeded run");
+    }
+
+    for raft in rafts.into_values() {
+        let _ = raft.shutdown().await;
+    }
+}

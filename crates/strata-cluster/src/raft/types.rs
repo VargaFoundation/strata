@@ -77,6 +77,15 @@ pub enum AppRequest {
     /// Expire memories by id (bi-temporal soft-delete). Used to replicate consolidation: the leader
     /// proposes a `MemoryUpsert` of the summary plus this to retire the folded originals.
     MemoryExpire { ids: Vec<uuid::Uuid> },
+    /// Create an agent run (the leader materializes id + timestamps; every node persists the
+    /// identical row — the agentic-platform run ledger, replicated for HA).
+    RunCreate { run: strata_core::runtime::Run },
+    /// Patch an agent run with a leader-supplied `updated_at` (deterministic apply).
+    RunUpdate {
+        id: uuid::Uuid,
+        patch: strata_core::runtime::RunPatch,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 /// Application-level response from applying a Raft log entry.

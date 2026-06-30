@@ -353,6 +353,18 @@ impl MemStore {
                 let _ = engine.memory_expire(ids).await;
                 AppResponse::MemoryCount(ids.len() as u64)
             }
+            AppRequest::RunCreate { run } => {
+                let _ = engine.run_apply_create(run).await;
+                AppResponse::Ok
+            }
+            AppRequest::RunUpdate {
+                id,
+                patch,
+                updated_at,
+            } => {
+                let _ = engine.run_apply_update(*id, patch, *updated_at).await;
+                AppResponse::Ok
+            }
         }
     }
 }
