@@ -84,7 +84,7 @@ hmac = { version = "0.12" }
 sha2 = { version = "0.10" }
 
 # Utilities
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 bytes = { version = "1" }
 futures = { version = "0.3" }

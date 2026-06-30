@@ -62,6 +62,18 @@ pub enum AppRequest {
         tenant: Option<String>,
         edge: strata_core::memory::cognition::Edge,
     },
+    /// Close all active edges matching `(tenant, src, relation)` as of `at`, marking them
+    /// superseded (the leader supplies `at`/`by` so every node applies the identical close — used
+    /// for functional-relation supersession, proposed just before the replacing `GraphAddEdge`).
+    GraphSupersede {
+        #[serde(default)]
+        tenant: Option<String>,
+        src: String,
+        relation: String,
+        at: chrono::DateTime<chrono::Utc>,
+        #[serde(default)]
+        by: Option<uuid::Uuid>,
+    },
     /// Expire memories by id (bi-temporal soft-delete). Used to replicate consolidation: the leader
     /// proposes a `MemoryUpsert` of the summary plus this to retire the folded originals.
     MemoryExpire { ids: Vec<uuid::Uuid> },

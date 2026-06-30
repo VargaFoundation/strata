@@ -337,6 +337,18 @@ impl MemStore {
                 let _ = engine.graph_apply_edge(tenant.as_deref(), edge).await;
                 AppResponse::Ok
             }
+            AppRequest::GraphSupersede {
+                tenant,
+                src,
+                relation,
+                at,
+                by,
+            } => {
+                let _ = engine
+                    .graph_supersede_apply(tenant.as_deref(), src, relation, *at, *by)
+                    .await;
+                AppResponse::Ok
+            }
             AppRequest::MemoryExpire { ids } => {
                 let _ = engine.memory_expire(ids).await;
                 AppResponse::MemoryCount(ids.len() as u64)
@@ -723,6 +735,65 @@ mod tests {
         assert_eq!(
             n[0].id, edge.id,
             "edge id replicated verbatim (deterministic)"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_graph_supersede_is_deterministic_across_engines() {
+        // The same seed edge + the same GraphSupersede applied to two engines must yield byte-
+        // identical state (no now()/uuid at apply time) — the replication-safety contract.
+        let seed = strata_core::memory::cognition::Edge {
+            id: uuid::Uuid::new_v4(),
+            src: "Alice".into(),
+            relation: "lives_in".into(),
+            dst: "Berlin".into(),
+            weight: 1.0,
+            valid_from: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        let at = chrono::Utc::now();
+        let by = uuid::Uuid::new_v4();
+
+        let mut states = Vec::new();
+        for _ in 0..2 {
+            let engine = inmem_engine().await;
+            let store = MemStore::new(Some(engine.clone()));
+            store
+                .apply_request(&AppRequest::GraphAddEdge {
+                    tenant: None,
+                    edge: seed.clone(),
+                })
+                .await;
+            let resp = store
+                .apply_request(&AppRequest::GraphSupersede {
+                    tenant: None,
+                    src: "Alice".into(),
+                    relation: "lives_in".into(),
+                    at,
+                    by: Some(by),
+                })
+                .await;
+            assert!(matches!(resp, AppResponse::Ok));
+            states.push(
+                engine
+                    .memory_neighbors("default", "Alice", 10)
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        for edges in &states {
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].id, seed.id);
+            assert_eq!(
+                edges[0].state,
+                strata_core::memory::cognition::EdgeState::Superseded
+            );
+            assert_eq!(edges[0].invalidated_by, Some(by));
+        }
+        assert_eq!(
+            states[0][0].valid_to, states[1][0].valid_to,
+            "valid_to identical across replicas"
         );
     }
 

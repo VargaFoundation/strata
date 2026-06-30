@@ -1482,17 +1482,33 @@ pub async fn memory_link(
     // Cluster mode: generate the edge (id) on the leader and replicate it through the Raft log so
     // followers apply the identical row (was previously snapshot-only).
     if let Some(Extension(coord)) = cluster {
+        let at = chrono::Utc::now();
+        let id = uuid::Uuid::new_v4();
+        let coord = coord.read().await;
+        // Functional relation: close the prior active (src, relation) edge first, replicated with
+        // the leader-supplied `at`/`by` so every node applies the identical close.
+        if req.supersede {
+            let sup = strata_cluster::raft::types::AppRequest::GraphSupersede {
+                tenant: Some(tenant.clone()),
+                src: req.src.clone(),
+                relation: req.relation.clone(),
+                at,
+                by: Some(id),
+            };
+            if let Err(e) = coord.client_write(sup).await {
+                return cluster_write_error(e);
+            }
+        }
         let edge = strata_core::memory::cognition::Edge {
-            id: uuid::Uuid::new_v4(),
+            id,
             src: req.src,
             relation: req.relation,
             dst: req.dst,
             weight: 1.0,
             source_memory_id: None,
-            valid_from: Some(chrono::Utc::now()),
+            valid_from: Some(at),
             ..Default::default()
         };
-        let coord = coord.read().await;
         let ar = strata_cluster::raft::types::AppRequest::GraphAddEdge {
             tenant: Some(tenant),
             edge,
@@ -1503,10 +1519,16 @@ pub async fn memory_link(
         };
     }
 
-    match engine
-        .memory_link(&tenant, &req.src, &req.relation, &req.dst, None)
-        .await
-    {
+    let result = if req.supersede {
+        engine
+            .memory_link_functional(&tenant, &req.src, &req.relation, &req.dst, None)
+            .await
+    } else {
+        engine
+            .memory_link(&tenant, &req.src, &req.relation, &req.dst, None)
+            .await
+    };
+    match result {
         Ok(()) => api_ok(serde_json::json!({ "status": "ok" })),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,

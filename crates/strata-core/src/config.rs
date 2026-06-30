@@ -136,6 +136,11 @@ pub struct CognitionConfig {
     /// lexical/vector retrieval miss can surface. Off by default.
     #[serde(default)]
     pub graph_expansion: bool,
+    /// Auto-populate knowledge-graph edges from each added memory via deterministic triple
+    /// extraction (entity→relation→entity). Replication-safe (pure extraction + uuidv5 edge ids
+    /// derived from the memory id, applied identically on every node). Off by default.
+    #[serde(default)]
+    pub auto_graph: bool,
 }
 
 impl Default for CognitionConfig {
@@ -152,6 +157,7 @@ impl Default for CognitionConfig {
             read_pool_size: default_read_pool_size(),
             max_memories_per_scope: 0,
             graph_expansion: false,
+            auto_graph: false,
         }
     }
 }

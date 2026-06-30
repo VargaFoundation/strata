@@ -133,6 +133,13 @@ fn apply_env(config: &mut CoreConfig) {
     set(&mut config.rerank.provider, "STRATA_RERANK__PROVIDER");
     set(&mut config.rerank.backend, "STRATA_RERANK__BACKEND");
     set(&mut config.rerank.model, "STRATA_RERANK__MODEL");
+    let flag = |key: &str| matches!(std::env::var(key).as_deref(), Ok("1") | Ok("true"));
+    if std::env::var("STRATA_COGNITION__GRAPH_EXPANSION").is_ok() {
+        config.memory.cognition.graph_expansion = flag("STRATA_COGNITION__GRAPH_EXPANSION");
+    }
+    if std::env::var("STRATA_COGNITION__AUTO_GRAPH").is_ok() {
+        config.memory.cognition.auto_graph = flag("STRATA_COGNITION__AUTO_GRAPH");
+    }
 }
 
 fn load_dataset() -> Vec<Conversation> {
@@ -387,9 +394,10 @@ async fn run() {
         pct_of(&mut query_ms, 0.50),
         pct_of(&mut query_ms, 0.95)
     );
+    let provider = engine.config().embedding.provider.as_str();
     println!(
         "mode:             {}",
-        if engine.semantic_count() > 0 {
+        if !provider.is_empty() && provider != "none" {
             "hybrid (BM25 + vector)"
         } else {
             "lexical (BM25 only — set STRATA_EMBEDDING__PROVIDER for hybrid)"

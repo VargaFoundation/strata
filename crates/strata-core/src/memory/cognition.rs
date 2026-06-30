@@ -1138,7 +1138,8 @@ impl MemoryStore {
             "INSERT INTO memory_edges \
              (id, tenant_id, src, relation, dst, weight, source_memory_id, created_at, \
               valid_from, valid_to, state, invalidated_by) \
-             VALUES (?,?,?,?,?,?,?, now(), ?::TIMESTAMPTZ, ?::TIMESTAMPTZ, ?, ?)",
+             VALUES (?,?,?,?,?,?,?, now(), ?::TIMESTAMPTZ, ?::TIMESTAMPTZ, ?, ?) \
+             ON CONFLICT (id) DO NOTHING",
             duckdb::params![
                 e.id.to_string(),
                 tenant,

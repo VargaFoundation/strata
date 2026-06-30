@@ -163,6 +163,10 @@ pub struct MemoryLinkRequest {
     pub src: String,
     pub relation: String,
     pub dst: String,
+    /// For a **functional** relation: close any active edge with the same `(src, relation)` before
+    /// adding this one (bi-temporal supersession), so the graph reflects only the latest value.
+    #[serde(default)]
+    pub supersede: bool,
 }
 
 /// Query a memory entity's neighborhood (1 hop by default, `depth` for multi-hop traversal).

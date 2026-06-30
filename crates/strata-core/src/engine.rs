@@ -886,6 +886,32 @@ impl StrataEngine {
                     let _ = self.memory_index.delete(row.memory.id).await;
                 }
             }
+
+            // Auto-populate graph edges from the memory's content: deterministic triple extraction
+            // + uuidv5 edge ids derived from the memory id, so every replica produces the identical
+            // graph during apply (no payload change needed); idempotent via add_edge ON CONFLICT.
+            if self.config.memory.cognition.auto_graph && row.memory.state == MemoryState::Active {
+                let mem = &row.memory;
+                let tenant = if mem.scope.tenant_id.is_empty() {
+                    "default"
+                } else {
+                    mem.scope.tenant_id.as_str()
+                };
+                for (s, r, o) in crate::memory::cognition::extract_triples(&mem.content) {
+                    let id = uuid::Uuid::new_v5(&mem.id, format!("{s}|{r}|{o}").as_bytes());
+                    let edge = crate::memory::cognition::Edge {
+                        id,
+                        src: s,
+                        relation: r,
+                        dst: o,
+                        weight: 1.0,
+                        source_memory_id: Some(mem.id),
+                        valid_from: Some(mem.valid_from),
+                        ..Default::default()
+                    };
+                    let _ = self.memory_store.add_edge(tenant, &edge).await;
+                }
+            }
         }
         Ok(n)
     }
@@ -1466,6 +1492,52 @@ impl StrataEngine {
         self.memory_store
             .neighbors_as_of(tenant, entity, at, limit.min(self.config.query.max_rows))
             .await
+    }
+
+    /// Deterministic apply primitive: close active edges matching `(tenant, src, relation)` as of
+    /// `at`, attributing them to `by`. Carries `at`/`by` (no `now()`/uuid here) so every replica
+    /// applies the identical close — used by Raft apply (`GraphSupersede`) and the single-node
+    /// functional-link path. Returns how many edges were closed.
+    pub async fn graph_supersede_apply(
+        &self,
+        tenant: Option<&str>,
+        src: &str,
+        relation: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        by: Option<uuid::Uuid>,
+    ) -> Result<usize> {
+        self.memory_store
+            .supersede_edges(tenant.unwrap_or("default"), src, relation, at, by)
+            .await
+    }
+
+    /// Link a **functional** relation: close any active `(src, relation)` edge, then add the new
+    /// one (so the graph holds only the latest value, with the old kept for as-of queries). The
+    /// single-node counterpart of the cluster's `GraphSupersede` + `GraphAddEdge` pair.
+    pub async fn memory_link_functional(
+        &self,
+        tenant: &str,
+        src: &str,
+        relation: &str,
+        dst: &str,
+        source: Option<uuid::Uuid>,
+    ) -> Result<()> {
+        let at = chrono::Utc::now();
+        let id = uuid::Uuid::new_v4();
+        self.memory_store
+            .supersede_edges(tenant, src, relation, at, Some(id))
+            .await?;
+        let edge = crate::memory::cognition::Edge {
+            id,
+            src: src.to_string(),
+            relation: relation.to_string(),
+            dst: dst.to_string(),
+            weight: 1.0,
+            source_memory_id: source,
+            valid_from: Some(at),
+            ..Default::default()
+        };
+        self.memory_store.add_edge(tenant, &edge).await
     }
 
     /// Apply a fully-materialized graph edge (deterministic — used by Raft apply so every node
@@ -2827,6 +2899,61 @@ mod tests {
         assert!(
             on_hits.iter().any(|h| h.memory.id == on_id),
             "graph expansion should surface the edge-linked memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_graph_extracts_edges_deterministically() {
+        use crate::memory::cognition::MemoryRow;
+
+        let mut cfg_a = inmem_config();
+        cfg_a.memory.cognition.auto_graph = true;
+        let a = StrataEngine::new(cfg_a).await.unwrap();
+        let scope = MemoryScope::user("alice");
+        let added = a
+            .memory_add(MemoryInput::new(scope.clone(), "Alice works at Acme"))
+            .await
+            .unwrap();
+
+        // auto_graph created at least one edge, all sourced from this memory.
+        let edges_a = a.memory_store.list_edges("default", 50).await.unwrap();
+        assert!(!edges_a.is_empty(), "auto_graph should extract edges");
+        assert!(edges_a
+            .iter()
+            .all(|e| e.source_memory_id == Some(added.memory.id)));
+
+        // Determinism (replication-safety): applying the same materialized memory row on a second
+        // engine yields byte-identical edge ids (uuidv5 derived from the memory id) — so followers
+        // build the identical graph during Raft apply without any payload change.
+        let mut cfg_b = inmem_config();
+        cfg_b.memory.cognition.auto_graph = true;
+        let b = StrataEngine::new(cfg_b).await.unwrap();
+        b.memory_apply_rows(vec![MemoryRow {
+            memory: added.memory.clone(),
+            embedding: None,
+        }])
+        .await
+        .unwrap();
+        let edges_b = b.memory_store.list_edges("default", 50).await.unwrap();
+
+        let mut ids_a: Vec<_> = edges_a.iter().map(|e| e.id).collect();
+        let mut ids_b: Vec<_> = edges_b.iter().map(|e| e.id).collect();
+        ids_a.sort();
+        ids_b.sort();
+        assert_eq!(ids_a, ids_b, "edge ids must be identical on every replica");
+
+        // Idempotent: re-applying the same row doesn't duplicate edges (ON CONFLICT DO NOTHING).
+        b.memory_apply_rows(vec![MemoryRow {
+            memory: added.memory.clone(),
+            embedding: None,
+        }])
+        .await
+        .unwrap();
+        let edges_b2 = b.memory_store.list_edges("default", 50).await.unwrap();
+        assert_eq!(
+            edges_b2.len(),
+            edges_b.len(),
+            "re-apply must not duplicate edges"
         );
     }
 
