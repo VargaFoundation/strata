@@ -195,6 +195,10 @@ pub fn router_with_engine_and_auth(
             axum::routing::post(handlers::run_approve),
         )
         .route(
+            "/runs/{id}/resume",
+            axum::routing::post(handlers::run_resume),
+        )
+        .route(
             "/agents/run",
             axum::routing::post(handlers::run_agent_endpoint),
         )

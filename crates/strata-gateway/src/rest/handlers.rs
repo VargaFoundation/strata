@@ -1999,6 +1999,37 @@ pub async fn trigger_list(State(engine): State<Arc<StrataEngine>>) -> Response {
     }
 }
 
+/// Resume a run paused for human approval (after it has been approved).
+pub async fn run_resume(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "run_resume").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let id = match uuid::Uuid::parse_str(&id) {
+        Ok(i) => i,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                "run id must be a UUID".to_string(),
+            )
+        }
+    };
+    match engine.run_resume(id, &tenant).await {
+        Ok(run) => api_ok(serde_json::json!({ "run": run })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RUN_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
 pub async fn memory_decay(State(engine): State<Arc<StrataEngine>>) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "memory_decay").increment(1);
     match engine.memory_enforce_decay().await {

@@ -565,14 +565,11 @@ impl StrataEngine {
         max_turns: usize,
         parent_run_id: Option<uuid::Uuid>,
     ) -> Result<Run> {
-        let completion = match &self.completion {
-            Some(c) => c.clone(),
-            None => {
-                return Err(crate::Error::Llm(
-                    "run_agent requires a completion provider".into(),
-                ))
-            }
-        };
+        if self.completion.is_none() {
+            return Err(crate::Error::Llm(
+                "run_agent requires a completion provider".into(),
+            ));
+        }
         let run = self
             .run_create(
                 tenant,
@@ -599,6 +596,91 @@ impl StrataEngine {
         )
         .await?;
 
+        self.drive_agent_loop(
+            run.id,
+            tenant,
+            agent_id,
+            format!("Question: {question}\n"),
+            max_turns,
+        )
+        .await
+    }
+
+    /// Resume a run paused at human approval: if the approval is `approved`, rebuild the transcript
+    /// from the run's journaled trace and continue the agent loop (durable resume after HITL).
+    pub async fn run_resume(&self, run_id: uuid::Uuid, tenant: &str) -> Result<Run> {
+        let approved = self
+            .run_approval_status(run_id)
+            .await?
+            .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(String::from))
+            .as_deref()
+            == Some("approved");
+        if !approved {
+            return Err(crate::Error::State("run is not approved for resume".into()));
+        }
+        let run = self
+            .run_get(run_id)
+            .await?
+            .ok_or_else(|| crate::Error::State("run not found".into()))?;
+        let agent_id = run.agent_id.clone().unwrap_or_default();
+        let transcript = self.rebuild_agent_transcript(run_id).await?;
+        let _ = self
+            .run_update(
+                run_id,
+                RunPatch {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await;
+        self.drive_agent_loop(run_id, tenant, &agent_id, transcript, 8)
+            .await
+    }
+
+    /// Rebuild an agent transcript from a run's journaled steps (for durable resume).
+    async fn rebuild_agent_transcript(&self, run_id: uuid::Uuid) -> Result<String> {
+        let mut t = String::new();
+        for step in self.run_trace(run_id).await? {
+            let et = step
+                .get("event_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let p = step.get("payload").cloned().unwrap_or_default();
+            match et {
+                "run_start" => t.push_str(&format!(
+                    "Question: {}\n",
+                    p.get("question").and_then(|v| v.as_str()).unwrap_or("")
+                )),
+                "tool_call" => {
+                    let q = p.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let r = p.get("results").map(|v| v.to_string()).unwrap_or_default();
+                    t.push_str(&format!("Assistant: TOOL search: {q}\nObservation: {r}\n"));
+                }
+                "hitl_request" => t.push_str(&format!(
+                    "Assistant: requested approval for: {}\nObservation: approved\n",
+                    p.get("prompt").and_then(|v| v.as_str()).unwrap_or("")
+                )),
+                _ => {}
+            }
+        }
+        Ok(t)
+    }
+
+    /// The agent loop over an **existing** run: LLM↔tool turns until a final answer, a pause for
+    /// approval (`TOOL approve: <reason>` → `WaitingApproval`, resumable via [`Self::run_resume`]),
+    /// or max turns. Journals every step. Shared by [`Self::run_agent`] and resume.
+    async fn drive_agent_loop(
+        &self,
+        run_id: uuid::Uuid,
+        tenant: &str,
+        agent_id: &str,
+        mut transcript: String,
+        max_turns: usize,
+    ) -> Result<Run> {
+        let completion = self
+            .completion
+            .clone()
+            .ok_or_else(|| crate::Error::Llm("run_agent requires a completion provider".into()))?;
         let scope = MemoryScope {
             tenant_id: if tenant.is_empty() {
                 "default".into()
@@ -609,12 +691,11 @@ impl StrataEngine {
             ..Default::default()
         };
         let system =
-            "You are an agent answering the user's question. To search your memory, reply \
-                      EXACTLY `TOOL search: <query>` and nothing else. Otherwise, reply with the \
-                      final answer.";
-        let mut transcript = format!("Question: {question}\n");
-        let mut final_answer = None;
+            "You are an agent answering the user's question. To search your memory, reply EXACTLY \
+             `TOOL search: <query>`. To request human approval before continuing, reply EXACTLY \
+             `TOOL approve: <reason>`. Otherwise reply with the final answer.";
 
+        let mut final_answer = None;
         for _turn in 0..max_turns.max(1) {
             let reply = completion.complete(system, &transcript).await?;
             let trimmed = reply.trim().to_string();
@@ -623,7 +704,7 @@ impl StrataEngine {
                 let hits = self.memory_search(q, &scope, 5).await.unwrap_or_default();
                 let results: Vec<String> = hits.iter().map(|h| h.memory.content.clone()).collect();
                 self.run_log_step(
-                    run.id,
+                    run_id,
                     tenant,
                     "tool_call",
                     serde_json::json!({ "tool": "search", "query": q, "results": results }),
@@ -633,9 +714,17 @@ impl StrataEngine {
                     "Assistant: TOOL search: {q}\nObservation: {}\n",
                     results.join(" | ")
                 ));
+            } else if let Some(prompt) = trimmed.strip_prefix("TOOL approve:") {
+                // Pause for human-in-the-loop approval; resume with run_resume after approval.
+                self.run_request_approval(run_id, tenant, prompt.trim())
+                    .await?;
+                return self
+                    .run_get(run_id)
+                    .await?
+                    .ok_or_else(|| crate::Error::State("run vanished".into()));
             } else {
                 self.run_log_step(
-                    run.id,
+                    run_id,
                     tenant,
                     "llm_answer",
                     serde_json::json!({ "answer": trimmed }),
@@ -661,8 +750,10 @@ impl StrataEngine {
                 ..Default::default()
             },
         };
-        self.run_update(run.id, patch).await?;
-        Ok(self.run_get(run.id).await?.unwrap_or(run))
+        self.run_update(run_id, patch).await?;
+        self.run_get(run_id)
+            .await?
+            .ok_or_else(|| crate::Error::State("run vanished".into()))
     }
 
     /// Run a **workflow DAG**: create a parent run, then execute each node (a sub-agent) once its
@@ -3750,6 +3841,50 @@ mod tests {
             .filter(|r| r.parent_run_id == Some(parent.id))
             .collect();
         assert_eq!(children.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_agent_pauses_for_approval_then_resumes() {
+        use crate::llm::CompletionProvider;
+        use crate::runtime::RunStatus;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Scripted {
+            calls: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl CompletionProvider for Scripted {
+            async fn complete(&self, _s: &str, _u: &str) -> crate::Result<String> {
+                Ok(match self.calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => "TOOL approve: deploy to prod?".to_string(),
+                    _ => "deployed".to_string(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "scripted"
+            }
+        }
+
+        let mut engine = StrataEngine::new(inmem_config()).await.unwrap();
+        engine.completion = Some(std::sync::Arc::new(Scripted {
+            calls: AtomicUsize::new(0),
+        }));
+
+        // The agent asks for approval → run pauses.
+        let run = engine
+            .run_agent("default", "a", "ship it", 5)
+            .await
+            .unwrap();
+        assert_eq!(run.status, RunStatus::WaitingApproval);
+
+        // Approve, then resume → the agent continues and finishes.
+        engine
+            .run_resolve_approval(run.id, "default", true)
+            .await
+            .unwrap();
+        let resumed = engine.run_resume(run.id, "default").await.unwrap();
+        assert_eq!(resumed.status, RunStatus::Succeeded);
+        assert_eq!(resumed.result["answer"], "deployed");
     }
 
     #[test]
