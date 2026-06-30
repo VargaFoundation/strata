@@ -190,6 +190,14 @@ pub fn router_with_engine_and_auth(
             "/agents/run",
             axum::routing::post(handlers::run_agent_endpoint),
         )
+        .route(
+            "/tools",
+            axum::routing::post(handlers::register_tool).get(handlers::list_tools),
+        )
+        .route(
+            "/tools/{server}/call",
+            axum::routing::post(handlers::call_tool),
+        )
         .with_state(engine.clone());
 
     // Keep a handle so MCP + LLM-proxy routes can be authenticated too.
@@ -199,6 +207,10 @@ pub fn router_with_engine_and_auth(
     api_routes = api_routes.layer(axum::Extension(handlers::WebhookSecret(
         config.webhook_secret.clone(),
     )));
+
+    // MCP tool-gateway: a governed registry of downstream MCP servers agents can call.
+    let tool_gateway = std::sync::Arc::new(crate::rest::tool_gateway::ToolGateway::new());
+    api_routes = api_routes.layer(axum::Extension(tool_gateway));
 
     // Coordinator handle for write replication (also handed to the MCP protocol routes below).
     let coordinator = cluster_state.as_ref().map(|cs| cs.coordinator.clone());

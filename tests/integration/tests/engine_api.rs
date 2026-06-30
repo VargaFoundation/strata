@@ -122,6 +122,46 @@ async fn run_lifecycle_via_rest() {
 }
 
 #[tokio::test]
+async fn tool_gateway_register_and_list_via_rest() {
+    let app = engine_router().await;
+
+    // Register a downstream MCP server.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/tools")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"github","url":"http://localhost:9001"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_body(resp).await["status"], "registered");
+
+    // List it back.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/tools")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let servers = json_body(resp).await;
+    let servers = servers["servers"].as_array().unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0]["name"], "github");
+}
+
+#[tokio::test]
 async fn ingest_then_query() {
     let app = engine_router().await;
 

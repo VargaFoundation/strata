@@ -1832,6 +1832,56 @@ pub async fn run_agent_endpoint(
     }
 }
 
+/// Register a downstream MCP tool server (governed by the existing auth layer).
+pub async fn register_tool(
+    gateway: Option<Extension<std::sync::Arc<crate::rest::tool_gateway::ToolGateway>>>,
+    Json(req): Json<RegisterToolServer>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "register_tool").increment(1);
+    match gateway {
+        Some(Extension(gw)) => {
+            gw.register(req.name.clone(), req.url);
+            api_ok(serde_json::json!({ "status": "registered", "name": req.name }))
+        }
+        None => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NO_TOOL_GATEWAY",
+            "tool gateway not enabled".to_string(),
+        ),
+    }
+}
+
+/// List the registered downstream MCP tool servers.
+pub async fn list_tools(
+    gateway: Option<Extension<std::sync::Arc<crate::rest::tool_gateway::ToolGateway>>>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "list_tools").increment(1);
+    match gateway {
+        Some(Extension(gw)) => api_ok(serde_json::json!({ "servers": gw.list() })),
+        None => api_ok(serde_json::json!({ "servers": [] })),
+    }
+}
+
+/// Invoke a tool on a registered downstream MCP server (the leader-side tool side effect).
+pub async fn call_tool(
+    gateway: Option<Extension<std::sync::Arc<crate::rest::tool_gateway::ToolGateway>>>,
+    axum::extract::Path(server): axum::extract::Path<String>,
+    Json(req): Json<CallToolRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "call_tool").increment(1);
+    let Some(Extension(gw)) = gateway else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NO_TOOL_GATEWAY",
+            "tool gateway not enabled".to_string(),
+        );
+    };
+    match gw.call(&server, &req.tool, req.arguments).await {
+        Ok(result) => api_ok(serde_json::json!({ "result": result })),
+        Err(e) => api_error(StatusCode::BAD_GATEWAY, "TOOL_CALL_FAILED", e),
+    }
+}
+
 pub async fn memory_decay(State(engine): State<Arc<StrataEngine>>) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "memory_decay").increment(1);
     match engine.memory_enforce_decay().await {
