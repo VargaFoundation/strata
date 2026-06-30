@@ -237,6 +237,28 @@ mod tests {
     }
 
     #[test]
+    fn ingest_step_event_with_trace_roundtrips() {
+        // Agent driver step events have parent_id=None but trace_id=Some(run_id) — the exact
+        // positional-misalignment case (a string trace_id read where a 16-byte parent_id Uuid is
+        // expected). Must round-trip through the transport's MessagePack codec.
+        let mut ev = Event::new("agent", "llm_answer", serde_json::json!({ "answer": "hi" }));
+        ev.trace_id = Some("run-123".to_string());
+        let req = AppRequest::Ingest {
+            events: vec![ev],
+            tenant: None,
+        };
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        match rmp_serde::from_slice::<AppRequest>(&bytes).unwrap() {
+            AppRequest::Ingest { events, .. } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].trace_id.as_deref(), Some("run-123"));
+                assert!(events[0].parent_id.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn app_response_roundtrip() {
         let resp = AppResponse::Ingested(42);
         let json = serde_json::to_string(&resp).unwrap();

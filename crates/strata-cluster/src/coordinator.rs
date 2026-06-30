@@ -373,6 +373,74 @@ fn normalize_addr(addr: &str) -> String {
     }
 }
 
+/// Wraps the coordinator as a [`strata_core::runtime::RunReplicator`] so the core agent-run driver
+/// replicates its run/step writes through the Raft log (durable across failover) instead of writing
+/// only on the leader. The committed apply performs the local store write on every node.
+pub struct CoordinatorRunReplicator {
+    coord: Arc<tokio::sync::RwLock<ClusterCoordinator>>,
+}
+
+impl CoordinatorRunReplicator {
+    pub fn new(coord: Arc<tokio::sync::RwLock<ClusterCoordinator>>) -> Self {
+        Self { coord }
+    }
+}
+
+fn replicate_err(e: crate::Error) -> strata_core::Error {
+    strata_core::Error::Ingest(format!("cluster replicate: {e}"))
+}
+
+#[async_trait::async_trait]
+impl strata_core::runtime::RunReplicator for CoordinatorRunReplicator {
+    async fn replicate_run_create(
+        &self,
+        run: &strata_core::runtime::Run,
+    ) -> strata_core::Result<()> {
+        self.coord
+            .read()
+            .await
+            .client_write(crate::raft::types::AppRequest::RunCreate { run: run.clone() })
+            .await
+            .map(|_| ())
+            .map_err(replicate_err)
+    }
+
+    async fn replicate_run_update(
+        &self,
+        id: uuid::Uuid,
+        patch: &strata_core::runtime::RunPatch,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> strata_core::Result<()> {
+        self.coord
+            .read()
+            .await
+            .client_write(crate::raft::types::AppRequest::RunUpdate {
+                id,
+                patch: patch.clone(),
+                updated_at,
+            })
+            .await
+            .map(|_| ())
+            .map_err(replicate_err)
+    }
+
+    async fn replicate_step(
+        &self,
+        event: strata_core::memory::episodic::Event,
+    ) -> strata_core::Result<()> {
+        self.coord
+            .read()
+            .await
+            .client_write(crate::raft::types::AppRequest::Ingest {
+                events: vec![event],
+                tenant: None,
+            })
+            .await
+            .map(|_| ())
+            .map_err(replicate_err)
+    }
+}
+
 /// Bootstrap a multi-node cluster: `initialize` once, idempotently, retrying until a quorum of
 /// peers is reachable. Safe to run on every start — a restart finds the cluster already
 /// initialized (membership restored from the persisted log) and skips.
