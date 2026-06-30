@@ -706,6 +706,7 @@ mod tests {
             dst: "coffee".into(),
             weight: 1.0,
             source_memory_id: None,
+            ..Default::default()
         };
         let resp = store
             .apply_request(&AppRequest::GraphAddEdge {

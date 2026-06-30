@@ -187,8 +187,37 @@ impl Memory {
     }
 }
 
-/// A directed, weighted edge in the memory graph (entity → relation → entity).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Lifecycle state of a graph edge: `active` until a contradicting edge supersedes it (then the
+/// old edge is kept, closed, for "what did the graph look like at time T" queries).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EdgeState {
+    #[default]
+    Active,
+    Superseded,
+}
+
+impl EdgeState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EdgeState::Active => "active",
+            EdgeState::Superseded => "superseded",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "superseded" => EdgeState::Superseded,
+            _ => EdgeState::Active,
+        }
+    }
+}
+
+/// A directed, weighted, **bi-temporal** edge in the memory graph (entity → relation → entity).
+/// `valid_from`/`valid_to` record when the relationship held in the world (à la Zep/Graphiti), so
+/// the graph can be queried as of any instant; `state` flips to `superseded` when a newer
+/// contradicting edge closes this one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Edge {
     pub id: Uuid,
     pub src: String,
@@ -197,6 +226,52 @@ pub struct Edge {
     pub weight: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<Uuid>,
+    /// When the relationship became true (None = unknown / since-ever).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<DateTime<Utc>>,
+    /// When it stopped being true (None = still valid). Set when a newer edge supersedes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_to: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub state: EdgeState,
+    /// Id of the edge that superseded this one (set together with `valid_to`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalidated_by: Option<Uuid>,
+}
+
+/// Parse a timestamp string from DuckDB. DuckDB renders `TIMESTAMPTZ::VARCHAR` as
+/// "YYYY-MM-DD HH:MM:SS.ffffff+00" (space separator, short offset) — not RFC3339 — so try both.
+fn parse_ts(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s)
+        .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z"))
+        .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%#z"))
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+/// Build an [`Edge`] from a row selecting exactly:
+/// `id, src, relation, dst, weight, source_memory_id, valid_from::VARCHAR, valid_to::VARCHAR, state, invalidated_by`.
+fn edge_from_row(r: &duckdb::Row) -> duckdb::Result<Edge> {
+    Ok(Edge {
+        id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+        src: r.get(1)?,
+        relation: r.get(2)?,
+        dst: r.get(3)?,
+        weight: r.get::<_, f64>(4)? as f32,
+        source_memory_id: r
+            .get::<_, Option<String>>(5)?
+            .and_then(|s| Uuid::parse_str(&s).ok()),
+        valid_from: r.get::<_, Option<String>>(6)?.map(|s| parse_ts(&s)),
+        valid_to: r.get::<_, Option<String>>(7)?.map(|s| parse_ts(&s)),
+        state: r
+            .get::<_, Option<String>>(8)?
+            .as_deref()
+            .map(EdgeState::from_str)
+            .unwrap_or_default(),
+        invalidated_by: r
+            .get::<_, Option<String>>(9)?
+            .and_then(|s| Uuid::parse_str(&s).ok()),
+    })
 }
 
 /// Extract simple `(subject, relation, object)` triples from text via a few verb patterns.
@@ -534,6 +609,16 @@ impl MemoryStore {
                           CREATE INDEX IF NOT EXISTS idx_edges_src ON memory_edges(tenant_id, src);
                           CREATE INDEX IF NOT EXISTS idx_edges_dst ON memory_edges(tenant_id, dst);",
                 },
+                super::migrations::Migration {
+                    version: 3,
+                    // Bi-temporal graph edges: validity window + supersession state.
+                    sql: "ALTER TABLE memory_edges ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ;
+                          ALTER TABLE memory_edges ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ;
+                          ALTER TABLE memory_edges ADD COLUMN IF NOT EXISTS state VARCHAR DEFAULT 'active';
+                          ALTER TABLE memory_edges ADD COLUMN IF NOT EXISTS invalidated_by VARCHAR;
+                          UPDATE memory_edges SET valid_from = created_at WHERE valid_from IS NULL;
+                          CREATE INDEX IF NOT EXISTS idx_edges_state ON memory_edges(tenant_id, state, src);",
+                },
             ],
         );
 
@@ -563,16 +648,6 @@ impl MemoryStore {
         let created_at: String = row.get(14)?;
         let updated_at: String = row.get(15)?;
         let metadata_str: Option<String> = row.get(16).ok().flatten();
-
-        let parse_ts = |s: &str| {
-            // DuckDB renders TIMESTAMPTZ::VARCHAR as "YYYY-MM-DD HH:MM:SS.ffffff+00" (space
-            // separator, short offset) — not RFC3339 — so try both forms before giving up.
-            DateTime::parse_from_rfc3339(s)
-                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z"))
-                .or_else(|_| DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%#z"))
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now())
-        };
 
         Ok(Memory {
             id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::nil()),
@@ -1057,10 +1132,13 @@ impl MemoryStore {
     /// Add a graph edge (entity → relation → entity) for a tenant.
     pub async fn add_edge(&self, tenant: &str, e: &Edge) -> crate::Result<()> {
         let db = self.write_db.lock();
+        // valid_from/valid_to/state come from the (leader-materialized) edge — never `now()` here —
+        // so every node applying a replicated edge writes byte-identical temporal values.
         db.execute(
             "INSERT INTO memory_edges \
-             (id, tenant_id, src, relation, dst, weight, source_memory_id, created_at) \
-             VALUES (?,?,?,?,?,?,?, now())",
+             (id, tenant_id, src, relation, dst, weight, source_memory_id, created_at, \
+              valid_from, valid_to, state, invalidated_by) \
+             VALUES (?,?,?,?,?,?,?, now(), ?::TIMESTAMPTZ, ?::TIMESTAMPTZ, ?, ?)",
             duckdb::params![
                 e.id.to_string(),
                 tenant,
@@ -1069,6 +1147,10 @@ impl MemoryStore {
                 e.dst,
                 e.weight as f64,
                 e.source_memory_id.map(|i| i.to_string()),
+                e.valid_from.map(|t| t.to_rfc3339()),
+                e.valid_to.map(|t| t.to_rfc3339()),
+                e.state.as_str(),
+                e.invalidated_by.map(|i| i.to_string()),
             ],
         )
         .map_err(|e| crate::Error::Ingest(format!("add edge: {e}")))?;
@@ -1085,25 +1167,76 @@ impl MemoryStore {
         let db = self.read_conn();
         let mut stmt = db
             .prepare(
-                "SELECT id, src, relation, dst, weight, source_memory_id FROM memory_edges \
+                "SELECT id, src, relation, dst, weight, source_memory_id, valid_from::VARCHAR, \
+                 valid_to::VARCHAR, state, invalidated_by FROM memory_edges \
                  WHERE tenant_id = ? AND (src = ? OR dst = ?) ORDER BY weight DESC LIMIT ?",
             )
             .map_err(|e| crate::Error::Query(e.to_string()))?;
         let rows = stmt
             .query_map(duckdb::params![tenant, entity, entity, limit as i64], |r| {
-                Ok(Edge {
-                    id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
-                    src: r.get(1)?,
-                    relation: r.get(2)?,
-                    dst: r.get(3)?,
-                    weight: r.get::<_, f64>(4)? as f32,
-                    source_memory_id: r
-                        .get::<_, Option<String>>(5)?
-                        .and_then(|s| Uuid::parse_str(&s).ok()),
-                })
+                edge_from_row(r)
             })
             .map_err(|e| crate::Error::Query(e.to_string()))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Edges incident to `entity` that were **valid at instant `at`** (bi-temporal as-of query):
+    /// `valid_from <= at < valid_to` (NULL `valid_from` = since-ever, NULL `valid_to` = still valid).
+    pub async fn neighbors_as_of(
+        &self,
+        tenant: &str,
+        entity: &str,
+        at: DateTime<Utc>,
+        limit: usize,
+    ) -> crate::Result<Vec<Edge>> {
+        let db = self.read_conn();
+        let mut stmt = db
+            .prepare(
+                "SELECT id, src, relation, dst, weight, source_memory_id, valid_from::VARCHAR, \
+                 valid_to::VARCHAR, state, invalidated_by FROM memory_edges \
+                 WHERE tenant_id = ? AND (src = ? OR dst = ?) \
+                 AND (valid_from IS NULL OR valid_from <= ?::TIMESTAMPTZ) \
+                 AND (valid_to IS NULL OR valid_to > ?::TIMESTAMPTZ) \
+                 ORDER BY weight DESC LIMIT ?",
+            )
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let at_s = at.to_rfc3339();
+        let rows = stmt
+            .query_map(
+                duckdb::params![tenant, entity, entity, at_s, at_s, limit as i64],
+                edge_from_row,
+            )
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Close every currently-active edge matching `(tenant, src, relation)` as of `at`, marking it
+    /// superseded and pointing it at `by` (the new edge). Returns how many were closed. Deterministic
+    /// (the caller supplies `at`/`by`), so it is safe to run identically on every replica.
+    pub async fn supersede_edges(
+        &self,
+        tenant: &str,
+        src: &str,
+        relation: &str,
+        at: DateTime<Utc>,
+        by: Option<Uuid>,
+    ) -> crate::Result<usize> {
+        let db = self.write_db.lock();
+        let n = db
+            .execute(
+                "UPDATE memory_edges SET valid_to = ?::TIMESTAMPTZ, state = 'superseded', \
+                 invalidated_by = ? WHERE tenant_id = ? AND src = ? AND relation = ? \
+                 AND state = 'active'",
+                duckdb::params![
+                    at.to_rfc3339(),
+                    by.map(|i| i.to_string()),
+                    tenant,
+                    src,
+                    relation,
+                ],
+            )
+            .map_err(|e| crate::Error::Ingest(format!("supersede edges: {e}")))?;
+        Ok(n)
     }
 
     /// All edges for a tenant (bounded, highest-weight first) — used for query-time graph
@@ -1112,23 +1245,13 @@ impl MemoryStore {
         let db = self.read_conn();
         let mut stmt = db
             .prepare(
-                "SELECT id, src, relation, dst, weight, source_memory_id FROM memory_edges \
-                 WHERE tenant_id = ? ORDER BY weight DESC LIMIT ?",
+                "SELECT id, src, relation, dst, weight, source_memory_id, valid_from::VARCHAR, \
+                 valid_to::VARCHAR, state, invalidated_by FROM memory_edges \
+                 WHERE tenant_id = ? AND state = 'active' ORDER BY weight DESC LIMIT ?",
             )
             .map_err(|e| crate::Error::Query(e.to_string()))?;
         let rows = stmt
-            .query_map(duckdb::params![tenant, limit as i64], |r| {
-                Ok(Edge {
-                    id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
-                    src: r.get(1)?,
-                    relation: r.get(2)?,
-                    dst: r.get(3)?,
-                    weight: r.get::<_, f64>(4)? as f32,
-                    source_memory_id: r
-                        .get::<_, Option<String>>(5)?
-                        .and_then(|s| Uuid::parse_str(&s).ok()),
-                })
-            })
+            .query_map(duckdb::params![tenant, limit as i64], edge_from_row)
             .map_err(|e| crate::Error::Query(e.to_string()))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -1245,6 +1368,7 @@ mod tests {
                     dst: "coffee".into(),
                     weight: 1.0,
                     source_memory_id: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -1267,6 +1391,76 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bitemporal_edges_supersede_and_as_of() {
+        let store = MemoryStore::new();
+        let t0 = Utc::now() - chrono::Duration::hours(2);
+        let t1 = Utc::now();
+
+        // Alice lived in Berlin since t0.
+        store
+            .add_edge(
+                "default",
+                &Edge {
+                    id: Uuid::new_v4(),
+                    src: "Alice".into(),
+                    relation: "lives_in".into(),
+                    dst: "Berlin".into(),
+                    weight: 1.0,
+                    valid_from: Some(t0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // She moved at t1: close the old edge, then add the new (functional relation supersession).
+        let new_id = Uuid::new_v4();
+        let closed = store
+            .supersede_edges("default", "Alice", "lives_in", t1, Some(new_id))
+            .await
+            .unwrap();
+        assert_eq!(closed, 1);
+        store
+            .add_edge(
+                "default",
+                &Edge {
+                    id: new_id,
+                    src: "Alice".into(),
+                    relation: "lives_in".into(),
+                    dst: "Amsterdam".into(),
+                    weight: 1.0,
+                    valid_from: Some(t1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // As of a moment between t0 and t1 → Berlin held, Amsterdam did not.
+        let mid = store
+            .neighbors_as_of("default", "Alice", t0 + chrono::Duration::hours(1), 10)
+            .await
+            .unwrap();
+        assert!(mid.iter().any(|e| e.dst == "Berlin"));
+        assert!(!mid.iter().any(|e| e.dst == "Amsterdam"));
+
+        // As of now → Amsterdam holds, Berlin is closed.
+        let now = store
+            .neighbors_as_of("default", "Alice", Utc::now(), 10)
+            .await
+            .unwrap();
+        assert!(now.iter().any(|e| e.dst == "Amsterdam"));
+        assert!(!now.iter().any(|e| e.dst == "Berlin"));
+
+        // list_edges (used by graph expansion) returns only the active edge.
+        let active = store.list_edges("default", 10).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].dst, "Amsterdam");
+        assert_eq!(active[0].state, EdgeState::Active);
+        assert_eq!(active[0].invalidated_by, None);
     }
 
     #[tokio::test]
