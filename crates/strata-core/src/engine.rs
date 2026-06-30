@@ -207,6 +207,16 @@ impl StrataEngine {
                     }
                 }
             }
+            "cross_encoder" => {
+                // The production reranker (a local ONNX bge-reranker — no LLM latency). It requires
+                // a local ONNX runtime + model weights, so it is documented but not bundled in the
+                // default build (see `crate::rerank::cross_encoder`). Degrade gracefully for now.
+                tracing::warn!(
+                    "reranker: 'cross_encoder' is the documented production path but is not built \
+                     into this binary — falling back to no rerank (use provider='llm' meanwhile)"
+                );
+                None
+            }
             "none" | "" => None,
             other => {
                 tracing::warn!(provider = %other, "unknown reranker provider — disabled");
