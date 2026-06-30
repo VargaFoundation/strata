@@ -16,6 +16,7 @@ use crate::memory::semantic::{SearchResult, SemanticEntry, SemanticStore};
 use crate::memory::state::StateStore;
 use crate::query::{QueryExecutor, QueryPlanner};
 use crate::rerank::Reranker;
+use crate::runtime::{Run, RunPatch, RunStatus, RunStore};
 use crate::Result;
 
 /// Top-level engine that owns all subsystems of the Strata context lake.
@@ -37,6 +38,8 @@ pub struct StrataEngine {
     completion: Option<Arc<dyn CompletionProvider>>,
     /// Optional second-stage reranker applied to `memory_search` results (read-path only).
     reranker: Option<Arc<dyn Reranker>>,
+    /// Durable agent-run ledger (agentic-platform substrate).
+    runs: Arc<RunStore>,
 }
 
 impl std::fmt::Debug for StrataEngine {
@@ -211,6 +214,14 @@ impl StrataEngine {
             }
         };
 
+        // Initialize the durable agent-run ledger.
+        let runs = Arc::new(
+            RunStore::open(Path::new(&config.runtime.db_path)).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "falling back to in-memory run store");
+                RunStore::new()
+            }),
+        );
+
         // Initialize ingest pipeline (keep a reference to embedding for embed-and-search)
         let embedding_ref = embedding.clone();
         let ingest = match embedding {
@@ -237,12 +248,91 @@ impl StrataEngine {
             ingest,
             completion,
             reranker,
+            runs,
         })
     }
 
     /// Get a reference to the configuration.
     pub fn config(&self) -> &CoreConfig {
         &self.config
+    }
+
+    // ---- Agent-run ledger (agentic-platform substrate) ----
+
+    /// Create a run (leader-materialized id + timestamps), persisted as `Pending`. Steps are
+    /// episodic events tagged `session_id = run_id`; the full trace is [`Self::run_trace`].
+    pub async fn run_create(
+        &self,
+        tenant: &str,
+        agent_id: Option<String>,
+        parent_run_id: Option<uuid::Uuid>,
+        input: serde_json::Value,
+    ) -> Result<Run> {
+        let now = chrono::Utc::now();
+        let run = Run {
+            id: uuid::Uuid::new_v4(),
+            tenant_id: if tenant.is_empty() {
+                "default".into()
+            } else {
+                tenant.to_string()
+            },
+            agent_id,
+            parent_run_id,
+            status: RunStatus::Pending,
+            input,
+            result: serde_json::Value::Null,
+            error: None,
+            cursor: serde_json::Value::Null,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            ended_at: None,
+        };
+        self.runs.create(&run).await?;
+        Ok(run)
+    }
+
+    /// Apply a fully-materialized run (deterministic — used by Raft apply).
+    pub async fn run_apply_create(&self, run: &Run) -> Result<()> {
+        self.runs.create(run).await
+    }
+
+    /// Patch a run, stamping `updated_at = now` (single-node convenience).
+    pub async fn run_update(&self, id: uuid::Uuid, patch: RunPatch) -> Result<bool> {
+        self.runs.update(id, &patch, chrono::Utc::now()).await
+    }
+
+    /// Apply a run patch with a leader-supplied `updated_at` (deterministic — used by Raft apply).
+    pub async fn run_apply_update(
+        &self,
+        id: uuid::Uuid,
+        patch: &RunPatch,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.runs.update(id, patch, updated_at).await
+    }
+
+    /// Get a run by id.
+    pub async fn run_get(&self, id: uuid::Uuid) -> Result<Option<Run>> {
+        self.runs.get(id).await
+    }
+
+    /// List a tenant's runs (newest first), optionally filtered by status.
+    pub async fn run_list(
+        &self,
+        tenant: &str,
+        status: Option<RunStatus>,
+        limit: usize,
+    ) -> Result<Vec<Run>> {
+        let tenant = if tenant.is_empty() { "default" } else { tenant };
+        self.runs
+            .list(tenant, status, limit.min(self.config.query.max_rows))
+            .await
+    }
+
+    /// Full step trace of a run = the episodic events tagged with `session_id = run_id`.
+    pub async fn run_trace(&self, id: uuid::Uuid) -> Result<Vec<serde_json::Value>> {
+        self.session_recall(&id.to_string()).await
     }
 
     // ── Episodic Memory ──────────────────────────────────────────────
@@ -2270,6 +2360,7 @@ mod tests {
         c.memory.episodic.db_path = ":memory:".into();
         c.memory.state.db_path = ":memory:".into();
         c.memory.cognition.db_path = ":memory:".into();
+        c.runtime.db_path = ":memory:".into();
         c
     }
 
@@ -2955,6 +3046,104 @@ mod tests {
             edges_b.len(),
             "re-apply must not duplicate edges"
         );
+    }
+
+    #[tokio::test]
+    async fn run_ledger_lifecycle() {
+        use crate::runtime::{RunPatch, RunStatus};
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let run = engine
+            .run_create(
+                "default",
+                Some("agent-1".into()),
+                None,
+                serde_json::json!({"q": "hi"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run.status, RunStatus::Pending);
+
+        engine
+            .run_update(
+                run.id,
+                RunPatch {
+                    status: Some(RunStatus::Running),
+                    started_at: Some(chrono::Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        engine
+            .run_update(
+                run.id,
+                RunPatch {
+                    status: Some(RunStatus::Succeeded),
+                    result: Some(serde_json::json!({"a": 42})),
+                    ended_at: Some(chrono::Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let got = engine.run_get(run.id).await.unwrap().unwrap();
+        assert_eq!(got.status, RunStatus::Succeeded);
+        assert_eq!(got.result, serde_json::json!({"a": 42}));
+        assert!(got.started_at.is_some() && got.ended_at.is_some());
+        assert_eq!(got.input, serde_json::json!({"q": "hi"}));
+
+        assert_eq!(engine.run_list("default", None, 10).await.unwrap().len(), 1);
+        assert!(engine
+            .run_list("default", Some(RunStatus::Running), 10)
+            .await
+            .unwrap()
+            .is_empty());
+        // A fresh run has an empty step trace (no episodic events tagged with its id yet).
+        assert!(engine.run_trace(run.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_apply_is_deterministic_across_engines() {
+        // The same materialized run + patch applied on two engines yields identical rows — the
+        // replication-safety contract (no now()/uuid at apply time), ready for a GraphSupersede-style
+        // RunCreate/RunUpdate AppRequest.
+        use crate::runtime::{Run, RunPatch, RunStatus};
+        let now = chrono::Utc::now();
+        let id = uuid::Uuid::new_v4();
+        let seed = Run {
+            id,
+            tenant_id: "default".into(),
+            agent_id: None,
+            parent_run_id: None,
+            status: RunStatus::Pending,
+            input: serde_json::json!({"x": 1}),
+            result: serde_json::Value::Null,
+            error: None,
+            cursor: serde_json::Value::Null,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            ended_at: None,
+        };
+        let patch = RunPatch {
+            status: Some(RunStatus::Succeeded),
+            result: Some(serde_json::json!({"ok": true})),
+            ended_at: Some(now),
+            ..Default::default()
+        };
+
+        let mut rows = Vec::new();
+        for _ in 0..2 {
+            let engine = StrataEngine::new(inmem_config()).await.unwrap();
+            engine.run_apply_create(&seed).await.unwrap();
+            engine.run_apply_update(id, &patch, now).await.unwrap();
+            rows.push(engine.run_get(id).await.unwrap().unwrap());
+        }
+        assert_eq!(rows[0].status, RunStatus::Succeeded);
+        assert_eq!(rows[0].result, rows[1].result);
+        assert_eq!(rows[0].updated_at, rows[1].updated_at);
+        assert_eq!(rows[0].ended_at, rows[1].ended_at);
     }
 
     #[test]

@@ -1,0 +1,319 @@
+//! Agent-run ledger — the durable record of agent/workflow executions (agentic-platform substrate).
+//!
+//! A *run* is one execution of an agent or workflow: status + cursor + input/result, with a
+//! `parent_run_id` for sub-agent trees. Its *steps* (LLM calls, tool calls, …) are episodic events
+//! tagged with `session_id = run_id`, so the full trace is `engine.session_recall(run_id)` — no
+//! separate step storage. SQLite-backed (mirrors [`crate::memory::state::StateStore`]); writes carry
+//! leader-materialized timestamps so the ledger is deterministic to replicate through Raft.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Lifecycle status of a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    #[default]
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl RunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RunStatus::Pending => "pending",
+            RunStatus::Running => "running",
+            RunStatus::Succeeded => "succeeded",
+            RunStatus::Failed => "failed",
+            RunStatus::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "running" => RunStatus::Running,
+            "succeeded" => RunStatus::Succeeded,
+            "failed" => RunStatus::Failed,
+            "cancelled" => RunStatus::Cancelled,
+            _ => RunStatus::Pending,
+        }
+    }
+
+    /// A terminal run no longer makes progress (a dispatcher can stop driving it).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+        )
+    }
+}
+
+fn default_tenant() -> String {
+    "default".into()
+}
+
+/// A durable agent/workflow run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Run {
+    pub id: Uuid,
+    #[serde(default = "default_tenant")]
+    pub tenant_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<Uuid>,
+    pub status: RunStatus,
+    #[serde(default)]
+    pub input: serde_json::Value,
+    #[serde(default)]
+    pub result: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Opaque driver position (e.g. the next workflow node) — reconstructable run state.
+    #[serde(default)]
+    pub cursor: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// A partial update to a run — only the `Some` fields change. Carries materialized values (the
+/// `updated_at` is supplied separately by the writer) so it is deterministic to replicate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<RunStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+const COLS: &str = "id, tenant_id, agent_id, parent_run_id, status, input, result, error, cursor, \
+                    created_at, updated_at, started_at, ended_at";
+
+fn parse_ts(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+fn parse_json(s: &str) -> serde_json::Value {
+    serde_json::from_str(s).unwrap_or(serde_json::Value::Null)
+}
+
+fn row_to_run(r: &rusqlite::Row) -> rusqlite::Result<Run> {
+    Ok(Run {
+        id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+        tenant_id: r.get(1)?,
+        agent_id: r.get(2)?,
+        parent_run_id: r
+            .get::<_, Option<String>>(3)?
+            .and_then(|s| Uuid::parse_str(&s).ok()),
+        status: RunStatus::from_str(&r.get::<_, String>(4)?),
+        input: parse_json(&r.get::<_, String>(5)?),
+        result: parse_json(&r.get::<_, String>(6)?),
+        error: r.get(7)?,
+        cursor: parse_json(&r.get::<_, String>(8)?),
+        created_at: parse_ts(&r.get::<_, String>(9)?),
+        updated_at: parse_ts(&r.get::<_, String>(10)?),
+        started_at: r.get::<_, Option<String>>(11)?.as_deref().map(parse_ts),
+        ended_at: r.get::<_, Option<String>>(12)?.as_deref().map(parse_ts),
+    })
+}
+
+/// SQLite-backed durable store of [`Run`]s.
+pub struct RunStore {
+    db: Arc<Mutex<Connection>>,
+}
+
+impl std::fmt::Debug for RunStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunStore").finish()
+    }
+}
+
+impl RunStore {
+    pub fn open(path: &Path) -> crate::Result<Self> {
+        let conn = if path.as_os_str() == ":memory:" {
+            Connection::open_in_memory()
+        } else {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| crate::Error::State(format!("runs mkdir: {e}")))?;
+            }
+            Connection::open(path)
+        }
+        .map_err(|e| crate::Error::State(format!("open runs db: {e}")))?;
+
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;",
+        )
+        .map_err(|e| crate::Error::State(format!("runs pragmas: {e}")))?;
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS runs (
+                id            TEXT PRIMARY KEY,
+                tenant_id     TEXT NOT NULL DEFAULT 'default',
+                agent_id      TEXT,
+                parent_run_id TEXT,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                input         TEXT NOT NULL DEFAULT '{}',
+                result        TEXT NOT NULL DEFAULT 'null',
+                error         TEXT,
+                cursor        TEXT NOT NULL DEFAULT 'null',
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                started_at    TEXT,
+                ended_at      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_runs_tenant ON runs(tenant_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(tenant_id, status);",
+        )
+        .map_err(|e| crate::Error::State(format!("create runs table: {e}")))?;
+
+        Ok(Self {
+            db: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    pub fn new() -> Self {
+        Self::open(Path::new(":memory:")).expect("in-memory run store")
+    }
+
+    /// Insert a run. Idempotent (re-applying the same id is a no-op) so Raft replay is safe.
+    pub async fn create(&self, run: &Run) -> crate::Result<()> {
+        let db = self.db.lock();
+        db.execute(
+            "INSERT INTO runs (id, tenant_id, agent_id, parent_run_id, status, input, result, \
+             error, cursor, created_at, updated_at, started_at, ended_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO NOTHING",
+            rusqlite::params![
+                run.id.to_string(),
+                run.tenant_id,
+                run.agent_id,
+                run.parent_run_id.map(|i| i.to_string()),
+                run.status.as_str(),
+                run.input.to_string(),
+                run.result.to_string(),
+                run.error,
+                run.cursor.to_string(),
+                run.created_at.to_rfc3339(),
+                run.updated_at.to_rfc3339(),
+                run.started_at.map(|t| t.to_rfc3339()),
+                run.ended_at.map(|t| t.to_rfc3339()),
+            ],
+        )
+        .map_err(|e| crate::Error::State(format!("create run: {e}")))?;
+        Ok(())
+    }
+
+    /// Apply a patch (only present fields change) with a writer-supplied `updated_at`. Returns
+    /// whether a row was updated. `COALESCE(?, col)` keeps the existing value for absent fields, so
+    /// this is a deterministic function of `(patch, updated_at)`.
+    pub async fn update(
+        &self,
+        id: Uuid,
+        patch: &RunPatch,
+        updated_at: DateTime<Utc>,
+    ) -> crate::Result<bool> {
+        let db = self.db.lock();
+        let n = db
+            .execute(
+                "UPDATE runs SET \
+                 status = COALESCE(?1, status), \
+                 result = COALESCE(?2, result), \
+                 error = COALESCE(?3, error), \
+                 cursor = COALESCE(?4, cursor), \
+                 started_at = COALESCE(?5, started_at), \
+                 ended_at = COALESCE(?6, ended_at), \
+                 updated_at = ?7 \
+                 WHERE id = ?8",
+                rusqlite::params![
+                    patch.status.map(|s| s.as_str()),
+                    patch.result.as_ref().map(|v| v.to_string()),
+                    patch.error,
+                    patch.cursor.as_ref().map(|v| v.to_string()),
+                    patch.started_at.map(|t| t.to_rfc3339()),
+                    patch.ended_at.map(|t| t.to_rfc3339()),
+                    updated_at.to_rfc3339(),
+                    id.to_string(),
+                ],
+            )
+            .map_err(|e| crate::Error::State(format!("update run: {e}")))?;
+        Ok(n > 0)
+    }
+
+    pub async fn get(&self, id: Uuid) -> crate::Result<Option<Run>> {
+        let db = self.db.lock();
+        db.query_row(
+            &format!("SELECT {COLS} FROM runs WHERE id = ?1"),
+            rusqlite::params![id.to_string()],
+            row_to_run,
+        )
+        .optional()
+        .map_err(|e| crate::Error::State(format!("get run: {e}")))
+    }
+
+    /// List runs for a tenant (newest first), optionally filtered by status.
+    pub async fn list(
+        &self,
+        tenant: &str,
+        status: Option<RunStatus>,
+        limit: usize,
+    ) -> crate::Result<Vec<Run>> {
+        let db = self.db.lock();
+        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match status {
+            Some(s) => (
+                format!(
+                    "SELECT {COLS} FROM runs WHERE tenant_id = ?1 AND status = ?2 \
+                     ORDER BY created_at DESC LIMIT ?3"
+                ),
+                vec![
+                    Box::new(tenant.to_string()),
+                    Box::new(s.as_str().to_string()),
+                    Box::new(limit as i64),
+                ],
+            ),
+            None => (
+                format!(
+                    "SELECT {COLS} FROM runs WHERE tenant_id = ?1 ORDER BY created_at DESC LIMIT ?2"
+                ),
+                vec![Box::new(tenant.to_string()), Box::new(limit as i64)],
+            ),
+        };
+        let mut stmt = db
+            .prepare(&sql)
+            .map_err(|e| crate::Error::State(format!("list runs: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), row_to_run)
+            .map_err(|e| crate::Error::State(format!("list runs: {e}")))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+}
+
+impl Default for RunStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}

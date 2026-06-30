@@ -34,6 +34,7 @@ pub struct CoreConfig {
     pub memory: MemoryConfig,
     pub embedding: EmbeddingConfig,
     pub rerank: RerankConfig,
+    pub runtime: RuntimeConfig,
     pub query: QueryConfig,
     pub backup: BackupConfig,
 }
@@ -45,6 +46,7 @@ impl std::fmt::Debug for CoreConfig {
             .field("memory", &self.memory)
             .field("embedding", &self.embedding)
             .field("rerank", &self.rerank)
+            .field("runtime", &self.runtime)
             .field("query", &self.query)
             .field("backup", &self.backup)
             .finish()
@@ -285,6 +287,22 @@ impl Default for RerankConfig {
             backend: "ollama".into(),
             model: "llama3.2".into(),
             candidates: 50,
+        }
+    }
+}
+
+/// Configuration for the agentic-platform runtime (the agent-run ledger).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// SQLite path for the durable agent-run ledger.
+    pub db_path: String,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            db_path: "./data/runs.db".into(),
         }
     }
 }
