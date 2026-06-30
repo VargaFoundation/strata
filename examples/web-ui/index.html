@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Strata Explorer</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#c9d1d9; --accent:#58a6ff; --muted:#8b949e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--bg); color:var(--fg); }
+  header { padding:12px 16px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  input, button, textarea, select { font:inherit; background:var(--panel); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:6px 10px; }
+  input { min-width:240px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); color:var(--accent); }
+  nav { display:flex; gap:4px; padding:8px 16px; border-bottom:1px solid var(--border); }
+  nav button { background:none; border:1px solid transparent; }
+  nav button.active { border-color:var(--border); color:var(--accent); }
+  main { padding:16px; }
+  .row { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  .grow { flex:1; }
+  textarea { width:100%; min-height:80px; resize:vertical; }
+  pre { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:12px; overflow:auto; max-height:60vh; white-space:pre-wrap; word-break:break-word; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { border:1px solid var(--border); padding:6px 8px; text-align:left; vertical-align:top; }
+  th { color:var(--muted); }
+  .muted { color:var(--muted); }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  a { color:var(--accent); cursor:pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Strata Explorer</h1>
+  <input id="url" value="http://localhost:8432" />
+  <input id="key" placeholder="API key (optional)" />
+  <button onclick="ping()">Connect</button>
+  <span id="status" class="muted"></span>
+</header>
+<nav>
+  <button data-tab="query" class="active">SQL</button>
+  <button data-tab="memories">Memories</button>
+  <button data-tab="runs">Runs</button>
+  <button data-tab="agent">Run agent</button>
+</nav>
+<main>
+  <section id="query" class="panel active">
+    <textarea id="sql">SELECT source, event_type, ts FROM episodic ORDER BY ts DESC LIMIT 20</textarea>
+    <div class="row"><button onclick="runQuery()">Run query</button></div>
+    <div id="query-out"></div>
+  </section>
+
+  <section id="memories" class="panel">
+    <div class="row">
+      <input id="mem-q" class="grow" placeholder="search query" />
+      <input id="mem-user" placeholder="user_id (optional)" />
+      <button onclick="searchMem()">Search</button>
+    </div>
+    <div id="mem-out"></div>
+  </section>
+
+  <section id="runs" class="panel">
+    <div class="row"><button onclick="listRuns()">Refresh runs</button></div>
+    <div id="runs-out"></div>
+    <h3>Trace</h3>
+    <pre id="trace-out" class="muted">select a run above</pre>
+  </section>
+
+  <section id="agent" class="panel">
+    <div class="row">
+      <input id="agent-id" value="explorer" />
+      <input id="agent-q" class="grow" placeholder="question" />
+      <button onclick="runAgent()">Run agent</button>
+    </div>
+    <pre id="agent-out" class="muted">requires a completion provider on the server</pre>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function base() { return $("url").value.replace(/\/+$/, ""); }
+function headers() { const h = { "Content-Type": "application/json" }; const k = $("key").value.trim(); if (k) h["Authorization"] = "Bearer " + k; return h; }
+async function api(method, path, body) {
+  const r = await fetch(base() + path, { method, headers: headers(), body: body !== undefined ? JSON.stringify(body) : undefined });
+  const t = await r.text();
+  let j; try { j = JSON.parse(t); } catch { j = t; }
+  if (!r.ok) throw new Error(typeof j === "object" ? JSON.stringify(j) : j);
+  return j;
+}
+
+document.querySelectorAll("nav button").forEach((b) =>
+  b.onclick = () => {
+    document.querySelectorAll("nav button").forEach((x) => x.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    $(b.dataset.tab).classList.add("active");
+  });
+
+async function ping() {
+  try { const h = await api("GET", "/health"); $("status").textContent = "✓ " + (h.status || "ok") + " " + (h.version || ""); $("status").style.color = "#3fb950"; }
+  catch (e) { $("status").textContent = "✗ " + e.message; $("status").style.color = "#f85149"; }
+}
+
+function table(rows) {
+  if (!rows || !rows.length) return '<p class="muted">no rows</p>';
+  const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  const esc = (v) => String(v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : v).replace(/</g, "&lt;");
+  return "<table><thead><tr>" + cols.map((c) => `<th>${c}</th>`).join("") +
+    "</tr></thead><tbody>" + rows.map((r) => "<tr>" + cols.map((c) => `<td>${esc(r[c])}</td>`).join("") + "</tr>").join("") +
+    "</tbody></table>";
+}
+
+async function runQuery() {
+  try { const j = await api("POST", "/api/v1/query", { sql: $("sql").value }); $("query-out").innerHTML = table(j.rows || []); }
+  catch (e) { $("query-out").innerHTML = `<pre style="color:#f85149">${e.message}</pre>`; }
+}
+
+async function searchMem() {
+  const body = { query: $("mem-q").value, k: 10 };
+  const u = $("mem-user").value.trim(); if (u) body.user_id = u;
+  try { const j = await api("POST", "/api/v1/memories/search", body); $("mem-out").innerHTML = table((j.results || []).map((h) => ({ content: h.memory ? h.memory.content : h.content, score: h.score }))); }
+  catch (e) { $("mem-out").innerHTML = `<pre style="color:#f85149">${e.message}</pre>`; }
+}
+
+async function listRuns() {
+  try {
+    const j = await api("GET", "/api/v1/runs?limit=50");
+    const rows = (j.runs || []).map((r) => ({ id: r.id, agent: r.agent_id, status: r.status, created: r.created_at }));
+    $("runs-out").innerHTML = table(rows);
+    document.querySelectorAll("#runs-out td").forEach((td) => {
+      if (td.cellIndex === 0) { td.innerHTML = `<a onclick="trace('${td.textContent}')">${td.textContent}</a>`; }
+    });
+  } catch (e) { $("runs-out").innerHTML = `<pre style="color:#f85149">${e.message}</pre>`; }
+}
+async function trace(id) {
+  try { const j = await api("GET", "/api/v1/runs/" + id + "/trace"); $("trace-out").textContent = JSON.stringify(j.steps || [], null, 2); }
+  catch (e) { $("trace-out").textContent = e.message; }
+}
+
+async function runAgent() {
+  $("agent-out").textContent = "running…";
+  try { const j = await api("POST", "/api/v1/agents/run", { agent_id: $("agent-id").value, question: $("agent-q").value }); $("agent-out").textContent = JSON.stringify(j.run || j, null, 2); }
+  catch (e) { $("agent-out").textContent = e.message; }
+}
+
+ping();
+</script>
+</body>
+</html>
