@@ -1,6 +1,6 @@
 //! Authentication middleware — Tower layer for request authentication.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -68,10 +68,46 @@ impl Role {
     }
 }
 
+/// What an API key grants — its tenant scope (or none) and role.
+#[derive(Debug, Clone)]
+struct ApiKeyInfo {
+    tenant: Option<String>,
+    role: Role,
+}
+
+/// Parse an API-key config entry, backward-compatibly:
+/// - `"<key>"`              → Writer, no tenant (legacy behavior, unchanged)
+/// - `"<key>@<tenant>"`     → Writer, scoped to `<tenant>`
+/// - `"<key>@<tenant>:<role>"` → `<role>`, scoped to `<tenant>`
+fn parse_api_key(entry: &str) -> (String, ApiKeyInfo) {
+    match entry.split_once('@') {
+        None => (
+            entry.to_string(),
+            ApiKeyInfo {
+                tenant: None,
+                role: Role::Writer,
+            },
+        ),
+        Some((key, rest)) => {
+            let (tenant, role) = match rest.split_once(':') {
+                Some((t, r)) => (t, Role::from_str_loose(r).unwrap_or(Role::Writer)),
+                None => (rest, Role::Writer),
+            };
+            (
+                key.to_string(),
+                ApiKeyInfo {
+                    tenant: (!tenant.is_empty()).then(|| tenant.to_string()),
+                    role,
+                },
+            )
+        }
+    }
+}
+
 /// Shared authentication state for the middleware.
 #[derive(Clone)]
 pub struct AuthState {
-    keys: Arc<HashSet<String>>,
+    keys: Arc<HashMap<String, ApiKeyInfo>>,
     jwt_secret: Option<Arc<String>>,
     oidc: Option<Arc<super::oidc::OidcValidator>>,
     rate_limiter: Option<Arc<RateLimiter>>,
@@ -119,7 +155,7 @@ impl AuthState {
             }
         };
         Self {
-            keys: Arc::new(api_keys.into_iter().collect()),
+            keys: Arc::new(api_keys.iter().map(|e| parse_api_key(e)).collect()),
             jwt_secret: jwt_secret.map(Arc::new),
             oidc: None,
             rate_limiter,
@@ -128,7 +164,7 @@ impl AuthState {
     }
 
     fn validate_api_key(&self, key: &str) -> bool {
-        self.keys.contains(key)
+        self.keys.contains_key(key)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -178,13 +214,13 @@ impl AuthState {
                 });
             }
         }
-        // 3. API key (no tenant scoping)
-        if self.validate_api_key(token) {
+        // 3. API key — may carry a tenant + role (parsed from the key config; a bare key = Writer/none).
+        if let Some(info) = self.keys.get(token) {
             return Some(AuthContext {
                 identity: "api-key-user".into(),
-                role: Role::Writer,
+                role: info.role.clone(),
                 agent_id: None,
-                tenant_id: None,
+                tenant_id: info.tenant.clone(),
             });
         }
         None
@@ -516,6 +552,34 @@ mod tests {
         assert!(!Role::Writer.allows_admin_path());
         assert!(!Role::Reader.allows_admin_path());
         assert!(!Role::Agent.allows_admin_path());
+    }
+
+    #[tokio::test]
+    async fn api_keys_can_be_tenant_and_role_scoped() {
+        // The client sends the SECRET part (before '@'); tenant + role are server-side config.
+        let state = AuthState::new(
+            vec![
+                "bare".into(),
+                "sk_acme@acme:reader".into(),
+                "sk_beta@beta".into(),
+            ],
+            None,
+            0,
+        );
+        // Bare key = Writer, no tenant (legacy behavior, unchanged).
+        let c = state.authenticate("bare").await.unwrap();
+        assert_eq!(c.role, Role::Writer);
+        assert!(c.tenant_id.is_none());
+        // Scoped key → the configured role + tenant.
+        let c = state.authenticate("sk_acme").await.unwrap();
+        assert_eq!(c.role, Role::Reader);
+        assert_eq!(c.tenant_id.as_deref(), Some("acme"));
+        // key@tenant without a role defaults to Writer.
+        let c = state.authenticate("sk_beta").await.unwrap();
+        assert_eq!(c.role, Role::Writer);
+        assert_eq!(c.tenant_id.as_deref(), Some("beta"));
+        // A wrong secret is rejected.
+        assert!(state.authenticate("nope").await.is_none());
     }
 
     #[test]
