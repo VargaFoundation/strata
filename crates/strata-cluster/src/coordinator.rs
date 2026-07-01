@@ -439,6 +439,26 @@ impl strata_core::runtime::RunReplicator for CoordinatorRunReplicator {
             .map(|_| ())
             .map_err(replicate_err)
     }
+
+    async fn replicate_state_set(
+        &self,
+        agent_id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> strata_core::Result<()> {
+        self.coord
+            .read()
+            .await
+            .client_write(crate::raft::types::AppRequest::StateSet {
+                agent_id: agent_id.to_string(),
+                key: key.to_string(),
+                value,
+                tenant: None,
+            })
+            .await
+            .map(|_| ())
+            .map_err(replicate_err)
+    }
 }
 
 /// Bootstrap a multi-node cluster: `initialize` once, idempotently, retrying until a quorum of

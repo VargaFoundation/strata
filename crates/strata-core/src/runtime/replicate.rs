@@ -32,4 +32,12 @@ pub trait RunReplicator: Send + Sync {
     ) -> crate::Result<()>;
     /// Replicate a fully-formed step event (→ `AppRequest::Ingest`).
     async fn replicate_step(&self, event: Event) -> crate::Result<()>;
+    /// Replicate a state write made by the driver, e.g. a HITL approval key (→ `AppRequest::StateSet`)
+    /// so it survives failover. Uses the non-replicating `state_set` at apply time (no loop).
+    async fn replicate_state_set(
+        &self,
+        agent_id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> crate::Result<()>;
 }
