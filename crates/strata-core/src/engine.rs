@@ -676,6 +676,55 @@ impl StrataEngine {
             .await
     }
 
+    /// Resume driving a non-terminal run from its journaled trace (crash / failover recovery).
+    /// Unlike [`Self::run_resume`] it requires no approval — used by the [`Self::run_dispatch_once`]
+    /// dispatcher. Claims the run first (bumps `updated_at`) so a concurrent tick won't re-pick it.
+    pub async fn run_resume_driver(&self, run_id: uuid::Uuid) -> Result<Run> {
+        let run = self
+            .run_get(run_id)
+            .await?
+            .ok_or_else(|| crate::Error::State("run not found".into()))?;
+        let agent_id = run.agent_id.clone().unwrap_or_default();
+        let tenant = run.tenant_id.clone();
+        let _ = self
+            .run_update(
+                run_id,
+                RunPatch {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let transcript = self.rebuild_agent_transcript(run_id).await?;
+        self.drive_agent_loop(run_id, &tenant, &agent_id, transcript, 8)
+            .await
+    }
+
+    /// One dispatcher tick: resume up to `limit` non-terminal runs untouched for `stale_secs`
+    /// (orphaned by a crash / leader failover). Returns how many were resumed. No-op without a
+    /// completion provider. **At-least-once**: a step interrupted mid-flight may re-run, so mutating
+    /// tools should be idempotent. `waiting_approval` runs are excluded (they need a human).
+    pub async fn run_dispatch_once(&self, stale_secs: i64, limit: usize) -> Result<usize> {
+        if self.completion.is_none() {
+            return Ok(0);
+        }
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(stale_secs);
+        let runs = self.runs.list_resumable(cutoff, limit).await?;
+        let mut resumed = 0;
+        for run in runs {
+            match self.run_resume_driver(run.id).await {
+                Ok(_) => resumed += 1,
+                Err(e) => {
+                    tracing::warn!(run_id = %run.id, error = %e, "dispatcher: resume failed")
+                }
+            }
+        }
+        if resumed > 0 {
+            tracing::info!(resumed, "run dispatcher resumed orphaned runs");
+        }
+        Ok(resumed)
+    }
+
     /// Rebuild an agent transcript from a run's journaled steps (for durable resume).
     async fn rebuild_agent_transcript(&self, run_id: uuid::Uuid) -> Result<String> {
         let mut t = String::new();
@@ -4088,6 +4137,82 @@ mod tests {
         assert_eq!(rec.steps.load(Ordering::SeqCst), 1);
         // The recorder doesn't apply, so the local store was bypassed (apply happens via Raft).
         assert!(engine.run_get(run.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_resumes_orphaned_running_run() {
+        use crate::llm::CompletionProvider;
+        use crate::runtime::{RunPatch, RunStatus};
+
+        struct Echo;
+        #[async_trait::async_trait]
+        impl CompletionProvider for Echo {
+            async fn complete(&self, _s: &str, _u: &str) -> crate::Result<String> {
+                Ok("done".to_string())
+            }
+            fn model_name(&self) -> &str {
+                "echo"
+            }
+        }
+
+        let mut engine = StrataEngine::new(inmem_config()).await.unwrap();
+        engine.completion = Some(std::sync::Arc::new(Echo));
+
+        // A run that was left "running" with a journaled start step but a STALE updated_at — as if
+        // the leader driving it crashed mid-loop.
+        let run = engine
+            .run_create("default", Some("a".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        engine
+            .run_log_step(
+                run.id,
+                "default",
+                "run_start",
+                serde_json::json!({ "question": "hi" }),
+            )
+            .await
+            .unwrap();
+        let stale = chrono::Utc::now() - chrono::Duration::seconds(120);
+        engine
+            .run_apply_update(
+                run.id,
+                &RunPatch {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+                stale,
+            )
+            .await
+            .unwrap();
+
+        // A fresh (non-stale) running run must NOT be picked up.
+        let fresh = engine
+            .run_create("default", Some("a".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        engine
+            .run_update(
+                fresh.id,
+                RunPatch {
+                    status: Some(RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let resumed = engine.run_dispatch_once(60, 10).await.unwrap();
+        assert_eq!(resumed, 1);
+        assert_eq!(
+            engine.run_get(run.id).await.unwrap().unwrap().status,
+            RunStatus::Succeeded
+        );
+        // The fresh run was skipped (still running, not driven).
+        assert_eq!(
+            engine.run_get(fresh.id).await.unwrap().unwrap().status,
+            RunStatus::Running
+        );
     }
 
     #[test]

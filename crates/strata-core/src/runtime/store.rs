@@ -324,6 +324,30 @@ impl RunStore {
             .map_err(|e| crate::Error::State(format!("list runs: {e}")))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
+
+    /// Non-terminal runs a dispatcher can resume: `pending`/`running` and not touched since
+    /// `stale_before` (so a run actively driven on the current leader — recent `updated_at` — is
+    /// skipped). Oldest-stale first. RFC3339 timestamps compare lexicographically (all UTC).
+    pub async fn list_resumable(
+        &self,
+        stale_before: DateTime<Utc>,
+        limit: usize,
+    ) -> crate::Result<Vec<Run>> {
+        let db = self.db.lock();
+        let mut stmt = db
+            .prepare(&format!(
+                "SELECT {COLS} FROM runs WHERE status IN ('pending','running') \
+                 AND updated_at < ?1 ORDER BY updated_at ASC LIMIT ?2"
+            ))
+            .map_err(|e| crate::Error::State(format!("list resumable: {e}")))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![stale_before.to_rfc3339(), limit as i64],
+                row_to_run,
+            )
+            .map_err(|e| crate::Error::State(format!("list resumable: {e}")))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
 }
 
 impl Default for RunStore {

@@ -52,6 +52,30 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Run dispatcher: on the leader (or single-node), periodically resume agent runs orphaned by a
+    // crash / leader failover — the durable-execution recovery loop. No-op without a completion
+    // provider or when this node isn't the leader.
+    {
+        let engine = engine.clone();
+        let coord = cluster_handle.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let is_leader = match &coord {
+                    Some(c) => c.read().await.is_leader(),
+                    None => true,
+                };
+                if is_leader {
+                    if let Err(e) = engine.run_dispatch_once(60, 5).await {
+                        tracing::warn!(error = %e, "run dispatch tick failed");
+                    }
+                }
+            }
+        });
+    }
+
     let gateway = strata_gateway::GatewayServer::start(
         engine.clone(),
         server_config.gateway.clone(),
