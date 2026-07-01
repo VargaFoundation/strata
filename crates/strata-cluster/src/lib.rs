@@ -8,4 +8,7 @@ pub mod shard;
 pub use config::ClusterConfig;
 pub use coordinator::{ClusterCoordinator, CoordinatorRunReplicator};
 pub use error::{Error, Result};
-pub use shard::{reconcile_plan, ReconcilePlan, ShardMove, ShardRouter, ShardedCluster};
+pub use shard::{
+    reconcile_plan, scale_plan, ReconcilePlan, ScaleDirection, ScalePlan, ShardMove, ShardRouter,
+    ShardedCluster,
+};

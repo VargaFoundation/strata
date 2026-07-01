@@ -798,6 +798,10 @@ impl StrataEngine {
              `TOOL call <server> <tool>: {json args}` (call an external tool), \
              `TOOL approve: <reason>` (request human approval), or the final answer.";
 
+        // Stable count of already-issued tool calls (from the replayed transcript). A tool call
+        // interrupted before its result was journaled does not appear in the transcript, so on
+        // resume it gets the SAME idempotency key — idempotent downstream tools then run it once.
+        let mut tool_seq = transcript.matches("TOOL call ").count();
         let mut final_answer = None;
         for _turn in 0..max_turns.max(1) {
             let reply = completion.complete(system, &transcript).await?;
@@ -841,8 +845,15 @@ impl StrataEngine {
                 let mut parts = head.split_whitespace();
                 let server = parts.next().unwrap_or("").to_string();
                 let tool = parts.next().unwrap_or("").to_string();
-                let args: serde_json::Value =
+                let mut args: serde_json::Value =
                     serde_json::from_str(args_str.trim()).unwrap_or_else(|_| serde_json::json!({}));
+                // Deterministic idempotency key: stable across resume, so a re-run of an interrupted
+                // call is de-duplicated by tools that honor `_idempotency_key` (best effort —
+                // external effects are otherwise at-least-once; make mutating tools idempotent).
+                let idem = format!("{run_id}:tool:{tool_seq}");
+                if let Some(obj) = args.as_object_mut() {
+                    obj.insert("_idempotency_key".into(), idem.clone().into());
+                }
                 let executor = self.tool_executor.read().clone();
                 let result = match executor {
                     Some(ex) => ex
@@ -855,9 +866,10 @@ impl StrataEngine {
                     run_id,
                     tenant,
                     "tool_call",
-                    serde_json::json!({ "tool": format!("{server}/{tool}"), "result": result }),
+                    serde_json::json!({ "tool": format!("{server}/{tool}"), "idempotency_key": idem, "result": result }),
                 )
                 .await?;
+                tool_seq += 1;
                 transcript.push_str(&format!(
                     "Assistant: TOOL call {server} {tool}\nObservation: {result}\n"
                 ));
@@ -4101,9 +4113,10 @@ mod tests {
 
         // The downstream tool call was executed and journaled.
         let steps = engine.run_trace(run.id).await.unwrap();
-        assert!(steps
-            .iter()
-            .any(|s| s["event_type"] == "tool_call" && s["payload"]["tool"] == "gh/create_issue"));
+        // The tool call was journaled with a deterministic idempotency key (first call → :tool:0).
+        assert!(steps.iter().any(|s| s["event_type"] == "tool_call"
+            && s["payload"]["tool"] == "gh/create_issue"
+            && s["payload"]["idempotency_key"] == format!("{}:tool:0", run.id)));
     }
 
     #[tokio::test]

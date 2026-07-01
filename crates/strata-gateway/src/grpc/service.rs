@@ -14,17 +14,45 @@ pub struct StrataGrpcService {
     engine: Arc<StrataEngine>,
     /// When set, RPCs require a valid `authorization: Bearer <jwt>` and are tenant-scoped.
     auth: Option<crate::auth::middleware::AuthState>,
+    /// Sharded mode (shards > 1): reject requests for tenants this shard doesn't own, pointing the
+    /// caller at the owning shard — gRPC has no reverse-proxy, so this prevents serving wrong data.
+    shard: Option<crate::cluster::shard_route::ShardRoutingState>,
 }
 
 impl StrataGrpcService {
     pub fn new(
         engine: Arc<StrataEngine>,
         auth: Option<crate::auth::middleware::AuthState>,
+        shard: Option<crate::cluster::shard_route::ShardRoutingState>,
     ) -> Self {
-        Self { engine, auth }
+        Self {
+            engine,
+            auth,
+            shard,
+        }
     }
 
-    /// Resolve the caller's tenant from request metadata (`authorization: Bearer <jwt>`).
+    /// In sharded mode, verify this shard owns `tenant`; otherwise reject with the owning shard's
+    /// address (the gRPC analogue of the HTTP reverse-proxy — clients reconnect to that shard).
+    #[allow(clippy::result_large_err)] // Status is large but pervasive across this gRPC service.
+    fn check_shard(&self, tenant: &Option<String>) -> Result<(), Status> {
+        use crate::cluster::shard_route::{route_decision, ShardTarget};
+        let (Some(shard), Some(t)) = (&self.shard, tenant.as_deref()) else {
+            return Ok(());
+        };
+        match route_decision(t, &shard.router, shard.my_shard, &shard.base_urls) {
+            ShardTarget::Local => Ok(()),
+            ShardTarget::Forward(url) => Err(Status::failed_precondition(format!(
+                "tenant '{t}' is owned by another shard — connect to its gRPC endpoint (HTTP base {url})"
+            ))),
+            ShardTarget::Unroutable => Err(Status::failed_precondition(format!(
+                "tenant '{t}' is owned by another shard with no configured address"
+            ))),
+        }
+    }
+
+    /// Resolve the caller's tenant from request metadata (`authorization: Bearer <jwt>`), and in
+    /// sharded mode reject tenants this shard doesn't own.
     ///
     /// - Auth configured: a missing/invalid token is rejected (`unauthenticated`).
     /// - Auth disabled (no `AuthState`): returns `None` (no scoping, dev mode).
@@ -40,7 +68,10 @@ impl StrataGrpcService {
             .map(|s| s.to_string());
         match token {
             Some(t) => match state.authenticate(&t).await {
-                Some(ctx) => Ok(ctx.tenant_id),
+                Some(ctx) => {
+                    self.check_shard(&ctx.tenant_id)?;
+                    Ok(ctx.tenant_id)
+                }
                 None => Err(Status::unauthenticated("invalid token")),
             },
             None => Err(Status::unauthenticated("missing bearer token")),
@@ -427,12 +458,13 @@ pub async fn start_grpc(
     addr: &str,
     engine: Arc<StrataEngine>,
     auth: Option<crate::auth::middleware::AuthState>,
+    shard: Option<crate::cluster::shard_route::ShardRoutingState>,
 ) -> Result<GrpcHandle, Box<dyn std::error::Error>> {
     let parsed_addr = addr
         .parse()
         .map_err(|e| format!("invalid gRPC address: {e}"))?;
 
-    let service = StrataGrpcService::new(engine, auth);
+    let service = StrataGrpcService::new(engine, auth, shard);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     tracing::info!(%addr, "gRPC server listening");
@@ -485,7 +517,7 @@ mod tests {
         config.memory.cognition.db_path = ":memory:".into();
         let engine = Arc::new(StrataEngine::new(config).await.unwrap());
         let auth = AuthState::new(vec![], Some(SECRET.into()), 0);
-        StrataGrpcService::new(engine, Some(auth))
+        StrataGrpcService::new(engine, Some(auth), None)
     }
 
     fn authed<T>(msg: T, tenant: &str) -> Request<T> {
@@ -495,6 +527,58 @@ mod tests {
             format!("Bearer {}", jwt(tenant)).parse().unwrap(),
         );
         req
+    }
+
+    async fn svc_sharded(my_shard: usize) -> StrataGrpcService {
+        let mut config = strata_core::CoreConfig::default();
+        config.memory.episodic.db_path = ":memory:".into();
+        config.memory.state.db_path = ":memory:".into();
+        config.memory.cognition.db_path = ":memory:".into();
+        let engine = Arc::new(StrataEngine::new(config).await.unwrap());
+        let auth = AuthState::new(vec![], Some(SECRET.into()), 0);
+        let shard = crate::cluster::shard_route::ShardRoutingState {
+            router: std::sync::Arc::new(strata_cluster::ShardRouter::new(2, 128)),
+            my_shard,
+            base_urls: std::sync::Arc::new(vec!["http://s0".into(), "http://s1".into()]),
+            http: reqwest::Client::new(),
+        };
+        StrataGrpcService::new(engine, Some(auth), Some(shard))
+    }
+
+    fn tenant_on_shard(shard: usize) -> String {
+        let router = strata_cluster::ShardRouter::new(2, 128);
+        (0..)
+            .map(|i| format!("t{i}"))
+            .find(|t| router.shard_for(t) == shard)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn grpc_rejects_tenant_owned_by_another_shard() {
+        let service = svc_sharded(0).await;
+        // A tenant owned by shard 1 → rejected on shard 0 (no wrong-shard data served).
+        let foreign = tenant_on_shard(1);
+        let err = service
+            .query(authed(
+                proto::QueryRequest {
+                    sql: "SELECT 1".into(),
+                },
+                &foreign,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        // A tenant owned by shard 0 → served locally.
+        let mine = tenant_on_shard(0);
+        assert!(service
+            .query(authed(
+                proto::QueryRequest {
+                    sql: "SELECT 1".into(),
+                },
+                &mine,
+            ))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

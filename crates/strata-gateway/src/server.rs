@@ -175,8 +175,9 @@ impl GatewayServer {
             None => None,
         };
 
-        // gRPC shares the same auth state (tenant scoping + token validation).
+        // gRPC shares the same auth state (tenant scoping + token validation) and shard routing.
         let grpc_auth = auth_state.clone();
+        let grpc_shard = shard_state.clone();
 
         let mut app = crate::rest::router_with_engine_and_auth(
             engine.clone(),
@@ -255,6 +256,7 @@ impl GatewayServer {
             &grpc_addr,
             engine.clone(),
             grpc_auth,
+            grpc_shard,
         )
         .await
         {

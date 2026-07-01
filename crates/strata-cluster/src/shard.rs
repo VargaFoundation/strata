@@ -40,6 +40,62 @@ pub fn reconcile_plan(desired: usize, actual: usize, tenants: &[String]) -> Reco
     }
 }
 
+/// Direction of a shard-count change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScaleDirection {
+    Up,
+    Down,
+    None,
+}
+
+/// An **ordered** scale plan for a Kubernetes operator: which shards to add or remove plus the tenant
+/// data movements, sequenced so no data is lost. Pure + unit-testable; the operator just applies it.
+///
+/// - **Up**: create `add_shards` (new StatefulSets) FIRST, then apply `moves` (migrate data onto them).
+/// - **Down**: apply `moves` FIRST (drain data OFF `remove_shards`), THEN delete `remove_shards`.
+///
+/// Applying in the wrong order loses data (moving onto a shard that doesn't exist yet, or deleting a
+/// shard before its tenants have been drained), which is why the plan makes the sequence explicit.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ScalePlan {
+    pub direction: ScaleDirection,
+    pub scale_to: usize,
+    /// Shard indices to create (scale-up). Empty on scale-down / no-op.
+    pub add_shards: Vec<usize>,
+    /// Shard indices to drain then delete (scale-down). Empty on scale-up / no-op.
+    pub remove_shards: Vec<usize>,
+    /// Tenant data movements (consistent hashing keeps this set small).
+    pub moves: Vec<ShardMove>,
+}
+
+/// Plan a scale from `actual` → `desired` shards for `tenants`, with the safe ordering made explicit.
+/// The highest-indexed shards are the ones added (up) or removed (down), matching a StatefulSet's
+/// ordinal-based scaling. Every tenant currently on a to-be-removed shard appears in `moves` (so a
+/// scale-down never deletes a shard with live data).
+pub fn scale_plan(desired: usize, actual: usize, tenants: &[String]) -> ScalePlan {
+    let desired = desired.max(1);
+    let actual = actual.max(1);
+    let moves = reconcile_plan(desired, actual, tenants).moves;
+    let (direction, add_shards, remove_shards) = match desired.cmp(&actual) {
+        std::cmp::Ordering::Greater => {
+            (ScaleDirection::Up, (actual..desired).collect(), Vec::new())
+        }
+        std::cmp::Ordering::Less => (
+            ScaleDirection::Down,
+            Vec::new(),
+            (desired..actual).collect(),
+        ),
+        std::cmp::Ordering::Equal => (ScaleDirection::None, Vec::new(), Vec::new()),
+    };
+    ScalePlan {
+        direction,
+        scale_to: desired,
+        add_shards,
+        remove_shards,
+        moves,
+    }
+}
+
 /// Maps keys to shard ids on a consistent-hash ring (virtual nodes for balance).
 #[derive(Debug, Clone)]
 pub struct ShardRouter {
@@ -285,6 +341,50 @@ mod tests {
             assert_ne!(m.from, m.to);
             assert!(m.to < 5);
         }
+    }
+
+    #[test]
+    fn scale_plan_up_adds_high_shards_and_moves() {
+        let tenants: Vec<String> = (0..2000).map(|i| format!("tenant-{i}")).collect();
+        let up = scale_plan(6, 4, &tenants);
+        assert_eq!(up.direction, ScaleDirection::Up);
+        assert_eq!(up.scale_to, 6);
+        assert_eq!(up.add_shards, vec![4, 5]);
+        assert!(up.remove_shards.is_empty());
+        assert!(!up.moves.is_empty());
+    }
+
+    #[test]
+    fn scale_plan_down_drains_every_removed_shard_before_delete() {
+        let tenants: Vec<String> = (0..3000).map(|i| format!("tenant-{i}")).collect();
+        let down = scale_plan(3, 5, &tenants);
+        assert_eq!(down.direction, ScaleDirection::Down);
+        assert_eq!(down.remove_shards, vec![3, 4]);
+        assert!(down.add_shards.is_empty());
+
+        // Safety invariant: EVERY tenant currently on a shard being removed has a move (so deleting
+        // the shard afterwards never drops live data).
+        let old = ShardRouter::new(5, 128);
+        let moved: std::collections::HashSet<&str> =
+            down.moves.iter().map(|m| m.key.as_str()).collect();
+        for t in &tenants {
+            let s = old.shard_for(t);
+            if s == 3 || s == 4 {
+                assert!(
+                    moved.contains(t.as_str()),
+                    "tenant {t} on removed shard {s} not drained"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scale_plan_noop_when_equal() {
+        let plan = scale_plan(4, 4, &[]);
+        assert_eq!(plan.direction, ScaleDirection::None);
+        assert!(
+            plan.add_shards.is_empty() && plan.remove_shards.is_empty() && plan.moves.is_empty()
+        );
     }
 
     #[test]
