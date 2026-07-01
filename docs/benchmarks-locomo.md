@@ -32,6 +32,26 @@ LOCOMO_PATH=locomo_slice.json \
   cargo run -p strata-core --example locomo_eval
 ```
 
+### With Claude (Anthropic) — extraction + answerer/judge
+
+The harness also supports Claude for the LLM roles (fact extraction at ingest, the QA answerer, and
+the judge). Set your Anthropic API key and pick a model. Use a cheaper model for the high-volume
+extraction and a stronger one for the judge if you like.
+
+```bash
+export STRATA_EMBEDDING__ANTHROPIC_API_KEY=sk-ant-...
+LOCOMO_PATH=locomo.json \
+  STRATA_EMBEDDING__PROVIDER=ollama STRATA_EMBEDDING__MODEL=nomic-embed-text \
+  STRATA_COGNITION__EXTRACTION=llm \
+  STRATA_COGNITION__EXTRACTION_PROVIDER=anthropic STRATA_COGNITION__EXTRACTION_MODEL=claude-haiku-4-5 \
+  STRATA_EVAL__PROVIDER=anthropic STRATA_EVAL__MODEL=claude-sonnet-5 \
+  STRATA_COGNITION__GRAPH_EXPANSION=1 STRATA_COGNITION__AUTO_GRAPH=1 \
+  cargo run -p strata-core --example locomo_eval
+```
+
+For a fast, high-quality reranker instead of the ~140 s/query LLM reranker, build with the local
+cross-encoder: `--features rerank-local` + `STRATA_RERANK__PROVIDER=cross_encoder`.
+
 ## Results
 
 Run 2026-06-30 · Ollama `nomic-embed-text` (768-d) + `glm-4.7-flash` · laptop CPU · `extraction=none`.

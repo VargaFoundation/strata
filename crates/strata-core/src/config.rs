@@ -232,6 +232,8 @@ pub struct EmbeddingConfig {
     pub batch_size: usize,
     pub ollama_url: String,
     pub openai_api_key: String,
+    /// Anthropic API key — used by the Claude completion provider (extraction / rerank / eval).
+    pub anthropic_api_key: String,
 }
 
 impl std::fmt::Debug for EmbeddingConfig {
@@ -243,6 +245,7 @@ impl std::fmt::Debug for EmbeddingConfig {
             .field("batch_size", &self.batch_size)
             .field("ollama_url", &self.ollama_url)
             .field("openai_api_key", &redact(&self.openai_api_key))
+            .field("anthropic_api_key", &redact(&self.anthropic_api_key))
             .finish()
     }
 }
@@ -256,6 +259,7 @@ impl Default for EmbeddingConfig {
             batch_size: 64,
             ollama_url: "http://localhost:11434".into(),
             openai_api_key: String::new(),
+            anthropic_api_key: String::new(),
         }
     }
 }

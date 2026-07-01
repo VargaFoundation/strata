@@ -175,6 +175,16 @@ impl StrataEngine {
                         config.memory.cognition.extraction_model.clone(),
                     )))
                 }
+                "anthropic" if !config.embedding.anthropic_api_key.is_empty() => {
+                    tracing::info!(
+                        model = %config.memory.cognition.extraction_model,
+                        "cognition extraction provider: anthropic"
+                    );
+                    Some(Arc::new(crate::llm::anthropic::AnthropicCompletion::new(
+                        config.embedding.anthropic_api_key.clone(),
+                        config.memory.cognition.extraction_model.clone(),
+                    )))
+                }
                 _ => None,
             };
 
@@ -191,6 +201,12 @@ impl StrataEngine {
                         "openai" if !config.embedding.openai_api_key.is_empty() => {
                             Some(Arc::new(crate::llm::openai::OpenAiCompletion::new(
                                 config.embedding.openai_api_key.clone(),
+                                config.rerank.model.clone(),
+                            )))
+                        }
+                        "anthropic" if !config.embedding.anthropic_api_key.is_empty() => {
+                            Some(Arc::new(crate::llm::anthropic::AnthropicCompletion::new(
+                                config.embedding.anthropic_api_key.clone(),
                                 config.rerank.model.clone(),
                             )))
                         }

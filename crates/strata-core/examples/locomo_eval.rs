@@ -132,6 +132,10 @@ fn apply_env(config: &mut CoreConfig) {
         &mut config.embedding.openai_api_key,
         "STRATA_EMBEDDING__OPENAI_API_KEY",
     );
+    set(
+        &mut config.embedding.anthropic_api_key,
+        "STRATA_EMBEDDING__ANTHROPIC_API_KEY",
+    );
     set(&mut config.rerank.provider, "STRATA_RERANK__PROVIDER");
     set(&mut config.rerank.backend, "STRATA_RERANK__BACKEND");
     set(&mut config.rerank.model, "STRATA_RERANK__MODEL");
@@ -174,7 +178,8 @@ fn load_dataset() -> Vec<Conversation> {
 }
 
 /// Build the optional QA "answerer" model used for end-to-end QA-accuracy. Enabled by
-/// `STRATA_EVAL__PROVIDER` (ollama|openai) + `STRATA_EVAL__MODEL`; reuses the embedding URL/key envs.
+/// `STRATA_EVAL__PROVIDER` (ollama|openai|anthropic) + `STRATA_EVAL__MODEL`; reuses the embedding
+/// URL/key envs.
 fn build_answerer() -> Option<Arc<dyn CompletionProvider>> {
     let provider = std::env::var("STRATA_EVAL__PROVIDER").ok()?;
     let model = std::env::var("STRATA_EVAL__MODEL").unwrap_or_else(|_| "llama3.2".into());
@@ -195,6 +200,16 @@ fn build_answerer() -> Option<Arc<dyn CompletionProvider>> {
             Some(Arc::new(strata_core::llm::openai::OpenAiCompletion::new(
                 key, model,
             )))
+        }
+        "anthropic" => {
+            let key = std::env::var("STRATA_EMBEDDING__ANTHROPIC_API_KEY").unwrap_or_default();
+            if key.is_empty() {
+                eprintln!("STRATA_EVAL__PROVIDER=anthropic but no STRATA_EMBEDDING__ANTHROPIC_API_KEY — QA mode off");
+                return None;
+            }
+            Some(Arc::new(
+                strata_core::llm::anthropic::AnthropicCompletion::new(key, model),
+            ))
         }
         other => {
             eprintln!("unknown STRATA_EVAL__PROVIDER={other:?} — QA mode off");
