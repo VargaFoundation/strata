@@ -159,6 +159,22 @@ fn apply_env(config: &mut CoreConfig) {
     if std::env::var("STRATA_COGNITION__AUTO_GRAPH").is_ok() {
         config.memory.cognition.auto_graph = flag("STRATA_COGNITION__AUTO_GRAPH");
     }
+    // Retrieval widths (for A/B: narrow legacy = SCAN_CAP=512 POOL=15, wide default = 2048/50).
+    let set_usize = |dst: &mut usize, key: &str| {
+        if let Ok(v) = std::env::var(key) {
+            if let Ok(n) = v.parse() {
+                *dst = n;
+            }
+        }
+    };
+    set_usize(
+        &mut config.memory.cognition.retrieval_scan_cap,
+        "STRATA_COGNITION__RETRIEVAL_SCAN_CAP",
+    );
+    set_usize(
+        &mut config.memory.cognition.retrieval_pool,
+        "STRATA_COGNITION__RETRIEVAL_POOL",
+    );
 }
 
 fn load_dataset() -> Vec<Conversation> {

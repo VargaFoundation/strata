@@ -1768,12 +1768,8 @@ impl StrataEngine {
         Ok(hits)
     }
 
-    /// Maximum active memories scanned for lexical (BM25) ranking per scope.
-    const MEMORY_LEXICAL_SCAN_CAP: usize = 512;
     /// Reciprocal Rank Fusion constant (standard default).
     const MEMORY_RRF_K: f32 = 60.0;
-    /// Max graph edges scanned per scope for query-time graph expansion.
-    const MEMORY_GRAPH_EDGE_CAP: usize = 512;
 
     /// Hybrid search over a scope's memories: deterministic BM25 lexical ranking fused
     /// (via Reciprocal Rank Fusion) with vector search when an embedding provider is
@@ -1795,19 +1791,19 @@ impl StrataEngine {
                 .collect());
         }
 
-        // Over-fetch a deeper candidate pool when a reranker will re-order it; otherwise keep the
-        // historical 3k width (so behavior is unchanged when no reranker is configured).
+        // Retrieval widths (configurable; read-path only). `scan_cap` is the candidate universe for
+        // BOTH BM25 and the vector fetch (kept symmetric so RRF isn't dominated by the lexical arm).
+        let cog = &self.config.memory.cognition;
+        let scan_cap = cog.retrieval_scan_cap.max(k);
+        // Fused candidates kept after RRF for the importance blend + rerank + top-k.
         let pool = if self.reranker.is_some() {
-            self.config.rerank.candidates.max(k)
+            self.config.rerank.candidates.max(cog.retrieval_pool)
         } else {
-            (k * 3).max(k)
+            cog.retrieval_pool.max(k)
         };
 
         // Candidate universe for lexical ranking + id→memory map.
-        let candidates = self
-            .memory_store
-            .list_active(scope, Self::MEMORY_LEXICAL_SCAN_CAP)
-            .await?;
+        let candidates = self.memory_store.list_active(scope, scan_cap).await?;
         let mut by_id: std::collections::HashMap<uuid::Uuid, Memory> =
             candidates.iter().cloned().map(|m| (m.id, m)).collect();
 
@@ -1821,6 +1817,8 @@ impl StrataEngine {
         let mut vec_ids: Vec<uuid::Uuid> = Vec::new();
         if !self.memory_index.is_empty() {
             if let Ok(vector) = self.embed_text(query).await {
+                // Fetch enough vector candidates to fill the fused pool (feeds the reranker) without
+                // the cost of scanning the whole scope — measured neutral on recall@5 beyond this.
                 if let Ok(hits) = self
                     .memory_index_search(&vector, scope, pool.max(k * 4))
                     .await
@@ -1843,11 +1841,7 @@ impl StrataEngine {
             } else {
                 scope.tenant_id.as_str()
             };
-            if let Ok(edges) = self
-                .memory_store
-                .list_edges(tenant, Self::MEMORY_GRAPH_EDGE_CAP)
-                .await
-            {
+            if let Ok(edges) = self.memory_store.list_edges(tenant, scan_cap).await {
                 let q_terms: std::collections::HashSet<String> =
                     tokenize(query).into_iter().collect();
                 let mut seen = std::collections::HashSet::new();

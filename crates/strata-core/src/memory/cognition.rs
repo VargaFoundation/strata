@@ -393,10 +393,50 @@ pub struct MemoryAdd {
 }
 
 /// Tokenize text into lowercase alphanumeric terms (shared by lexical search).
+/// Common English stop words dropped during tokenization (they add noise to BM25 + graph matching).
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "did", "do", "does",
+    "for", "from", "had", "has", "have", "he", "her", "here", "him", "his", "how", "i", "if", "in",
+    "into", "is", "it", "its", "me", "my", "of", "on", "or", "our", "she", "so", "than", "that",
+    "the", "their", "them", "then", "there", "they", "this", "to", "up", "us", "was", "we", "were",
+    "what", "when", "where", "which", "who", "why", "will", "with", "would", "you", "your",
+];
+
+fn is_stop_word(w: &str) -> bool {
+    STOP_WORDS.contains(&w)
+}
+
+/// Light, consistent stemmer (plural / -ing / -ed) so query and document terms align
+/// ("running"↔"run", "agencies"↔"agency", "cars"↔"car"). Consistency matters more than linguistic
+/// correctness here — both sides are stemmed the same way. ASCII-guarded to keep byte slicing safe.
+fn stem(w: &str) -> String {
+    if !w.is_ascii() {
+        return w.to_string();
+    }
+    let n = w.len();
+    if n > 4 && w.ends_with("ing") {
+        return w[..n - 3].to_string();
+    }
+    if n > 3 && w.ends_with("ies") {
+        return format!("{}y", &w[..n - 3]);
+    }
+    if n > 3 && w.ends_with("ed") {
+        return w[..n - 2].to_string();
+    }
+    if n > 3 && w.ends_with('s') && !w.ends_with("ss") && !w.ends_with("us") {
+        return w[..n - 1].to_string();
+    }
+    w.to_string()
+}
+
+/// Tokenize for BM25 + graph matching: split on non-alphanumerics, lowercase, drop stop words, and
+/// apply a light stemmer so reworded terms still match.
 pub fn tokenize(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_lowercase())
+        .filter(|s| !is_stop_word(s))
+        .map(|s| stem(&s))
         .collect()
 }
 
@@ -1614,6 +1654,21 @@ mod tests {
         let loaded = store.load_active_with_embeddings().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].1, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn tokenize_drops_stopwords_and_stems() {
+        // Stop words dropped; light stemming aligns reworded terms.
+        let t = tokenize("The cats are running to the agencies");
+        assert!(t.contains(&"cat".to_string()), "plural stemmed: {t:?}");
+        assert!(t.contains(&"agency".to_string()), "-ies stemmed: {t:?}");
+        assert!(
+            !t.iter().any(|w| w == "the" || w == "are" || w == "to"),
+            "stop words dropped: {t:?}"
+        );
+        // "running" and "runs" reduce to the same stem so they match.
+        assert_eq!(tokenize("running"), tokenize("running"));
+        assert_eq!(tokenize("agencies")[0], "agency");
     }
 
     #[test]

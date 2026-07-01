@@ -136,6 +136,13 @@ pub struct CognitionConfig {
     /// Enable query-time knowledge-graph expansion in `memory_search` (read-path only): also pull
     /// memories linked by a graph edge to an entity mentioned in the query, so multi-hop facts that
     /// lexical/vector retrieval miss can surface. Off by default.
+    /// Retrieval candidate width (read-path): active memories scanned for BM25 AND vector neighbors
+    /// fetched — symmetric so hybrid fusion isn't BM25-dominated. Also caps graph edges scanned.
+    #[serde(default = "default_retrieval_scan_cap")]
+    pub retrieval_scan_cap: usize,
+    /// Fused candidate pool kept after RRF (read-path) for the importance blend + rerank + top-k.
+    #[serde(default = "default_retrieval_pool")]
+    pub retrieval_pool: usize,
     #[serde(default)]
     pub graph_expansion: bool,
     /// Auto-populate knowledge-graph edges from each added memory via deterministic triple
@@ -158,6 +165,8 @@ impl Default for CognitionConfig {
             forget_threshold: 0.05,
             read_pool_size: default_read_pool_size(),
             max_memories_per_scope: 0,
+            retrieval_scan_cap: default_retrieval_scan_cap(),
+            retrieval_pool: default_retrieval_pool(),
             graph_expansion: false,
             auto_graph: false,
         }
@@ -178,6 +187,17 @@ pub struct EpisodicConfig {
 /// Default read-connection pool size for the DuckDB-backed stores.
 fn default_read_pool_size() -> usize {
     8
+}
+
+/// Retrieval candidate width: how many active memories BM25 scans AND how many vector neighbors are
+/// fetched (kept symmetric so hybrid fusion isn't dominated by one arm). Also the graph-edge cap.
+fn default_retrieval_scan_cap() -> usize {
+    2048
+}
+
+/// Fused candidates kept after RRF for the importance blend + rerank + top-k.
+fn default_retrieval_pool() -> usize {
+    50
 }
 
 impl Default for EpisodicConfig {
