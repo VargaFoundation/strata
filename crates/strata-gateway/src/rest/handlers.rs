@@ -840,7 +840,7 @@ pub async fn audit_query(
     };
 
     // Local entries first.
-    let mut entries = match log.query_since(&params.since) {
+    let mut entries = match log.query_since(&params.since, params.tenant.as_deref()) {
         Ok(e) => serde_json::to_value(e).unwrap_or_else(|_| serde_json::json!([])),
         Err(e) => {
             return api_error(
@@ -862,10 +862,14 @@ pub async fn audit_query(
                     continue;
                 }
                 let url = format!("{}/api/v1/admin/audit", base.trim_end_matches('/'));
+                let mut q: Vec<(&str, &str)> = vec![("since", params.since.as_str())];
+                if let Some(t) = params.tenant.as_deref() {
+                    q.push(("tenant", t));
+                }
                 let mut rb = s
                     .http
                     .get(url)
-                    .query(&[("since", params.since.as_str())])
+                    .query(&q)
                     .header("x-strata-shard-forwarded", "1");
                 if let Some(auth) = headers.get("authorization") {
                     rb = rb.header("authorization", auth.clone());

@@ -380,11 +380,16 @@ pub async fn require_auth(
     // A request reverse-proxied from another shard was already rate-limited on the origin pod
     // (it carries `x-strata-shard-forwarded`); don't double-count it on the destination shard.
     let is_shard_forwarded = req.headers().contains_key("x-strata-shard-forwarded");
+    // Bucket per (identity, tenant) so a noisy tenant on a shared key can't exhaust others' budget.
+    let rl_key = match &auth_ctx.tenant_id {
+        Some(t) => format!("{}\u{1f}{}", auth_ctx.identity, t),
+        None => auth_ctx.identity.clone(),
+    };
     if let Some(ref limiter) = state.rate_limiter {
         if is_shard_forwarded {
             // Skip acquisition; still authenticated above.
         } else {
-            let (allowed, remaining) = limiter.try_acquire(&auth_ctx.identity);
+            let (allowed, remaining) = limiter.try_acquire(&rl_key);
             if !allowed {
                 let mut resp = StatusCode::TOO_MANY_REQUESTS.into_response();
                 resp.headers_mut()
@@ -398,6 +403,8 @@ pub async fn require_auth(
 
     // Capture for audit logging
     let audit_identity = auth_ctx.identity.clone();
+    let audit_tenant = auth_ctx.tenant_id.clone();
+    let audit_ip = client_ip(&req);
     let audit_method = req.method().to_string();
     let audit_path = path.clone();
     let audit_log = state.audit_log.clone();
@@ -431,10 +438,27 @@ pub async fn require_auth(
             &audit_path,
             status,
             duration,
+            audit_tenant.as_deref(),
+            audit_ip.as_deref(),
         );
     }
 
     Ok(response)
+}
+
+/// Best-effort client IP from proxy headers (`X-Forwarded-For` first hop, else `X-Real-IP`).
+fn client_ip(req: &Request) -> Option<String> {
+    let h = req.headers();
+    h.get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            h.get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
 }
 
 /// Carried through request extensions to inject the rate-limit header into the response.

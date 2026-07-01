@@ -22,7 +22,17 @@ async fn main() -> anyhow::Result<()> {
 
     banner::print();
 
-    let server_config = config::load()?;
+    let mut server_config = config::load()?;
+
+    // Support the `_FILE` secret convention for the Raft shared secret (like other secrets), so it
+    // can be mounted from a Docker/K8s secret file instead of a plaintext env var. Only fills in
+    // when not already set via TOML or the direct `STRATA_CLUSTER__SECRET` env.
+    if server_config.cluster.secret.is_none() {
+        let s = strata_core::config::resolve_secret("STRATA_CLUSTER__SECRET");
+        if !s.is_empty() {
+            server_config.cluster.secret = Some(s);
+        }
+    }
 
     let engine = Arc::new(strata_core::StrataEngine::new(server_config.core).await?);
 

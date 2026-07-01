@@ -12,9 +12,22 @@ strata status                          # server health check
 strata query "SELECT ..."              # execute SQL
 strata ingest --source X --file Y      # bulk ingest
 strata export --entity ID              # GDPR data export
-strata backup --target s3://...        # trigger backup
-strata restore --from s3://...         # restore from backup
+strata search "text" -k 5              # semantic search
+strata shell                           # interactive SQL REPL
+strata schema                          # list sources / agent IDs
+
+# Admin (need --token / STRATA_TOKEN when the server has auth enabled)
+strata backup                          # server-side backup of all stores
+strata restore --path <dir>            # restore from a backup dir (DESTRUCTIVE)
+strata retention enforce|list|set --source X --days N
+strata audit [--since ISO] [--tenant T]
+strata tenant delete|export|import --tenant T [--file F]
+strata memory decay|consolidate
+strata reindex                         # reindex unembedded events
+strata rebalance --tenant T --target-shard N
 ```
+
+Global flags: `--url` (`STRATA_URL`), `--token` (`STRATA_TOKEN`, Bearer for admin routes).
 
 ## Internal Architecture
 

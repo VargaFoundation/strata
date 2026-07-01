@@ -67,6 +67,9 @@ pub enum Command {
         /// Only entries since this ISO-8601 timestamp
         #[arg(long)]
         since: Option<String>,
+        /// Only entries for this tenant
+        #[arg(long)]
+        tenant: Option<String>,
     },
     /// Tenant administration
     Tenant {
@@ -145,7 +148,9 @@ pub async fn execute(cmd: Command, url: &str) -> anyhow::Result<()> {
         Command::Backup => backup::run(url).await,
         Command::Restore { path } => restore::run(url, &path).await,
         Command::Retention { action } => admin::retention(url, action).await,
-        Command::Audit { since } => admin::audit(url, since.as_deref()).await,
+        Command::Audit { since, tenant } => {
+            admin::audit(url, since.as_deref(), tenant.as_deref()).await
+        }
         Command::Tenant { action } => admin::tenant(url, action).await,
         Command::Memory { action } => admin::memory(url, action).await,
         Command::Reindex => admin::reindex(url).await,

@@ -296,6 +296,9 @@ pub struct AuditQueryParams {
     /// ISO-8601 date/datetime to filter from (e.g. "2026-01-01").
     #[serde(default = "default_audit_since")]
     pub since: String,
+    /// Optional tenant filter — return only entries for this tenant.
+    #[serde(default)]
+    pub tenant: Option<String>,
 }
 
 fn default_audit_since() -> String {

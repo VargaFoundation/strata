@@ -28,11 +28,19 @@ pub async fn retention(url: &str, action: RetentionCmd) -> anyhow::Result<()> {
     show(&res)
 }
 
-pub async fn audit(url: &str, since: Option<&str>) -> anyhow::Result<()> {
+pub async fn audit(url: &str, since: Option<&str>, tenant: Option<&str>) -> anyhow::Result<()> {
     let c = StrataClient::new(url);
-    let path = match since {
-        Some(s) => format!("/api/v1/admin/audit?since={s}"),
-        None => "/api/v1/admin/audit".to_string(),
+    let mut qs = Vec::new();
+    if let Some(s) = since {
+        qs.push(format!("since={s}"));
+    }
+    if let Some(t) = tenant {
+        qs.push(format!("tenant={t}"));
+    }
+    let path = if qs.is_empty() {
+        "/api/v1/admin/audit".to_string()
+    } else {
+        format!("/api/v1/admin/audit?{}", qs.join("&"))
     };
     show(&c.get_json(&path).await?)
 }

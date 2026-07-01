@@ -14,8 +14,15 @@ cluster's integrity, (3) secrets (JWT/API keys, provider keys).
 
 - **Enable auth** (`gateway.auth_enabled = true`). Strata then requires a Bearer token on
   `/api/v1/*`, `/mcp`, and `/v1/chat/completions`. It supports **API keys**, **JWT (HS256)**, and
-  **OIDC (RS256/JWKS)**, with RBAC roles (admin/writer/reader/agent) and a per-key token-bucket
-  rate limiter (`gateway.rate_limit_per_key`).
+  **OIDC (RS256/JWKS)**, with RBAC roles (admin/writer/reader/agent).
+- **RBAC is enforced on both REST and gRPC.** A Reader token may read but not write on either
+  protocol (writes → `403` on REST, `PermissionDenied` on gRPC); `/admin/*` requires the Admin role.
+- **API keys can be scoped.** An `api_keys` entry may be `"<key>"` (Writer, no tenant — legacy),
+  `"<key>@<tenant>"`, or `"<key>@<tenant>:<role>"`. The client always presents just the secret
+  (the part before `@`); the tenant and role are bound to it server-side. Prefer JWT/OIDC for
+  per-user tenancy; scoped API keys suit fixed service identities.
+- **Rate limiting** is a token bucket keyed per **(identity, tenant)** (`gateway.rate_limit_per_key`),
+  so one noisy tenant on a shared key can't exhaust another's budget.
 - **Fail-closed:** with `auth_enabled = true` but no api_keys/jwt_secret/OIDC configured, the server
   **refuses to start** (it will not silently run unauthenticated). A `jwt_secret` shorter than 32
   bytes is rejected.
@@ -29,8 +36,11 @@ cluster's integrity, (3) secrets (JWT/API keys, provider keys).
 Every read path is tenant-scoped when the caller presents a tenant-scoped JWT: SQL queries are
 rewritten to a per-tenant view, `strata_state()`/`strata_search()` are namespaced/filtered, memory
 get/delete/history are 404-on-mismatch, semantic search is tenant-filtered, and the LLM proxy scopes
-memory-RAG by the authenticated tenant. gRPC RPCs are likewise tenant-scoped. Cross-tenant leak
-tests live in `tests/integration/tests/tenant_isolation.rs`.
+memory-RAG by the authenticated tenant. gRPC RPCs are likewise tenant-scoped **and RBAC-enforced**.
+Cross-tenant leak tests live in `tests/integration/tests/tenant_isolation.rs`.
+
+The **audit log** records each request's tenant and client IP (`X-Forwarded-For`/`X-Real-IP`);
+`GET /api/v1/admin/audit?tenant=<t>&since=<iso>` filters by tenant (and aggregates across shards).
 
 ## Secrets
 
@@ -51,7 +61,8 @@ only do that on a trusted network.
 - **Inter-node authentication:** set `STRATA_CLUSTER__SECRET` to require a shared Bearer token on
   every Raft RPC. A node without the token is rejected (constant-time check), so an unauthorized
   node cannot inject AppendEntries/Vote and corrupt the log/state machine. **Set this for any
-  multi-node deployment.**
+  multi-node deployment.** It supports the **`_FILE` convention** (`STRATA_CLUSTER__SECRET_FILE`),
+  so you can mount it from a Kubernetes/Docker secret instead of a plaintext env var.
 - **Encryption in transit:** the Raft gRPC transport is HTTP/2 cleartext. For confidentiality, run
   inter-node traffic over a **service mesh / mTLS** (Istio, Linkerd) or a private network. (App-level
   TLS is a future option; the shared secret above gives authentication today.)

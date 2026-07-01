@@ -51,6 +51,14 @@ The agent runtime **uses** the memory substrate: when `run_agent` drives an agen
 `memory_search` (via the built-in `search` tool) to recall context. So memory-retrieval quality is
 not a side quest — it directly determines how good the agents are.
 
+There are **three** components, not two. The middle box **is** `strata-core` — the engine that holds
+all business logic; the gateway above only *exposes* it, and the cluster below only *replicates* its
+writes. So `gateway → core → cluster`, with the core at the center (core knows nothing of either).
+
+On the wire: the **client gRPC API (:9432) is protobuf** (`google.protobuf.Struct`), **REST (:8432)
+is JSON**, and **only the inter-node Raft transport (:9433) uses MessagePack** (gRPC-enveloped). Don't
+conflate the client gRPC with the Raft transport — they're different ports and different encodings.
+
 ---
 
 ## 2. Where LLMs and embeddings fit (this trips people up)
