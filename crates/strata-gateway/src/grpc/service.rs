@@ -51,12 +51,22 @@ impl StrataGrpcService {
         }
     }
 
-    /// Resolve the caller's tenant from request metadata (`authorization: Bearer <jwt>`), and in
-    /// sharded mode reject tenants this shard doesn't own.
-    ///
-    /// - Auth configured: a missing/invalid token is rejected (`unauthenticated`).
-    /// - Auth disabled (no `AuthState`): returns `None` (no scoping, dev mode).
+    /// Resolve the caller's tenant for a **read** RPC. See [`Self::resolve`].
     async fn tenant_from<T>(&self, req: &Request<T>) -> Result<Option<String>, Status> {
+        self.resolve(req, false).await
+    }
+
+    /// Resolve the caller's tenant for a **mutating** RPC, additionally enforcing the RBAC role
+    /// (a Reader token is rejected on writes — the gRPC analogue of the REST middleware's method
+    /// check, which gRPC previously skipped).
+    async fn tenant_from_write<T>(&self, req: &Request<T>) -> Result<Option<String>, Status> {
+        self.resolve(req, true).await
+    }
+
+    /// Resolve the caller's tenant from `authorization: Bearer <jwt>`; when `write`, require a role
+    /// permitted to write; enforce shard ownership. Auth disabled → `None` (no scoping, dev mode);
+    /// a missing/invalid token is rejected.
+    async fn resolve<T>(&self, req: &Request<T>, write: bool) -> Result<Option<String>, Status> {
         let Some(state) = &self.auth else {
             return Ok(None);
         };
@@ -66,16 +76,21 @@ impl StrataGrpcService {
             .and_then(|v| v.to_str().ok())
             .and_then(|h| h.strip_prefix("Bearer "))
             .map(|s| s.to_string());
-        match token {
-            Some(t) => match state.authenticate(&t).await {
-                Some(ctx) => {
-                    self.check_shard(&ctx.tenant_id)?;
-                    Ok(ctx.tenant_id)
-                }
-                None => Err(Status::unauthenticated("invalid token")),
-            },
-            None => Err(Status::unauthenticated("missing bearer token")),
+        let ctx = match token {
+            Some(t) => state
+                .authenticate(&t)
+                .await
+                .ok_or_else(|| Status::unauthenticated("invalid token"))?,
+            None => return Err(Status::unauthenticated("missing bearer token")),
+        };
+        if write && !ctx.role.allows_method(&axum::http::Method::POST) {
+            return Err(Status::permission_denied(format!(
+                "role {:?} is not permitted to write",
+                ctx.role
+            )));
         }
+        self.check_shard(&ctx.tenant_id)?;
+        Ok(ctx.tenant_id)
     }
 }
 
@@ -108,7 +123,7 @@ impl Strata for StrataGrpcService {
         &self,
         request: Request<proto::IngestRequest>,
     ) -> Result<Response<proto::IngestResponse>, Status> {
-        let tenant = self.tenant_from(&request).await?;
+        let tenant = self.tenant_from_write(&request).await?;
         let req = request.into_inner();
         let events: Vec<strata_core::memory::episodic::Event> = req
             .events
@@ -224,7 +239,7 @@ impl Strata for StrataGrpcService {
         &self,
         request: Request<proto::SetStateRequest>,
     ) -> Result<Response<proto::SetStateResponse>, Status> {
-        let tenant = self.tenant_from(&request).await?;
+        let tenant = self.tenant_from_write(&request).await?;
         let req = request.into_inner();
         let value = req
             .value
@@ -261,7 +276,7 @@ impl Strata for StrataGrpcService {
         &self,
         request: Request<proto::AddMemoryRequest>,
     ) -> Result<Response<prost_types::Struct>, Status> {
-        let tenant = self.tenant_from(&request).await?;
+        let tenant = self.tenant_from_write(&request).await?;
         let req = request.into_inner();
         let input = strata_core::memory::cognition::MemoryInput {
             scope: scope_from(req.scope, &tenant),
@@ -329,7 +344,7 @@ impl Strata for StrataGrpcService {
         &self,
         request: Request<proto::DeleteMemoryRequest>,
     ) -> Result<Response<proto::DeleteMemoryResponse>, Status> {
-        let tenant = self.tenant_from(&request).await?;
+        let tenant = self.tenant_from_write(&request).await?;
         let req = request.into_inner();
         let id = uuid::Uuid::parse_str(&req.id)
             .map_err(|_| Status::invalid_argument("invalid memory id"))?;
@@ -356,7 +371,7 @@ impl Strata for StrataGrpcService {
         &self,
         request: Request<proto::StartSessionRequest>,
     ) -> Result<Response<proto::SessionResponse>, Status> {
-        let tenant = self.tenant_from(&request).await?;
+        let tenant = self.tenant_from_write(&request).await?;
         let req = request.into_inner();
         let parent = req.parent_session_id.as_deref();
         let res = match &tenant {
@@ -382,7 +397,7 @@ impl Strata for StrataGrpcService {
         &self,
         request: Request<proto::EndSessionRequest>,
     ) -> Result<Response<proto::SessionResponse>, Status> {
-        let tenant = self.tenant_from(&request).await?;
+        let tenant = self.tenant_from_write(&request).await?;
         let req = request.into_inner();
         let summary = req.summary.as_deref();
         match &tenant {
@@ -496,12 +511,16 @@ mod tests {
     const SECRET: &str = "test-secret-key-256-bits-long!!!";
 
     fn jwt(tenant: &str) -> String {
+        jwt_role(tenant, "writer")
+    }
+
+    fn jwt_role(tenant: &str, role: &str) -> String {
         let exp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
             + 3600;
-        let claims = serde_json::json!({"sub":"u","role":"writer","exp":exp,"tenant_id":tenant});
+        let claims = serde_json::json!({"sub":"u","role":role,"exp":exp,"tenant_id":tenant});
         jsonwebtoken::encode(
             &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
             &claims,
@@ -521,12 +540,47 @@ mod tests {
     }
 
     fn authed<T>(msg: T, tenant: &str) -> Request<T> {
+        authed_role(msg, tenant, "writer")
+    }
+
+    fn authed_role<T>(msg: T, tenant: &str, role: &str) -> Request<T> {
         let mut req = Request::new(msg);
         req.metadata_mut().insert(
             "authorization",
-            format!("Bearer {}", jwt(tenant)).parse().unwrap(),
+            format!("Bearer {}", jwt_role(tenant, role))
+                .parse()
+                .unwrap(),
         );
         req
+    }
+
+    #[tokio::test]
+    async fn grpc_reader_role_cannot_write() {
+        let service = svc().await;
+        // A Reader token → ingest (write) is rejected with PermissionDenied (RBAC now enforced on gRPC).
+        let err = service
+            .ingest(authed_role(
+                proto::IngestRequest {
+                    source: "s".into(),
+                    events: vec![],
+                },
+                "t",
+                "reader",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        // A Writer token → the same write succeeds.
+        assert!(service
+            .ingest(authed(
+                proto::IngestRequest {
+                    source: "s".into(),
+                    events: vec![],
+                },
+                "t",
+            ))
+            .await
+            .is_ok());
     }
 
     async fn svc_sharded(my_shard: usize) -> StrataGrpcService {
