@@ -398,7 +398,7 @@ impl StrataEngine {
         event_type: &str,
         agent_id: &str,
     ) -> Result<()> {
-        self.state_set(
+        self.state_set_via_driver(
             "__trigger",
             name,
             serde_json::json!({ "source": source, "event_type": event_type, "agent_id": agent_id }),
@@ -466,7 +466,7 @@ impl StrataEngine {
         tenant: &str,
         prompt: &str,
     ) -> Result<()> {
-        self.state_set(
+        self.state_set_via_driver(
             &format!("__approval:{run_id}"),
             "status",
             serde_json::json!({ "state": "pending", "prompt": prompt }),
@@ -498,7 +498,7 @@ impl StrataEngine {
         tenant: &str,
         approved: bool,
     ) -> Result<()> {
-        self.state_set(
+        self.state_set_via_driver(
             &format!("__approval:{run_id}"),
             "status",
             serde_json::json!({ "state": if approved { "approved" } else { "rejected" } }),
@@ -1227,6 +1227,23 @@ impl StrataEngine {
         value: serde_json::Value,
     ) -> Result<u64> {
         self.state.set(agent_id, key, value).await
+    }
+
+    /// Set state from the agent driver (e.g. a HITL approval key). In cluster mode this replicates
+    /// through Raft (so it survives failover); otherwise it writes locally. Distinct from
+    /// [`Self::state_set`], which stays local — the Raft apply path calls `state_set` directly, so
+    /// routing that through the replicator would loop.
+    pub async fn state_set_via_driver(
+        &self,
+        agent_id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<()> {
+        let replicator = self.run_replicator.read().clone();
+        match replicator {
+            Some(r) => r.replicate_state_set(agent_id, key, value).await,
+            None => self.state_set(agent_id, key, value).await.map(|_| ()),
+        }
     }
 
     /// Delete agent state.
@@ -4105,6 +4122,14 @@ mod tests {
                 _event: crate::memory::episodic::Event,
             ) -> crate::Result<()> {
                 self.steps.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn replicate_state_set(
+                &self,
+                _agent_id: &str,
+                _key: &str,
+                _value: serde_json::Value,
+            ) -> crate::Result<()> {
                 Ok(())
             }
         }
