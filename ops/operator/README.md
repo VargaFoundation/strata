@@ -17,15 +17,19 @@ so each tenant lives on its consistent-hash-owning shard (by calling each shard'
   (server-side apply); scale-**down** deletes the drained shard StatefulSets; tenant **rebalance
   moves** are driven via each shard's `POST /api/v1/admin/rebalance`. The order is safe — up:
   create-then-move; down: **drain-then-delete** (never lose data).
-- **What still needs a cluster:** the actual runtime behavior of the control loop (watches, patches,
-  pod rollout) — run it against kind/k3d/minikube or a real cluster to exercise end-to-end.
+- **Verified end-to-end on a real cluster (Docker Desktop, k8s 1.34):** applying a `StrataShardPlan`
+  with `shards: 2` made the controller clone `<release>-shard-0` into `<release>-shard-1` (with
+  `STRATA_CLUSTER__SHARD_INDEX=1`) within ~1s; patching back to `shards: 1` deleted the drained
+  StatefulSet. Only pod rollout timing depends on your cluster/images.
 
 ## Build / run
 
 ```bash
 cd ops/operator
 cargo build --release
-# In-cluster (uses the pod's ServiceAccount) or with a local kubeconfig:
+# Install the CRD (the operator can emit it):
+./target/release/strata-operator --crd | kubectl apply -f -
+# Run the controller — in-cluster (pod ServiceAccount) or with a local kubeconfig:
 ./target/release/strata-operator
 ```
 

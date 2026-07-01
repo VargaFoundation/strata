@@ -4,11 +4,13 @@
 //! `spec.shards`, and after scaling, drives tenant data movements so each tenant lives on its
 //! consistent-hash-owning shard.
 //!
-//! Status: compiles + unit-tested (the decision logic). The live apply loop — create the new shard
-//! StatefulSets (scale-up) / delete the drained ones (scale-down), ordered so no data is lost, and
-//! drive the tenant rebalance moves — is implemented; its *runtime* behavior needs a real Kubernetes
-//! cluster to exercise. The decision logic mirrors the workspace's unit-tested
-//! `strata_cluster::{reconcile_plan, scale_plan}`. Build/run where a cluster is available.
+//! Status: compiles + unit-tested (decision logic) AND the live apply loop has been **exercised
+//! end-to-end on a real Kubernetes cluster** (Docker Desktop / k8s 1.34): applying a `StrataShardPlan`
+//! with `shards: 2` cloned `<release>-shard-0` into `<release>-shard-1` (with `STRATA_CLUSTER__SHARD_INDEX=1`);
+//! patching back to `shards: 1` deleted the drained StatefulSet. Order is safe (up: create-then-move;
+//! down: drain-then-delete). The decision logic mirrors the workspace's unit-tested
+//! `strata_cluster::{reconcile_plan, scale_plan}`. Run `strata-operator --crd | kubectl apply -f -` to
+//! install the CRD, then run the controller.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -288,6 +290,15 @@ fn set_shard_index_env(s: &mut StatefulSet, shard: usize) {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
+
+    // `strata-operator --crd` prints the CustomResourceDefinition (JSON, which `kubectl apply -f -`
+    // accepts) so you can install the CRD before running the controller.
+    if std::env::args().any(|a| a == "--crd") {
+        use kube::CustomResourceExt;
+        println!("{}", serde_json::to_string_pretty(&StrataShardPlan::crd())?);
+        return Ok(());
+    }
+
     let client = Client::try_default().await?;
     let plans: Api<StrataShardPlan> = Api::all(client.clone());
     let ctx = Arc::new(Ctx {
