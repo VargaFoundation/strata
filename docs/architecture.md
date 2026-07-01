@@ -1,245 +1,290 @@
 # Architecture
 
-This document describes Strata's internal architecture, crate structure, data model, and key design decisions.
+Strata is an **open-source agentic memory platform**: a single Rust binary that gives AI agents a
+durable, HA memory *and* runs the agents on top of it. This document is the detailed map — the
+pillars, where LLMs and embeddings actually fit, the crate/module layout, the memory-retrieval
+pipeline, the agent runtime, the clustering layer, and the request flows.
 
-> **Current status**: All three memory stores are production-ready with persistence, connection pooling,
-> and Prometheus metrics. The gateway serves REST API (with auth middleware), PostgreSQL wire protocol,
-> MCP JSON-RPC, LLM proxy, and gRPC. Embedding providers (Ollama, OpenAI) are wired into the ingest
-> pipeline with automatic batching. Raft-based clustering is implemented with leader forwarding and
-> follower reads. Kubernetes deployment is supported via Helm chart.
+> One line: **"the memory engine that also runs — and remembers — your agents."**
 
-## System Overview
+---
 
-Strata is a **context lake** — a unified data layer for AI agents that combines three types of memory in a single Rust binary:
+## 1. The three pillars
+
+Strata is not one thing; it's three layers stacked, in one process:
 
 ```
-                         ┌──────────────────────────────────────────┐
-                         │              strata-server                │
-                         │  (config, signals, Prometheus recorder)   │
-                         └──────────┬───────────────────────────────┘
-                                    │
-              ┌─────────────────────┼─────────────────────┐
-              │                     │                     │
-   ┌──────────▼──────────┐ ┌───────▼───────┐ ┌───────────▼──────────┐
-   │   strata-gateway     │ │strata-cluster │ │  Raft RPC endpoints  │
-   │                      │ │               │ │  /raft/append        │
-   │ ┌──────┐ ┌────┐     │ │ Coordinator   │ │  /raft/vote          │
-   │ │PGWire│ │REST│     │ │ MemStore      │ │  /raft/snapshot      │
-   │ └──┬───┘ └─┬──┘     │ │ NetworkClient │ │  /cluster/status     │
-   │    │       │         │ └───────┬───────┘ └──────────────────────┘
-   │ ┌──┴───────┴──┐      │         │
-   │ │Auth / Leader │      │         │
-   │ │  Forwarding  │      │         │
-   │ └──────┬──────┘      │         │
-   └────────┼─────────────┘         │
-            │                       │
-   ┌────────▼───────────────────────▼───────────────────┐
-   │                    strata-core                      │
-   │                                                     │
-   │  ┌──────────────┐  ┌─────────────────────────────┐ │
-   │  │ Query Engine │  │    Ingest Pipeline           │ │
-   │  │ (SQL filter, │  │ events → episodic → embed →  │ │
-   │  │  max_rows,   │  │          semantic (batched)   │ │
-   │  │  timeout)    │  └──────────────┬───────────────┘ │
-   │  └──────┬───────┘                 │                  │
-   │         │                         │                  │
-   │  ┌──────▼─────────────────────────▼───────────────┐ │
-   │  │              Memory Stores                      │ │
-   │  │                                                  │ │
-   │  │ ┌──────────────┐ ┌──────────┐ ┌──────────────┐ │ │
-   │  │ │  Episodic    │ │ Semantic │ │    State     │ │ │
-   │  │ │  DuckDB      │ │ USearch  │ │  SQLite +   │ │ │
-   │  │ │  file-backed │ │ HNSW     │ │  DashMap    │ │ │
-   │  │ │  4-conn pool │ │ save/load│ │  hot cache  │ │ │
-   │  │ └──────────────┘ └──────────┘ └──────────────┘ │ │
-   │  └────────────────────────────────────────────────┘ │
-   │                                                      │
-   │  ┌──────────────────────────────────────────────────┐│
-   │  │            Storage Backends                       ││
-   │  │   Local FS   │   S3/MinIO   │   Tiering          ││
-   │  └──────────────────────────────────────────────────┘│
-   └──────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │  PROTOCOLS  (strata-gateway)                                                    │
+ │  REST/MCP/LLM-proxy :8432   ·   PostgreSQL wire :5432   ·   gRPC :9432          │
+ │  auth (API key / JWT / OIDC) · RBAC · rate-limit · audit · multi-tenant         │
+ └───────────────┬────────────────────────────────────────────────────────────────┘
+                 │  every request → StrataEngine (tenant-scoped)
+ ┌───────────────▼────────────────────────────────────────────────────────────────┐
+ │  ENGINE  (strata-core :: StrataEngine)                                          │
+ │                                                                                  │
+ │  ┌──────────────────────────────┐        ┌──────────────────────────────────┐   │
+ │  │  AGENT RUNTIME               │ uses → │  MEMORY SUBSTRATE                │   │
+ │  │  (the "brain")               │        │  (the "storage + recall")       │   │
+ │  │                              │        │                                  │   │
+ │  │  · RunStore (durable runs)   │        │  · Episodic  (DuckDB, SQL)       │   │
+ │  │  · run_agent driver (LLM↔    │        │  · Semantic  (USearch HNSW +     │   │
+ │  │      tool loop)              │        │      embedding provider)         │   │
+ │  │  · tool-gateway (downstream  │        │  · State     (SQLite + DashMap)  │   │
+ │  │      MCP)                    │        │  · Cognition (bi-temporal        │   │
+ │  │  · HITL approvals            │        │      memories + knowledge graph  │   │
+ │  │  · DAG workflows + subagents │        │      + hybrid retrieval + rerank)│   │
+ │  │  · RunDispatcher (auto-      │        │                                  │   │
+ │  │      resume after failover)  │        │  LLM (opt-in): fact extraction   │   │
+ │  │  · event triggers            │        │  Embedding: vectorize for recall │   │
+ │  └──────────────────────────────┘        └──────────────────────────────────┘   │
+ └───────────────┬────────────────────────────────────────────────────────────────┘
+                 │  writes proposed through consensus (cluster mode)
+ ┌───────────────▼────────────────────────────────────────────────────────────────┐
+ │  CLUSTER / HA  (strata-cluster)                                                 │
+ │  Raft (openraft) · gRPC+MessagePack transport :9433 · leader-forward ·           │
+ │  sharding (N Raft groups) · snapshots · k8s operator                            │
+ └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Crate Structure
+The agent runtime **uses** the memory substrate: when `run_agent` drives an agent, its loop calls
+`memory_search` (via the built-in `search` tool) to recall context. So memory-retrieval quality is
+not a side quest — it directly determines how good the agents are.
 
-Strata is organized as a Cargo workspace with five crates:
+---
 
-### `strata-core`
+## 2. Where LLMs and embeddings fit (this trips people up)
 
-The engine. Contains all business logic with zero knowledge of transport protocols.
+There are several models in play with **very different roles** — some are core product, one is
+eval-only:
 
+| Model role | What it does | Product or test? |
+|------------|--------------|------------------|
+| **Embedding provider** (`nomic-embed-text`, OpenAI `text-embedding-3`) | vectorize text so semantic recall works (`memory_search`, ingest) | **Product — permanent.** Semantic memory can't exist without it. |
+| **Agent-loop LLM** (any completion provider) | the model the agent itself reasons with in `run_agent` | **Product — the runtime.** |
+| **Extraction LLM** (`extraction=llm`) | at ingest, distill raw text into **atomic facts** before storing | **Product — optional** (a memory-quality lever). |
+| **Reranker** (LLM judge *or* local ONNX cross-encoder) | re-score the top candidates from hybrid search | **Product — optional** (read-path). |
+| **Bench answerer + judge** (`ops/bench`, via the Claude CLI) | simulate an agent asking questions + grade answers | **Eval-only.** Never in the product path. |
+
+Completion providers are pluggable (`crates/strata-core/src/llm/`): **Ollama**, **OpenAI**,
+**Anthropic** (HTTP API), and **Claude via the logged-in CLI** (`claude -p`, no API key). Embedding
+providers: **Ollama**, **OpenAI**.
+
+---
+
+## 3. Crate structure
+
+Cargo workspace; dependencies flow **downward** (`core ← cluster ← gateway ← server`). `strata-core`
+knows nothing of protocols or Raft.
+
+```
+strata-server (bin)   ── wiring: config → engine → coordinator → gateway → RunDispatcher → signals
+  ├── strata-gateway  → strata-core, strata-cluster
+  ├── strata-cluster  → strata-core
+  └── strata-core
+strata-cli (bin)      → strata-core (shared types; talks to the server over HTTP)
+```
+
+### `strata-core` — the engine (business logic, zero protocol/cluster knowledge)
 | Module | Purpose |
 |--------|---------|
-| `memory::episodic` | DuckDB-backed event store (file-backed, connection pool, batch transactions, typed schema) |
-| `memory::semantic` | USearch HNSW vector index + lightweight metadata (no vector duplication), persistent save/load |
-| `memory::state` | Transactional KV store with MVCC (SQLite + DashMap hot cache, race-safe) |
-| `query::planner` | Routes SQL to DuckDB, vector search, or hybrid |
-| `query::executor` | Executes query plans against memory stores |
-| `query::functions` | Custom SQL UDFs: `embed()`, `cosine_similarity()`, `strata_search()` |
-| `storage` | `StorageBackend` trait + local/S3 implementations |
-| `storage::tiering` | Hot/warm/cold data movement between tiers |
-| `ingest::pipeline` | Event ingestion → episodic → auto-embed (batched) → semantic index |
-| `embedding` | `EmbeddingProvider` trait + Ollama/OpenAI implementations (auto-wired from config) |
-| `materialized` | Materialized views over DuckDB (SQL-injection-safe) |
+| `memory::episodic` | DuckDB event store — SQL, connection pool, batch txns, `session_id`/`tenant_id`, TIMESTAMPTZ/JSON |
+| `memory::semantic` | USearch HNSW vector index + `EntryMetadata` (no vector duplication), save/load |
+| `memory::state` | SQLite + DashMap KV, CAS, TTL, watchers |
+| `memory::cognition` | **bi-temporal `memories`** (valid_from/valid_to, supersession), **knowledge graph edges**, **hybrid retrieval** (BM25 + vector via RRF), `tokenize` (stop-words + light stemming) |
+| `memory::migrations` | versioned schema migration framework |
+| `embedding` | `EmbeddingProvider` trait + Ollama/OpenAI |
+| `llm` | `CompletionProvider` trait + Ollama / OpenAI / Anthropic / **Claude-CLI** |
+| `rerank` | `Reranker` trait + `LlmReranker` + `CrossEncoderReranker` (feature `rerank-local`, ONNX bge) |
+| `runtime` | **agentic substrate**: `RunStore` (durable runs), `ToolExecutor` + `RunReplicator` traits |
+| `ingest::pipeline` | validate → episodic → auto-embed (batched) → semantic index |
+| `storage` (+ `tiering`) | `StorageBackend` (local FS / S3-MinIO) + hot/warm/cold tiering |
+| `engine` | `StrataEngine` — wires everything; `memory_search`, `run_agent`, `run_workflow`, `run_dispatch_once`, … |
 
-### `strata-gateway`
+### `strata-gateway` — protocols
+`rest` (axum), `pg_wire` (pgwire, tenant-auth: password = API key/JWT), `grpc` (tonic, shard-aware),
+`mcp` (Streamable HTTP), `llm_proxy` (OpenAI-compatible + auto-RAG), `auth` (API key / JWT HS256 /
+OIDC RS256, RBAC, rate-limit, audit), `cluster` (`leader_forward`, `shard_route`, `raft_routes`).
 
-Protocol layer. Translates external protocols into calls on `strata-core::StrataEngine`.
+### `strata-cluster` — distribution
+`raft::{types,store,network,server,tls}` (openraft 0.9; **gRPC + MessagePack** transport),
+`coordinator` (`ClusterCoordinator`, `client_write`, `CoordinatorRunReplicator`), `shard`
+(`ShardRouter`, `reconcile_plan`, `scale_plan`, `ShardedCluster`), `replication::snapshot`.
 
-| Module | Purpose |
-|--------|---------|
-| `pg_wire` | PostgreSQL wire protocol via `pgwire` crate (connection-limited via Semaphore) |
-| `rest` | REST API via axum (`/health`, `/api/v1/*`, `/metrics`) with timeout and CORS |
-| `grpc` | gRPC server via tonic |
-| `mcp` | MCP server — Streamable HTTP transport, tools, resources, prompts |
-| `llm_proxy` | OpenAI-compatible `/v1/chat/completions` with auto-RAG |
-| `auth` | API key middleware (Bearer token), JWT types, RBAC roles |
-| `cluster` | Raft RPC endpoints (`/raft/*`), leader-forwarding middleware, `/cluster/status` |
+### `strata-server` / `strata-cli`
+Thin binary wiring / HTTP admin CLI. The **k8s operator** lives standalone in `ops/operator/`
+(outside the workspace).
 
-### `strata-cluster`
+---
 
-Distributed mode. Implements Raft consensus via `openraft` v0.9.
+## 4. Memory substrate (the "recall" half)
 
-| Module | Purpose |
-|--------|---------|
-| `raft::types` | `TypeConfig` (AppRequest, AppResponse, NodeInfo), MessagePack serialization |
-| `raft::store` | `MemStore` — full `RaftStorage` impl, applies entries to StrataEngine |
-| `raft::network` | `NetworkClient` + `NetworkFactory` — HTTP JSON transport between nodes |
-| `coordinator` | `ClusterCoordinator` — Raft lifecycle, `client_write()`, leader detection, shutdown |
-| `replication` | WAL segment shipping, snapshot transfer (planned) |
+Four stores, one engine:
 
-### `strata-cli`
+| Store | Backend | Holds | Key ops |
+|-------|---------|-------|---------|
+| **Episodic** | DuckDB | events (what happened) — `source`, `event_type`, `payload`, `ts`, `session_id`, `tenant_id` | SQL query, batch ingest |
+| **Semantic** | USearch HNSW | vectors for similarity search | k-NN by cosine |
+| **State** | SQLite + DashMap | live key-value per agent | get/set, CAS, watch, TTL |
+| **Cognition** | DuckDB (`memories`) + USearch | **bi-temporal facts** + **knowledge-graph edges** | `memory_add/search/history/as_of`, `memory_link` |
 
-CLI admin tool. Communicates with the server via HTTP. Binary name: `strata`.
+**Cognition** is the differentiator (Mem0/Zep-class): deterministic contradiction resolution (a newer
+fact about the same `subject` supersedes the old one, kept for history), dedup, importance + decay,
+`as_of` time-travel, and a bi-temporal knowledge graph.
 
-### `strata-server`
+### 4.1 The retrieval pipeline (`memory_search`)
 
-Main binary. Thin wiring layer: config → engine → cluster coordinator → gateway → signal handling.
-
-## Dependency Graph
-
-```
-strata-server (binary)
-  ├── strata-core
-  ├── strata-gateway → strata-core, strata-cluster
-  └── strata-cluster → strata-core
-
-strata-cli (binary)
-  └── strata-core (shared types)
-```
-
-**Rule**: dependencies flow downward. `strata-core` has zero knowledge of the protocol or cluster layers.
-
-## Data Model
-
-### Three Memory Types
-
-**Episodic Memory** — What happened.
-- Append-only event store backed by DuckDB (file-backed or in-memory)
-- Each event has: `id` (UUID), `source`, `event_type`, `payload` (JSON native), `timestamp` (TIMESTAMPTZ native)
-- Connection pool with 4 reader connections (via `try_clone`) for concurrent queries
-- Batch transactions (BEGIN/COMMIT/ROLLBACK) for high-throughput ingest
-- SQL injection protection via `sqlparser` (only SELECT queries allowed)
-- Configurable max_rows pagination and query timeout
-
-**Semantic Memory** — What it means.
-- Vector embeddings stored in a USearch HNSW index (persistent save/load)
-- Each entry has: `id`, `content`, `embedding` (f32 vector), `metadata` (JSON)
-- Memory-efficient: `EntryMetadata` in DashMap stores only content+metadata (no vector duplication)
-- Supports k-nearest-neighbor search with cosine similarity
-- Auto-populated from episodic events via the batched ingestion pipeline
-
-**State Memory** — Where things stand.
-- Transactional key-value store with MVCC (multi-version concurrency control)
-- Each entry has: `agent_id`, `key`, `value` (JSON), `version`
-- Supports compare-and-swap (CAS) for lock-free coordination
-- Race-safe hot cache via DashMap (`or_insert_with`), persistent storage via SQLite
-
-### Ingestion Pipeline
+This is the read path an agent hits on every recall. Hybrid, read-only (no Raft/determinism impact):
 
 ```
-Events (HTTP/Webhook/gRPC/MCP)
-    │
-    ▼
-IngestPipeline
-    │
-    ├── 1. Append to EpisodicStore (batch transaction)
-    │
-    ├── 2. If embedding provider configured:
-    │      ├── Format text: "[source] event_type: payload"
-    │      ├── Batch embed via provider (chunks of batch_size)
-    │      └── Upsert to SemanticStore
-    │
-    └── 3. Return count (embedding failures are non-fatal)
+query ──► tokenize (lowercase · drop stop-words · light stemming: run(ning)→run, agenc(ies)→agency)
+       │
+       ├─ (A) LEXICAL  BM25 over the candidate universe          [list_active(scope, retrieval_scan_cap=2048)]
+       ├─ (B) VECTOR   embed(query) → HNSW k-NN                    [fetch ~retrieval_pool candidates]
+       └─ (C) GRAPH    query entities → edges → linked memories    [optional: cognition.graph_expansion]
+                          │
+                          ▼
+        RRF FUSION  score = Σ 1/(60 + rank_i)  over {A,B,C}       [keep top retrieval_pool=50]
+                          │
+                          ▼
+        BLEND  score ·= (1 + 0.3·importance + 0.2·recency)        [recency = 0.5^(age_days/30)]
+                          │
+                          ▼
+        RERANK (optional)  LlmReranker  OR  CrossEncoderReranker  [re-score the pool; ms with ONNX]
+                          │
+                          ▼
+        top-k  ──►  MemoryHit[]  (returned to the agent / caller)
 ```
 
-## Cluster Architecture
+Widths are **configurable** (`cognition.retrieval_scan_cap`, `retrieval_pool`) — read-path knobs for
+tuning/A-B. *Measured note:* widening the pool alone is neutral on recall@5; the levers that move it
+are `extraction=llm` (atomic facts) and reranking. See `docs/benchmarks-locomo.md` and `ops/bench/`.
 
-Strata supports multi-node deployment via Raft consensus (openraft v0.9).
+### 4.2 Ingest
 
 ```
-              ┌──────────────────┐
-              │  Load Balancer   │
-              └──────┬───────────┘
-       ┌─────────────┼─────────────┐
-  ┌────┴────┐  ┌─────┴───┐  ┌─────┴───┐
-  │ Node 1  │  │ Node 2  │  │ Node 3  │
-  │ Leader  │◄─│Follower │◄─│Follower │
-  │   RW    │  │ RO read │  │ RO read │
-  └────┬────┘  └────┬────┘  └────┬────┘
-       └────────────┼────────────┘
-              Raft consensus
-              (HTTP JSON RPC)
+events (REST/webhook/gRPC/MCP)
+   → validate (SELECT-only SQL guard where relevant)
+   → append to Episodic (batch txn, tagged _session_id/_tenant_id)
+   → if embedding provider: chunk text → batch embed → upsert Semantic   (failures non-fatal)
 ```
 
-**Write path**: Client → any node → if not leader, 307 redirect → leader → Raft commit → apply to StrataEngine → replicate to followers.
+`memory_add` (cognition) additionally runs dedup / supersession / optional auto-graph edge extraction
+— on the leader it materializes the rows, then replicates them (see §6).
 
-**Read path**: Client → any node → read from local engine (eventual consistency). GET requests are always served locally for low-latency reads.
+---
 
-**Raft RPCs**: AppendEntries, Vote, InstallSnapshot — all via HTTP POST to `/raft/*` endpoints on each node.
+## 5. Agent runtime (the "brain" half)
 
-## Concurrency Model
+Built on the memory substrate; this is the P2 platform.
 
-Strata runs on the Tokio multi-threaded runtime. Key concurrency patterns:
+| Component | What it is | Where |
+|-----------|-----------|-------|
+| **RunStore** | durable ledger of runs — status (pending→running→waiting_approval→succeeded/failed/cancelled), input/result/cursor, `parent_run_id` (subagent tree). SQLite. | `runtime::store` |
+| **Steps** | every LLM/tool/HITL step = an **episodic event** tagged `session_id = run_id` → the trace is `GET /runs/{id}/trace`, and analytics are plain SQL | `engine::run_log_step` |
+| **Agent driver** | `run_agent` / `drive_agent_loop`: LLM↔tool loop with built-in tools `search`, `remember`, downstream `TOOL call <srv> <tool>`, and `TOOL approve` (HITL pause). Re-entrant: resumes from the journaled trace. | `engine.rs` |
+| **Tool-gateway** | register/list/call **downstream MCP servers**; injected into the loop via `ToolExecutor` so agents call external tools (governed by auth/RBAC/audit) | `rest::tool_gateway` + `runtime::tools` |
+| **HITL** | `run_request_approval`/`run_resolve_approval`; `WaitingApproval` + a state key; `run_resume` continues after approval | `engine.rs` |
+| **Workflows** | `run_workflow`: DAG of sub-agents (Kahn topo-sort, `parent_run_id`) | `engine.rs` |
+| **RunDispatcher** | leader-gated background loop that **auto-resumes runs orphaned by a crash/failover** (`run_dispatch_once`) | `strata-server/main.rs` |
+| **Triggers** | `trigger_register` + `fire_triggers`; the webhook handler fires matching triggers → starts runs | `engine.rs` + `rest` |
+| **Idempotency** | tool calls carry `_idempotency_key = run_id:tool:<n>` (stable across resume) | `drive_agent_loop` |
 
-- **DuckDB**: 1 write connection + 4 read connections (via `try_clone`), `parking_lot::Mutex` per connection
-- **USearch**: `parking_lot::Mutex` around the HNSW index
-- **SQLite**: `parking_lot::Mutex` around the connection + `DashMap` lock-free hot cache
-- **Engine queries**: Wrapped in `tokio::task::spawn_blocking` to avoid starving async workers
-- **PG wire**: `tokio::sync::Semaphore` limits concurrent connections (default 256)
-- **HTTP**: `tower_http::TimeoutLayer` enforces 30s request timeout
+Metrics: `strata_runs_created_total`, `strata_runs_completed_total{status}`, `strata_run_steps_total{type}`.
 
-## Security Model
+---
 
-Authentication is handled at the gateway layer:
-- **API Keys**: Bearer token in `Authorization` header, validated against configured `gateway.api_keys`
-- **JWT**: Stateless token-based for user sessions (types defined, validation pending)
-- **RBAC**: Four roles — Admin, Writer, Reader, Agent
+## 6. Cluster / HA (`strata-cluster`)
 
-Auth middleware is applied to `/api/v1/*` routes. Health, metrics, and Raft RPC endpoints are unauthenticated.
+Multi-node via Raft (openraft 0.9). **Every mutation is proposed as an `AppRequest` through the log**
+and applied deterministically on every node, so committed writes survive leader failover.
 
-## Observability
+```
+        client (write)
+           │  (follower → 307 leader-forward)
+           ▼
+   ┌─────────────┐  Raft: AppendEntries / Vote / InstallSnapshot
+   │  LEADER      │◄──────── gRPC (tonic, HTTP/2) + MessagePack ────────►┐
+   │ client_write │                                                       │
+   └──────┬───────┘                                                       │
+          │ commit → apply on ALL nodes (deterministic)                   │
+   ┌──────▼───────┐            ┌──────────────┐            ┌──────────────┐
+   │  apply →      │            │  Follower 1  │            │  Follower 2  │
+   │  StrataEngine │            │  apply →eng. │            │  apply →eng. │
+   └──────────────┘            └──────────────┘            └──────────────┘
+```
 
-- **Structured logging**: `tracing` crate with env-filter (`RUST_LOG=info,strata=debug`)
-- **Prometheus metrics**: counters (events_ingested_total, queries_total, rest_requests_total), histograms (append_duration_seconds, query_duration_seconds, rest_request_duration_seconds)
-- **Health endpoint**: `GET /health` returns `{"status":"ok","version":"0.1.0"}`
-- **Cluster status**: `GET /cluster/status` returns Raft metrics (node_id, state, leader, term, log_index)
-- **Metrics endpoint**: `GET /metrics` returns Prometheus text format
+**`AppRequest` variants** (all carry *materialized* values → deterministic apply): `Ingest`,
+`StateSet`/`StateDelete`, `SemanticUpsert`/`Delete`, `MemoryUpsert`/`MemoryExpire`, `GraphAddEdge`/
+`GraphSupersede`, **`RunCreate`/`RunUpdate`**. The agent driver's run/step/state writes replicate via
+the injected **`RunReplicator`** (`CoordinatorRunReplicator` → `client_write`), so a run started via
+`/agents/run` — and its full trace — survive failover; the **RunDispatcher** then resumes it.
 
-## Key Technology Choices
+**Determinism invariant (the core design constraint):** anything non-deterministic (uuid, `now()`,
+LLM calls, embeddings) must run **once on the leader** and be baked into the `AppRequest`; `apply`
+must be a pure function of the request. This is why memory cognition uses a compute-then-replicate
+(`memory_plan` → `client_write` → `apply_rows`) split.
 
-| Component | Technology | Rationale |
-|-----------|-----------|-----------|
-| Language | Rust | Performance, safety, single binary, no runtime |
-| Analytics SQL | DuckDB (embedded) | Columnar, zero-config, native JSON/TIMESTAMPTZ types |
-| Vector Index | USearch | HNSW, compact, persistent save/load, Rust bindings |
-| State Storage | SQLite (via rusqlite) | ACID, embedded, battle-tested |
-| Object Storage | S3/MinIO (via aws-sdk-s3) | Standard, tiered, cost-effective |
-| Consensus | openraft v0.9 | Raft in Rust, production-grade |
-| SQL Validation | sqlparser | Prevents SQL injection, SELECT-only whitelist |
-| PG Protocol | pgwire | PostgreSQL wire protocol in Rust |
-| HTTP Framework | axum | Async, tower-compatible, high performance |
-| gRPC | tonic | HTTP/2, codegen from proto |
-| Config | TOML + env vars | Convention over configuration |
-| Metrics | metrics + Prometheus exporter | Industry standard observability |
+**Serialization gotcha (learned the hard way):** the transport is positional MessagePack, so structs
+reachable from `AppRequest` must **not** use `#[serde(skip_serializing_if)]` (it shifts the array and
+misaligns the decoder). Regression-tested in `raft::types`.
+
+**Sharding:** `cluster.shards = N` runs N independent Raft groups; `ShardRouter` consistent-hashes a
+tenant → shard; the gateway routes each request to the owning shard (HTTP reverse-proxy, gRPC/PG
+reject-with-owner-hint). `scale_plan` computes the safe up/down sequence (create-then-move /
+drain-then-delete) which the **k8s operator** (`ops/operator/`) applies.
+
+**Snapshots** pack all four stores + the runs table as the backstop.
+
+---
+
+## 7. Protocols & auth (`strata-gateway`)
+
+| Protocol | Port | Notes |
+|----------|------|-------|
+| REST + MCP + LLM-proxy + `/metrics` | 8432 | axum; auth on `/api/v1/*`; MCP Streamable HTTP; `/v1/chat/completions` auto-RAG |
+| PostgreSQL wire | 5432 | pgwire; **password = API key / JWT** → tenant-scoped queries; shard-aware |
+| gRPC | 9432 | tonic; typed `protobuf.Struct`; tenant-scoped; shard-aware |
+| Raft (inter-node) | 9433 | gRPC + MessagePack; shared-secret + optional mTLS |
+
+Auth: API key (no tenant), JWT HS256 / OIDC RS256 (carry `tenant_id`), RBAC (admin/writer/reader/agent),
+per-key rate-limit, durable audit log, row-level tenant isolation on **every** read path.
+
+Middleware order in cluster mode: `auth → shard-route → leader-forward`.
+
+---
+
+## 8. Request flows
+
+**Agent run** (`POST /api/v1/agents/run`): auth → (shard-route) → leader-forward → `run_agent` on the
+leader → `run_create` (replicated) → loop { LLM → parse → `search`/`remember`/`TOOL call`/`approve` →
+`run_log_step` (replicated) } → `run_update(succeeded)` (replicated). Crash mid-loop → the new
+leader's RunDispatcher resumes from the trace.
+
+**Memory search** (agent tool or `POST /memories/search`): §4.1 — read served locally on any node.
+
+**HA write** (ingest/state/memory): follower → 307 → leader → `client_write(AppRequest)` → commit →
+apply on all nodes.
+
+---
+
+## 9. Key technology choices
+
+| Concern | Tech | Why |
+|---------|------|-----|
+| Language | Rust | single binary, no runtime, safety |
+| Analytics SQL | DuckDB | columnar, embedded, native JSON/TIMESTAMPTZ |
+| Vector index | USearch (HNSW) | compact, persistent, Rust |
+| State KV | SQLite | ACID, embedded |
+| Consensus | openraft 0.9 | Raft in Rust |
+| Raft transport | gRPC + MessagePack | ~1.8× smaller than JSON on embedding-heavy batches |
+| Reranker (prod) | ONNX cross-encoder (fastembed) | ms/query vs ~140 s for an LLM reranker |
+| Protocols | axum · pgwire · tonic · MCP | psql/BI tools + gRPC + native agent clients |
+| Object storage | S3 / MinIO | tiering, cost |
+
+---
+
+## Related docs
+- [Agentic platform](agentic-platform.md) — the run/agent/HITL/workflow/trigger/tool API.
+- [Benchmarks](benchmarks-locomo.md) + [`ops/bench/`](../ops/bench/) — memory-quality evaluation.
+- [Deployment](deployment.md) · [Security](security.md) · [Operator](operator.md) · [Migrate from Mem0](migrate-from-mem0.md).

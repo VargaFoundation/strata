@@ -2,10 +2,15 @@
 
 ## What is Strata?
 
-Strata is an open-source context lake for AI agents — a unified data layer combining
-episodic memory (events), semantic memory (embeddings), and state memory (live key-value)
-in a single Rust binary. PostgreSQL wire-compatible, MCP-native, deployable via Docker
-or Kubernetes with Raft-based clustering for high availability.
+Strata is an open-source **agentic memory platform** — a single Rust binary that gives AI agents a
+durable, HA memory **and runs the agents on top of it**. It has three layers: a **memory substrate**
+(episodic events, semantic embeddings, live key-value state, and a bi-temporal cognition/graph layer
+with hybrid retrieval), an **agent runtime** (durable runs, an LLM↔tool driver, HITL approvals,
+DAG workflows, event triggers, a downstream MCP tool-gateway, and a dispatcher that auto-resumes runs
+after failover), and **protocols** (PostgreSQL wire, REST, gRPC, MCP, LLM proxy). PostgreSQL
+wire-compatible, MCP-native, deployable via Docker or Kubernetes with Raft-based clustering for HA.
+
+See `docs/architecture.md` for the detailed, current architecture diagram.
 
 ## Architecture Overview
 
@@ -146,6 +151,20 @@ All prefixed with `STRATA_`. Nested keys use `__`. Examples:
 | **Cluster status** | Working | /cluster/status endpoint with Raft metrics (term, leader, log index) |
 | **Leader forwarding** | Working | Middleware redirects writes (POST/PUT) to leader, serves reads locally (follower reads) |
 | **Helm chart** | Working | StatefulSet with auto node_id, headless service for Raft DNS, PDB, ServiceMonitor |
+| **Cognition (memory layer)** | Working | Bi-temporal `memories` (valid_from/valid_to, deterministic supersession, dedup, importance/decay, as-of), knowledge-graph edges, hybrid retrieval (BM25 + vector via RRF) with configurable widths + optional graph expansion |
+| **Reranking** | Working | `Reranker` trait; `LlmReranker` (any completion backend) + `CrossEncoderReranker` (local ONNX bge, feature `rerank-local`); read-path only |
+| **LLM completion providers** | Working | `CompletionProvider`: Ollama, OpenAI, Anthropic (HTTP), and **Claude via the logged-in CLI** (`claude -p`, no API key) |
+| **Agent-run ledger** | Working | Durable `RunStore` (SQLite): status/cursor/input/result, `parent_run_id` subagent tree; steps = episodic events (`session_id=run_id`); HA via Raft `RunCreate`/`RunUpdate` |
+| **Agent driver** | Working | `run_agent`/`drive_agent_loop`: LLM↔tool loop (`search`/`remember`/`TOOL call`/`TOOL approve`), re-entrant resume from the journaled trace |
+| **MCP tool-gateway** | Working | Register/list/call downstream MCP servers; injected into the loop via `ToolExecutor` so agents call external tools |
+| **HITL approvals** | Working | `WaitingApproval` + approval-as-state; `run_request_approval`/`run_resolve_approval`/`run_resume`; state writes replicate |
+| **DAG workflows + sub-agents** | Working | `run_workflow`: Kahn topo-sort, children linked via `parent_run_id` |
+| **Event triggers** | Working | `trigger_register`/`fire_triggers`; webhook ingest auto-fires matching triggers → runs |
+| **RunDispatcher** | Working | Leader-gated loop that auto-resumes runs orphaned by a crash/failover (`run_dispatch_once`); validated on a live cluster |
+| **Driver replication** | Working | `RunReplicator` (`CoordinatorRunReplicator`) routes run/step/state writes through Raft → runs started via `/agents/run` survive failover |
+| **Sharding (multi-Raft)** | Working | `cluster.shards=N` independent groups; `ShardRouter` consistent hash; gateway routes by tenant (HTTP reverse-proxy; gRPC/PG reject-with-owner); `scale_plan` + k8s operator (`ops/operator/`, verified on Docker Desktop) |
+| **PG-wire tenant auth** | Working | Password = API key/JWT → tenant-scoped queries + shard-aware; validated with a real `tokio-postgres` client |
+| **Benchmark harness** | Working | LoCoMo eval (`examples/locomo_eval.rs`) + `ops/bench/` turnkey runner using the Claude CLI (no API key) |
 
 ## Parallel Development Guidelines
 
