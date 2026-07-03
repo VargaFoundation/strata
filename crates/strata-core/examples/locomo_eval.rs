@@ -185,6 +185,12 @@ fn apply_env(config: &mut CoreConfig) {
         &mut config.memory.cognition.retrieval_pool,
         "STRATA_COGNITION__RETRIEVAL_POOL",
     );
+    // Embedding vector dimension — must match the model (nomic=768, bge-m3=1024, e5-large=1024,
+    // text-embedding-3-large=3072) so the index/query dimensions line up.
+    set_usize(
+        &mut config.embedding.dimension,
+        "STRATA_EMBEDDING__DIMENSION",
+    );
     // Retrieval blend weights (for A/B: 0/0 = pure relevance vs the 0.3/0.2 default).
     let set_f32 = |dst: &mut f32, key: &str| {
         if let Ok(v) = std::env::var(key) {
