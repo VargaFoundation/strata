@@ -37,7 +37,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 use strata_core::llm::CompletionProvider;
 use strata_core::memory::cognition::MemoryScope;
+use strata_core::memory::semantic::{SemanticEntry, SemanticStore};
 use strata_core::{CoreConfig, StrataEngine};
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 struct Qa {
@@ -136,6 +138,14 @@ fn apply_env(config: &mut CoreConfig) {
         &mut config.embedding.anthropic_api_key,
         "STRATA_EMBEDDING__ANTHROPIC_API_KEY",
     );
+    // Asymmetric retrieval task prefixes. Unset → auto-derived from the model (nomic/e5). Set to a
+    // value (incl. empty "") to force it — used to A/B the prefix fix on an identical binary.
+    if let Ok(v) = std::env::var("STRATA_EMBEDDING__QUERY_PREFIX") {
+        config.embedding.query_prefix = Some(v);
+    }
+    if let Ok(v) = std::env::var("STRATA_EMBEDDING__DOCUMENT_PREFIX") {
+        config.embedding.document_prefix = Some(v);
+    }
     set(&mut config.rerank.provider, "STRATA_RERANK__PROVIDER");
     set(&mut config.rerank.backend, "STRATA_RERANK__BACKEND");
     set(&mut config.rerank.model, "STRATA_RERANK__MODEL");
@@ -387,29 +397,85 @@ async fn run() {
     let mut ingest_ms: Vec<f64> = Vec::new();
     let mut query_ms: Vec<f64> = Vec::new();
 
+    // Retrieval engine under test: "strata" (full cognition — hybrid BM25+vector RRF, graph
+    // expansion, rerank, LLM extraction) or "naive" (pure top-k vector over the raw turns: the
+    // honest RAG floor, so the delta measures exactly what Strata's retrieval stack adds). Both
+    // engines flow through the *same* metrics + answerer + judge below.
+    let engine_mode = std::env::var("STRATA_BENCH__ENGINE").unwrap_or_else(|_| "strata".into());
+    let naive = engine_mode == "naive";
+    let provider = engine.config().embedding.provider.clone();
+    if naive && (provider.is_empty() || provider == "none") {
+        eprintln!(
+            "STRATA_BENCH__ENGINE=naive needs vectors — set STRATA_EMBEDDING__PROVIDER (ollama|openai)"
+        );
+        std::process::exit(2);
+    }
+    let dim = engine.config().embedding.dimension;
+
     for convo in &dataset {
         let scope = MemoryScope::user(&convo.user);
+        // Naive-RAG: a flat per-user vector index of the raw turns — no cognition, no extraction,
+        // no lexical/graph/rerank. Same embeddings (incl. the query/document task prefixes).
+        let naive_store = if naive {
+            Some(SemanticStore::with_dimension(dim).expect("naive vector store"))
+        } else {
+            None
+        };
         for turn in &convo.turns {
             let start = std::time::Instant::now();
-            let added = engine
-                .memory_remember(turn, &scope)
-                .await
-                .expect("remember");
+            if let Some(store) = &naive_store {
+                match engine.embed_document_text(turn).await {
+                    Ok(v) => {
+                        let _ = store
+                            .upsert(&SemanticEntry {
+                                id: Uuid::new_v4(),
+                                content: turn.clone(),
+                                embedding: v,
+                                metadata: serde_json::json!({}),
+                            })
+                            .await;
+                        stored += 1;
+                    }
+                    Err(e) => eprintln!("  naive ingest embed error: {e}"),
+                }
+            } else {
+                let added = engine
+                    .memory_remember(turn, &scope)
+                    .await
+                    .expect("remember");
+                stored += added.len();
+            }
             ingest_ms.push(start.elapsed().as_secs_f64() * 1000.0);
-            stored += added.len();
         }
         for qa in &convo.qa {
             let start = std::time::Instant::now();
-            let results = engine
-                .memory_search(&qa.question, &scope, K)
-                .await
-                .expect("search");
+            // Ordered retrieved memory texts — both engines reduce to this for scoring.
+            let contents: Vec<String> = if let Some(store) = &naive_store {
+                match engine.embed_text(&qa.question).await {
+                    Ok(qv) => store
+                        .search(&qv, K)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|r| r.entry.content)
+                        .collect(),
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                engine
+                    .memory_search(&qa.question, &scope, K)
+                    .await
+                    .expect("search")
+                    .into_iter()
+                    .map(|h| h.memory.content)
+                    .collect()
+            };
             query_ms.push(start.elapsed().as_secs_f64() * 1000.0);
 
             let needle = qa.expected.to_lowercase();
-            let rank = results
+            let rank = contents
                 .iter()
-                .position(|h| h.memory.content.to_lowercase().contains(&needle))
+                .position(|c| c.to_lowercase().contains(&needle))
                 .map(|i| i + 1);
             if rank.is_none() {
                 println!("  MISS: q={:?} expected={:?}", qa.question, qa.expected);
@@ -419,11 +485,7 @@ async fn run() {
             // enabled, an LLM judge — the metric comparable to published leaderboards).
             let (f1, judge) = match &answerer {
                 Some(model) => {
-                    let facts: Vec<String> = results
-                        .iter()
-                        .take(QA_FACTS)
-                        .map(|h| h.memory.content.clone())
-                        .collect();
+                    let facts: Vec<String> = contents.iter().take(QA_FACTS).cloned().collect();
                     match answer_question(model.as_ref(), &qa.question, &facts).await {
                         Some(ans) => {
                             let f1 = token_f1(&ans, &qa.expected);
@@ -489,9 +551,12 @@ async fn run() {
         pct_of(&mut query_ms, 0.95)
     );
     let provider = engine.config().embedding.provider.as_str();
+    println!("engine:           {engine_mode}");
     println!(
         "mode:             {}",
-        if !provider.is_empty() && provider != "none" {
+        if naive {
+            "naive-RAG (pure top-k vector, raw turns)"
+        } else if !provider.is_empty() && provider != "none" {
             "hybrid (BM25 + vector)"
         } else {
             "lexical (BM25 only — set STRATA_EMBEDDING__PROVIDER for hybrid)"
