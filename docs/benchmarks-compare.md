@@ -113,8 +113,13 @@ workaround (586 ms). The search machinery is fine; its defaults sabotaged it.
    index-independent); make it query-type-gated.
 3. **Weight the RRF arms** (vector vs BM25) — untested lever. The importance/recency blend is now
    configurable but was **neutral on LoCoMo** (see root cause); no default change needed.
-4. **Keep the embedding task-prefix fix** (shipped) and consider a stronger default model
-   (`bge-m3`, `text-embedding-3-large`).
+4. **Keep the embedding task-prefix fix** (shipped). A "stronger" model isn't automatically better:
+   **bge-m3 (1024d) tested *worse* than nomic-embed-text** on LoCoMo (strata, 3 conv: recall@5 19.7%
+   → 17.7%, and 3× the query latency) — via Ollama bge-m3 is dense-only (loses its sparse+ColBERT
+   edge) and is tuned for multilingual/long-doc, whereas LoCoMo is short English turns where nomic +
+   its task prefixes fit better. nomic-with-prefixes is the best *local* option here; a hosted
+   `text-embedding-3-large` is the untested candidate. **The bigger remaining lever is a
+   cross-encoder reranker** (`--features rerank-local`, bge-reranker) over the fused candidates.
 5. **LLM fact extraction is not a free lever — measured net-negative here.** Tested end-to-end with
    the LLM-judge (`JUDGE=1`, claude-cli haiku): extraction dropped QA-judge 22.1% → 15.1% (and QA-F1
    23.0% → 16.8%, recall@5 12.6% → 9.5%) — see the QA table above. The published "biggest lever"
