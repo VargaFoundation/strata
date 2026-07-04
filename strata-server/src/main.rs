@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
     let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
         .expect("failed to install Prometheus recorder");
+    describe_metrics();
 
     banner::print();
 
@@ -108,4 +109,101 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Strata shutdown complete");
     Ok(())
+}
+
+/// Register HELP/TYPE metadata (and units) for the metrics Strata emits, so `/metrics` is
+/// self-describing for Prometheus scraping and Grafana. Descriptions are attached to the recorder
+/// once at startup; the values are recorded lazily at the emission sites across the crates.
+fn describe_metrics() {
+    use metrics::{describe_counter, describe_gauge, describe_histogram, Unit};
+
+    // Counters.
+    describe_counter!(
+        "strata_episodic_events_ingested_total",
+        "Episodic events ingested."
+    );
+    describe_counter!(
+        "strata_episodic_queries_total",
+        "SQL queries executed against episodic memory."
+    );
+    describe_counter!(
+        "strata_rest_requests_total",
+        "REST requests, labelled by endpoint."
+    );
+    describe_counter!(
+        "strata_llm_cache_hits_total",
+        "LLM-proxy semantic response-cache hits."
+    );
+    describe_counter!(
+        "strata_llm_cache_misses_total",
+        "LLM-proxy semantic response-cache misses."
+    );
+    describe_counter!(
+        "strata_memory_embed_failures_total",
+        "Embedding failures, labelled by op (ingest|query); each degrades search to BM25-only."
+    );
+    describe_counter!("strata_runs_created_total", "Agent runs created.");
+    describe_counter!(
+        "strata_runs_completed_total",
+        "Agent runs that reached a terminal status, labelled by status."
+    );
+    describe_counter!(
+        "strata_run_steps_total",
+        "Agent run steps, labelled by type."
+    );
+    describe_counter!(
+        "strata_retention_events_deleted_total",
+        "Events deleted by retention enforcement."
+    );
+    describe_counter!("strata_state_expired_total", "State keys expired by TTL.");
+    describe_counter!(
+        "strata_raft_leader_changes_total",
+        "Raft leadership changes observed by this node."
+    );
+
+    // Histograms (seconds).
+    describe_histogram!(
+        "strata_episodic_append_duration_seconds",
+        Unit::Seconds,
+        "Episodic append latency."
+    );
+    describe_histogram!(
+        "strata_episodic_query_duration_seconds",
+        Unit::Seconds,
+        "Episodic SQL query latency."
+    );
+    describe_histogram!(
+        "strata_rest_request_duration_seconds",
+        Unit::Seconds,
+        "REST request latency, labelled by endpoint."
+    );
+    describe_histogram!(
+        "strata_raft_snapshot_build_duration_seconds",
+        Unit::Seconds,
+        "Raft snapshot build latency."
+    );
+    describe_histogram!(
+        "strata_raft_snapshot_install_duration_seconds",
+        Unit::Seconds,
+        "Raft snapshot install latency."
+    );
+
+    // Gauges (Raft state).
+    describe_gauge!(
+        "strata_raft_is_leader",
+        "1 if this node is the Raft leader, else 0."
+    );
+    describe_gauge!("strata_raft_term", "Current Raft term.");
+    describe_gauge!(
+        "strata_raft_last_log_index",
+        "Index of the last Raft log entry."
+    );
+    describe_gauge!(
+        "strata_raft_last_applied_index",
+        "Index of the last applied Raft log entry."
+    );
+    describe_gauge!(
+        "strata_raft_replication_lag",
+        "Replication lag (last_log_index − last_applied_index)."
+    );
 }
