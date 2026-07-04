@@ -63,6 +63,32 @@ service:
 headlessService:
   enabled: true
 
+# -- Ingress for the HTTP API + admin UI (/ui). Point a host at the http service port.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # e.g. nginx: nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+  hosts:
+    - host: strata.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: strata-tls
+  #    hosts: [strata.local]
+
+# -- Horizontal Pod Autoscaler. NOTE: Strata nodes form a Raft group — changing the pod count changes
+# cluster membership, which the HPA does NOT coordinate. Prefer the operator (ops/operator) for
+# cluster-aware scaling; use HPA only for a single-node (replicaCount: 1) or membership-stable setup.
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 9
+  targetCPUUtilizationPercentage: 75
+  # 0 disables the memory metric.
+  targetMemoryUtilizationPercentage: 0
+
 # -- Persistent volume for data
 persistence:
   enabled: true
