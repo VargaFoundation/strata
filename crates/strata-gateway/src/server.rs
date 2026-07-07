@@ -41,6 +41,10 @@ pub struct GatewayConfig {
     /// `X-Hub-Signature-256`). When set, unsigned/mis-signed webhooks are rejected.
     #[serde(default)]
     pub webhook_secret: Option<String>,
+    /// When true, reject non-Admin credentials that carry no tenant (a bare API key or a token with
+    /// no `tenant_id`). Off by default; enable for strict multi-tenant isolation.
+    #[serde(default)]
+    pub require_tenant: bool,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -80,6 +84,7 @@ impl Default for GatewayConfig {
             oidc: crate::auth::oidc::OidcConfig::default(),
             audit_db_path: "./data/audit.duckdb".into(),
             webhook_secret: None,
+            require_tenant: false,
         }
     }
 }
@@ -121,8 +126,10 @@ impl GatewayServer {
                     config.rate_limit_per_key,
                 )
             };
-            // Make the audit log durable (file-backed) for compliance.
-            let state = state.with_audit_path(&config.audit_db_path);
+            // Make the audit log durable (file-backed) for compliance; apply the tenant policy.
+            let state = state
+                .with_audit_path(&config.audit_db_path)
+                .with_require_tenant(config.require_tenant);
             // Reject a weak JWT secret (HS256 needs ≥32 bytes of entropy).
             if let Some(secret) = &config.jwt_secret {
                 if secret.len() < 32 {

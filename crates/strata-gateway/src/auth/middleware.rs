@@ -112,6 +112,9 @@ pub struct AuthState {
     oidc: Option<Arc<super::oidc::OidcValidator>>,
     rate_limiter: Option<Arc<RateLimiter>>,
     audit_log: Option<AuditLog>,
+    /// When true, reject any non-Admin credential that carries no tenant (a "bare" API key, or a
+    /// JWT/OIDC token with no `tenant_id`) so multi-tenant deployments can forbid unscoped access.
+    require_tenant: bool,
 }
 
 impl std::fmt::Debug for AuthState {
@@ -160,7 +163,27 @@ impl AuthState {
             oidc: None,
             rate_limiter,
             audit_log,
+            require_tenant: false,
         }
+    }
+
+    /// Opt-in: reject non-Admin credentials that carry no tenant (for multi-tenant deployments).
+    pub fn with_require_tenant(mut self, require: bool) -> Self {
+        self.require_tenant = require;
+        self
+    }
+
+    /// Apply the `require_tenant` policy to a resolved context: a non-Admin identity with no tenant
+    /// is a bare API key / tenant-less token (an unscoped superuser), rejected when the policy is on.
+    fn enforce_tenant(&self, ctx: AuthContext) -> Option<AuthContext> {
+        if self.require_tenant && ctx.tenant_id.is_none() && ctx.role != Role::Admin {
+            tracing::warn!(
+                identity = %ctx.identity,
+                "rejected: require_tenant is enabled and the credential carries no tenant"
+            );
+            return None;
+        }
+        Some(ctx)
     }
 
     fn validate_api_key(&self, key: &str) -> bool {
@@ -189,7 +212,7 @@ impl AuthState {
                 } else {
                     None
                 });
-                return Some(AuthContext {
+                return self.enforce_tenant(AuthContext {
                     identity: claims.sub,
                     role,
                     agent_id,
@@ -206,7 +229,7 @@ impl AuthState {
                 } else {
                     None
                 });
-                return Some(AuthContext {
+                return self.enforce_tenant(AuthContext {
                     identity: claims.sub,
                     role,
                     agent_id,
@@ -216,7 +239,7 @@ impl AuthState {
         }
         // 3. API key — may carry a tenant + role (parsed from the key config; a bare key = Writer/none).
         if let Some(info) = self.keys.get(token) {
-            return Some(AuthContext {
+            return self.enforce_tenant(AuthContext {
                 identity: "api-key-user".into(),
                 role: info.role.clone(),
                 agent_id: None,
@@ -607,6 +630,31 @@ mod tests {
         assert_eq!(c.tenant_id.as_deref(), Some("beta"));
         // A wrong secret is rejected.
         assert!(state.authenticate("nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn require_tenant_rejects_bare_credentials() {
+        let state = AuthState::new(vec!["bare".into(), "sk_acme@acme".into()], None, 0)
+            .with_require_tenant(true);
+        // A bare key (Writer, no tenant) is rejected under require_tenant.
+        assert!(state.authenticate("bare").await.is_none());
+        // A tenant-scoped key still authenticates.
+        assert!(state.authenticate("sk_acme").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn require_tenant_allows_admin_without_tenant() {
+        let state = AuthState::new(vec!["adm@:admin".into()], None, 0).with_require_tenant(true);
+        // An Admin with no tenant is intentionally cross-tenant → still allowed.
+        let ctx = state.authenticate("adm").await;
+        assert_eq!(ctx.map(|c| c.role), Some(Role::Admin));
+    }
+
+    #[tokio::test]
+    async fn bare_key_allowed_when_require_tenant_off() {
+        // Default (off) preserves the legacy behaviour: a bare key authenticates.
+        let state = AuthState::new(vec!["bare".into()], None, 0);
+        assert!(state.authenticate("bare").await.is_some());
     }
 
     #[test]
