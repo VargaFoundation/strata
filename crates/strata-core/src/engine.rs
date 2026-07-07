@@ -834,10 +834,45 @@ impl StrataEngine {
         Ok(t)
     }
 
+    /// Drive an agent run, marking it `Failed` if the loop returns an error — so a poison run (e.g.
+    /// an LLM/tool call that keeps erroring) is NOT resumed forever by the dispatcher. A genuine
+    /// process crash never returns here: the run stays `Running` and is resumed after failover, as
+    /// intended. Shared by [`Self::run_agent`] and resume.
+    async fn drive_agent_loop(
+        &self,
+        run_id: uuid::Uuid,
+        tenant: &str,
+        agent_id: &str,
+        transcript: String,
+        max_turns: usize,
+    ) -> Result<Run> {
+        match self
+            .drive_agent_loop_inner(run_id, tenant, agent_id, transcript, max_turns)
+            .await
+        {
+            Ok(run) => Ok(run),
+            Err(e) => {
+                let now = chrono::Utc::now();
+                let _ = self
+                    .run_update(
+                        run_id,
+                        RunPatch {
+                            status: Some(RunStatus::Failed),
+                            error: Some(e.to_string()),
+                            ended_at: Some(now),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
     /// The agent loop over an **existing** run: LLM↔tool turns until a final answer, a pause for
     /// approval (`TOOL approve: <reason>` → `WaitingApproval`, resumable via [`Self::run_resume`]),
-    /// or max turns. Journals every step. Shared by [`Self::run_agent`] and resume.
-    async fn drive_agent_loop(
+    /// or max turns. Journals every step.
+    async fn drive_agent_loop_inner(
         &self,
         run_id: uuid::Uuid,
         tenant: &str,
@@ -4180,6 +4215,35 @@ mod tests {
             2,
             "tool_seq must resume at the count of prior external calls: {t}"
         );
+    }
+
+    #[tokio::test]
+    async fn erroring_agent_run_is_marked_failed_not_left_running() {
+        use crate::llm::CompletionProvider;
+        // A provider that always errors → the loop returns Err on the first turn.
+        struct Boom;
+        #[async_trait::async_trait]
+        impl CompletionProvider for Boom {
+            async fn complete(&self, _s: &str, _u: &str) -> crate::Result<String> {
+                Err(crate::Error::Llm("boom".into()))
+            }
+            fn model_name(&self) -> &str {
+                "boom"
+            }
+        }
+        let mut engine = StrataEngine::new(inmem_config()).await.unwrap();
+        engine.completion = Some(std::sync::Arc::new(Boom));
+        let run = engine
+            .run_create("default", Some("a1".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        let res = engine
+            .drive_agent_loop(run.id, "default", "a1", String::new(), 8)
+            .await;
+        assert!(res.is_err(), "the erroring loop must surface the error");
+        // The run must be terminal (Failed), so the dispatcher won't resume it forever (poison run).
+        let after = engine.run_get(run.id).await.unwrap().unwrap();
+        assert_eq!(after.status, RunStatus::Failed);
     }
 
     #[tokio::test]
