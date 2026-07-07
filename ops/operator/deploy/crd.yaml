@@ -51,7 +51,18 @@ spec:
                   description: Per-shard HTTP base URLs, indexed by shard, for the rebalance admin API.
                 admin_token:
                   type: string
-                  description: Admin bearer token for the rebalance/admin endpoints (prefer a Secret ref).
+                  description: Admin bearer token for the rebalance/admin endpoints, inline (dev only).
+                admin_token_secret:
+                  type: object
+                  required: [name]
+                  properties:
+                    name:
+                      type: string
+                      description: Secret name (same namespace as the plan).
+                    key:
+                      type: string
+                      description: Key within the Secret's data (default "admin-token").
+                  description: Read the admin bearer token from a Secret (preferred over admin_token).
             status:
               type: object
               properties:

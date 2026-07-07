@@ -40,25 +40,29 @@ apiVersion: strata.io/v1
 kind: StrataShardPlan
 metadata:
   name: prod
-  annotations:
-    strata.io/tenants: "tenant-a,tenant-b,tenant-c"   # or have the operator discover via SQL
 spec:
   shards: 4
   release: strata
-  shardBaseUrls:
+  shard_base_urls:                       # snake_case — matches the CRD (`strata-operator --crd`)
     - http://strata-shard-0-headless:8432
     - http://strata-shard-1-headless:8432
     - http://strata-shard-2-headless:8432
     - http://strata-shard-3-headless:8432
-  adminToken: "<bearer>"   # use a Secret ref in a production build
+  admin_token_secret:                    # preferred over an inline admin_token
+    name: strata-admin
+    key: admin-token
 ```
+
+Tenants are discovered from shard 0 via `SELECT DISTINCT tenant_id` (falling back to a
+`strata.io/tenants` annotation on the plan if the query is unavailable).
 
 ## Deploy to Kubernetes
 
 Manifests live in [`deploy/`](deploy/): the CRD, a `strata-system` Namespace, a least-privilege
 ServiceAccount + ClusterRole + binding (watch `StrataShardPlan`; create/patch/delete shard
-StatefulSets; emit events), and the controller Deployment (single replica, `Recreate`, hardened
-securityContext).
+StatefulSets; read Secrets; hold a leader-election Lease; emit events), and the controller Deployment
+(hardened securityContext, `RollingUpdate`). It is **leader-elected** (a `coordination.k8s.io` Lease),
+so bumping `replicas` for HA is safe — only the lease holder reconciles.
 
 ```bash
 # 1) Build + push the operator image (standalone crate; build context is ops/operator):
@@ -74,9 +78,12 @@ kubectl apply -k ops/operator/deploy
 The CRD in `deploy/crd.yaml` is the static equivalent of `strata-operator --crd`; regenerate it from
 the binary if `ShardPlanSpec` changes.
 
-## Remaining work for production
+## Production-readiness — status
 
-- Discover tenants from the cluster (`SELECT DISTINCT tenant_id`) instead of an annotation.
-- Read `adminToken` from a `Secret` (env `valueFrom.secretKeyRef`) instead of the plan spec.
-- Leader election (a `coordination.k8s.io/Lease`) so >1 replica can run safely — the Deployment
-  currently pins a single active controller (`replicas: 1`, `Recreate`).
+- **Leader election** (`coordination.k8s.io` Lease) — **done**, verified end-to-end on a live cluster
+  (a second replica waits; on the holder's crash, another acquires after the TTL). Race-safe via
+  `replace` + resourceVersion.
+- **`admin_token` from a Secret** (`admin_token_secret`) — **done** (RBAC grants `secrets: get`).
+- **Tenant discovery via SQL** (`SELECT DISTINCT tenant_id`) — **done** (annotation is the fallback).
+- Nice-to-have left: release the Lease on graceful `SIGTERM` (currently relies on TTL expiry), and
+  surface reconcile outcomes as Kubernetes Events.

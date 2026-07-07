@@ -19,6 +19,14 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read the admin-token Secret referenced by a plan's admin_token_secret.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  # Leader-election Lease (so >1 replica is safe).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
   # Emitting events for reconcile outcomes (best-effort).
   - apiGroups: [""]
     resources: ["events"]

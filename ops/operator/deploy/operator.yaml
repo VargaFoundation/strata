@@ -11,10 +11,11 @@ metadata:
   labels:
     app: strata-operator
 spec:
+  # Leader election (a coordination.k8s.io Lease) makes >1 replica safe — only the lease holder
+  # reconciles. Bump replicas for HA; RollingUpdate then gives zero-downtime handover.
   replicas: 1
-  # Single active controller (no leader election yet) — never run two at once.
   strategy:
-    type: Recreate
+    type: RollingUpdate
   selector:
     matchLabels:
       app: strata-operator
@@ -36,6 +37,15 @@ spec:
           env:
             - name: RUST_LOG
               value: "info,strata_operator=debug"
+            # Downward API → the leader-election Lease identity + namespace.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           resources:
             requests:
               cpu: 50m
