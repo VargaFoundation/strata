@@ -159,24 +159,47 @@ async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, 
     tracing::info!(desired, actual, "reconciling shard plan");
 
     let token = resolve_admin_token(&ctx, &plan).await;
-    let tenants = discover_tenants(&ctx, &plan, token.as_deref()).await;
+    let discovered = discover_tenants(&ctx, &plan, token.as_deref()).await;
+    let tenants = discovered.clone().unwrap_or_default();
     let moves = reconcile_moves(desired, actual, &tenants);
 
     // Apply the change with the SAFE ordering (mirrors strata_cluster::scale_plan): scale-UP creates
     // the new shard StatefulSets BEFORE moving data onto them; scale-DOWN drains (moves) data OFF the
-    // doomed shards BEFORE deleting them — so no move lands on a missing shard and no live shard is
-    // deleted with data still on it.
+    // doomed shards BEFORE deleting them — and only DELETES once the drain is verifiably complete.
     let order = desired.cmp(&actual);
     match order {
         std::cmp::Ordering::Greater => {
             scale_up(&sts, &plan, actual, desired).await;
-            apply_moves(&ctx, &plan, &moves, token.as_deref()).await;
+            // Best-effort on scale-up: data stays on its current shard until moved, so a failed
+            // move is retried on the next requeue with no data at risk.
+            let _ = apply_moves(&ctx, &plan, &moves, token.as_deref()).await;
         }
         std::cmp::Ordering::Less => {
-            apply_moves(&ctx, &plan, &moves, token.as_deref()).await;
-            scale_down(&sts, &plan, desired, actual).await;
+            // Drain first, then delete — but ONLY once the drain is verifiably complete AND we
+            // actually know the tenant set. A failed discovery (`None`) must not be read as "no
+            // tenants to move", and a failed move must not be silently dropped: either would orphan
+            // a tenant's data on a deleted shard. Block and requeue instead of losing data.
+            let all_moves_confirmed = if discovered.is_some() {
+                apply_moves(&ctx, &plan, &moves, token.as_deref()).await
+            } else {
+                false
+            };
+            if safe_to_delete_after_drain(discovered.is_some(), all_moves_confirmed) {
+                scale_down(&sts, &plan, desired, actual).await;
+            } else {
+                tracing::warn!(
+                    desired,
+                    actual,
+                    tenants_known = discovered.is_some(),
+                    all_moves_confirmed,
+                    "scale-down blocked: refusing to delete shards without a verified drain — will retry"
+                );
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
         }
-        std::cmp::Ordering::Equal => apply_moves(&ctx, &plan, &moves, token.as_deref()).await,
+        std::cmp::Ordering::Equal => {
+            let _ = apply_moves(&ctx, &plan, &moves, token.as_deref()).await;
+        }
     }
 
     // Update status (best-effort).
@@ -289,7 +312,15 @@ async fn scale_down(sts: &Api<StatefulSet>, plan: &StrataShardPlan, desired: usi
 
 /// Discover the tenants to place across shards: query shard 0's SQL API for `DISTINCT tenant_id`;
 /// fall back to the comma-separated `strata.io/tenants` annotation when the query is unavailable.
-async fn discover_tenants(ctx: &Ctx, plan: &StrataShardPlan, token: Option<&str>) -> Vec<String> {
+///
+/// Returns `None` when the tenant set could NOT be determined (SQL query unavailable AND no
+/// annotation). The caller must not scale down in that case — an undetermined set is not the same
+/// as "no tenants", and deleting a shard on an unverifiable drain would orphan data.
+async fn discover_tenants(
+    ctx: &Ctx,
+    plan: &StrataShardPlan,
+    token: Option<&str>,
+) -> Option<Vec<String>> {
     if let Some(base) = plan.spec.shard_base_urls.first() {
         let url = format!("{}/api/v1/query", base.trim_end_matches('/'));
         let mut rb = ctx.http.post(&url).json(&serde_json::json!({
@@ -314,23 +345,21 @@ async fn discover_tenants(ctx: &Ctx, plan: &StrataShardPlan, token: Option<&str>
                                 .collect()
                         })
                         .unwrap_or_default();
-                    if !tenants.is_empty() {
-                        tracing::info!(count = tenants.len(), "discovered tenants via SQL");
-                        return tenants;
-                    }
+                    // SQL succeeded → authoritative, even if empty (a genuinely empty cluster).
+                    tracing::info!(count = tenants.len(), "discovered tenants via SQL");
+                    return Some(tenants);
                 }
             }
         }
     }
-    plan.annotations()
-        .get("strata.io/tenants")
-        .map(|s| {
-            s.split(',')
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
+    // SQL unavailable → fall back to the annotation IF present (also an authoritative list); a
+    // missing annotation leaves the set undetermined → `None`.
+    plan.annotations().get("strata.io/tenants").map(|s| {
+        s.split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    })
 }
 
 /// Resolve the admin bearer token: from the referenced Secret when set (preferred), else the inline
@@ -356,9 +385,22 @@ async fn resolve_admin_token(ctx: &Ctx, plan: &StrataShardPlan) -> Option<String
 }
 
 /// Drive tenant data movements via each source shard's Strata admin rebalance API.
-async fn apply_moves(ctx: &Ctx, plan: &StrataShardPlan, moves: &[ShardMove], token: Option<&str>) {
+///
+/// Returns `true` only if EVERY move was confirmed successful — the caller must treat `false` as
+/// "drain incomplete" and NOT delete the source shard (else that tenant's data is orphaned on a
+/// deleted shard). An unaddressable source (no base URL) counts as a failure, not a silent skip.
+async fn apply_moves(
+    ctx: &Ctx,
+    plan: &StrataShardPlan,
+    moves: &[ShardMove],
+    token: Option<&str>,
+) -> bool {
+    let mut all_confirmed = true;
     for m in moves {
         let Some(src) = plan.spec.shard_base_urls.get(m.from) else {
+            tracing::error!(tenant = %m.key, from = m.from,
+                "rebalance: no base URL for source shard — cannot drain this tenant");
+            all_confirmed = false;
             continue;
         };
         let url = format!("{}/api/v1/admin/rebalance", src.trim_end_matches('/'));
@@ -373,10 +415,24 @@ async fn apply_moves(ctx: &Ctx, plan: &StrataShardPlan, moves: &[ShardMove], tok
             Ok(r) if r.status().is_success() => {
                 tracing::info!(tenant = %m.key, from = m.from, to = m.to, "moved")
             }
-            Ok(r) => tracing::error!(status = %r.status(), tenant = %m.key, "rebalance failed"),
-            Err(e) => tracing::error!(error = %e, tenant = %m.key, "rebalance unreachable"),
+            Ok(r) => {
+                tracing::error!(status = %r.status(), tenant = %m.key, "rebalance failed");
+                all_confirmed = false;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, tenant = %m.key, "rebalance unreachable");
+                all_confirmed = false;
+            }
         }
     }
+    all_confirmed
+}
+
+/// Whether a scale-down may proceed to DELETE drained shards. Only when the tenant set is known
+/// (so we actually know what to drain) AND every drain move was confirmed. Deleting a shard
+/// otherwise orphans un-moved tenant data.
+fn safe_to_delete_after_drain(tenants_known: bool, all_moves_confirmed: bool) -> bool {
+    tenants_known && all_moves_confirmed
 }
 
 /// Set `STRATA_CLUSTER__SHARD_INDEX` on the StatefulSet's first container (so the new shard hashes
@@ -588,6 +644,17 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_down_deletes_only_after_verified_drain() {
+        // Delete drained shards only when the tenant set is known AND every move was confirmed.
+        assert!(safe_to_delete_after_drain(true, true));
+        // Blocked when we can't enumerate tenants (undetermined set → unverifiable drain).
+        assert!(!safe_to_delete_after_drain(false, true));
+        // Blocked when any move failed / was unreachable.
+        assert!(!safe_to_delete_after_drain(true, false));
+        assert!(!safe_to_delete_after_drain(false, false));
+    }
 
     #[test]
     fn reconcile_moves_lists_only_changed_and_small() {
