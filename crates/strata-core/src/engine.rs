@@ -543,6 +543,21 @@ impl StrataEngine {
         tenant: &str,
         approved: bool,
     ) -> Result<()> {
+        // Only a *pending* approval may be resolved: reject a double-approve / approve-then-reject
+        // race and any resolve of a run that isn't actually awaiting approval (which would otherwise
+        // flip a terminal run back to Running, or resolve the same approval twice).
+        let is_pending = self
+            .run_approval_status(run_id)
+            .await?
+            .as_ref()
+            .and_then(|v| v.get("state"))
+            .and_then(|s| s.as_str())
+            == Some("pending");
+        if !is_pending {
+            return Err(crate::Error::State(
+                "no pending approval to resolve for this run".into(),
+            ));
+        }
         self.state_set_via_driver(
             &format!("__approval:{run_id}"),
             "status",
@@ -4215,6 +4230,29 @@ mod tests {
             2,
             "tool_seq must resume at the count of prior external calls: {t}"
         );
+    }
+
+    #[tokio::test]
+    async fn approval_cannot_be_resolved_twice() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let run = engine
+            .run_create("default", Some("a1".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        engine
+            .run_request_approval(run.id, "default", "ok to proceed?")
+            .await
+            .unwrap();
+        // First resolution succeeds...
+        engine
+            .run_resolve_approval(run.id, "default", true)
+            .await
+            .unwrap();
+        // ...a second (double-approve / late reject) is rejected — approval is no longer pending.
+        assert!(engine
+            .run_resolve_approval(run.id, "default", false)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
