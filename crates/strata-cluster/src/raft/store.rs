@@ -270,33 +270,31 @@ impl MemStore {
     }
 
     /// Apply an application request to the engine.
-    async fn apply_request(&self, req: &AppRequest) -> AppResponse {
+    /// Apply one committed request to the engine. Errors PROPAGATE (they are no longer swallowed):
+    /// a failed apply must not be marked applied, or the entry would be silently dropped on this
+    /// node and diverge from its peers. The caller turns an error into a `StorageError` so openraft
+    /// halts the node; the entry is re-applied on restart (apply is idempotent for these variants).
+    async fn apply_request(&self, req: &AppRequest) -> Result<AppResponse, strata_core::Error> {
         let Some(engine) = &self.engine else {
-            return AppResponse::Ok;
+            return Ok(AppResponse::Ok);
         };
 
-        match req {
+        let resp = match req {
             // Events are already fully formed (ids + timestamps fixed by the leader), so apply
             // is deterministic across nodes.
             AppRequest::Ingest { events, tenant } => {
-                let result = match tenant {
+                let n = match tenant {
                     Some(t) => {
                         engine
                             .ingest_for_tenant(
                                 events.clone(),
                                 &strata_core::config::TenantContext::new(t.clone()),
                             )
-                            .await
+                            .await?
                     }
-                    None => engine.ingest(events.clone()).await,
+                    None => engine.ingest(events.clone()).await?,
                 };
-                match result {
-                    Ok(n) => AppResponse::Ingested(n),
-                    Err(e) => {
-                        tracing::error!(error = %e, "raft apply: ingest failed");
-                        AppResponse::Ingested(0)
-                    }
-                }
+                AppResponse::Ingested(n)
             }
             AppRequest::StateSet {
                 agent_id,
@@ -304,30 +302,24 @@ impl MemStore {
                 value,
                 tenant,
             } => {
-                let res = match tenant {
+                let v = match tenant {
                     Some(t) => {
                         engine
                             .state_set_for_tenant(t, agent_id, key, value.clone())
-                            .await
+                            .await?
                     }
-                    None => engine.state_set(agent_id, key, value.clone()).await,
+                    None => engine.state_set(agent_id, key, value.clone()).await?,
                 };
-                match res {
-                    Ok(v) => AppResponse::StateVersion(v),
-                    Err(e) => {
-                        tracing::error!(error = %e, "raft apply: state_set failed");
-                        AppResponse::StateVersion(0)
-                    }
-                }
+                AppResponse::StateVersion(v)
             }
             AppRequest::StateDelete {
                 agent_id,
                 key,
                 tenant,
             } => {
-                let _ = match tenant {
-                    Some(t) => engine.state_delete_for_tenant(t, agent_id, key).await,
-                    None => engine.state_delete(agent_id, key).await,
+                match tenant {
+                    Some(t) => engine.state_delete_for_tenant(t, agent_id, key).await?,
+                    None => engine.state_delete(agent_id, key).await?,
                 };
                 AppResponse::Deleted
             }
@@ -343,29 +335,24 @@ impl MemStore {
                     embedding: embedding.clone(),
                     metadata: metadata.clone(),
                 };
-                let _ = engine.semantic_upsert(&entry).await;
+                engine.semantic_upsert(&entry).await?;
                 AppResponse::Ok
             }
             AppRequest::SemanticDelete { id } => {
-                let _ = engine.semantic_delete(*id).await;
+                engine.semantic_delete(*id).await?;
                 AppResponse::Ok
             }
             // Materialized memory rows (leader already ran cognition) → deterministic replay.
             AppRequest::MemoryUpsert { rows } => {
-                match engine.memory_apply_rows(rows.clone()).await {
-                    Ok(n) => AppResponse::MemoryCount(n),
-                    Err(e) => {
-                        tracing::error!(error = %e, "raft apply: memory upsert failed");
-                        AppResponse::MemoryCount(0)
-                    }
-                }
+                let n = engine.memory_apply_rows(rows.clone()).await?;
+                AppResponse::MemoryCount(n)
             }
             AppRequest::MemoryDelete { id } => {
-                let _ = engine.memory_delete(*id).await;
+                engine.memory_delete(*id).await?;
                 AppResponse::MemoryCount(1)
             }
             AppRequest::GraphAddEdge { tenant, edge } => {
-                let _ = engine.graph_apply_edge(tenant.as_deref(), edge).await;
+                engine.graph_apply_edge(tenant.as_deref(), edge).await?;
                 AppResponse::Ok
             }
             AppRequest::GraphSupersede {
@@ -375,17 +362,17 @@ impl MemStore {
                 at,
                 by,
             } => {
-                let _ = engine
+                engine
                     .graph_supersede_apply(tenant.as_deref(), src, relation, *at, *by)
-                    .await;
+                    .await?;
                 AppResponse::Ok
             }
             AppRequest::MemoryExpire { ids } => {
-                let _ = engine.memory_expire(ids).await;
+                engine.memory_expire(ids).await?;
                 AppResponse::MemoryCount(ids.len() as u64)
             }
             AppRequest::RunCreate { run } => {
-                let _ = engine.run_apply_create(run).await;
+                engine.run_apply_create(run).await?;
                 AppResponse::Ok
             }
             AppRequest::RunUpdate {
@@ -393,10 +380,11 @@ impl MemStore {
                 patch,
                 updated_at,
             } => {
-                let _ = engine.run_apply_update(*id, patch, *updated_at).await;
+                engine.run_apply_update(*id, patch, *updated_at).await?;
                 AppResponse::Ok
             }
-        }
+        };
+        Ok(resp)
     }
 }
 
@@ -589,7 +577,14 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
             // follow-up; this ordering only removes the "mark-then-lose" window.
             let resp = match entry.payload {
                 openraft::EntryPayload::Blank => AppResponse::Ok,
-                openraft::EntryPayload::Normal(ref req) => self.apply_request(req).await,
+                // A committed entry that fails to apply must NOT be marked applied (that would
+                // silently drop it and diverge from peers). Surface a StorageError so openraft halts
+                // this node; on restart the entry is re-applied (apply is idempotent for the
+                // replicated variants).
+                openraft::EntryPayload::Normal(ref req) => match self.apply_request(req).await {
+                    Ok(resp) => resp,
+                    Err(e) => return Err(StorageIOError::apply(log_id, AnyError::new(&e)).into()),
+                },
                 openraft::EntryPayload::Membership(ref membership) => {
                     let mut inner = self.inner.lock();
                     inner.last_membership = StoredMembership::new(Some(log_id), membership.clone());
@@ -696,8 +691,14 @@ mod tests {
 
         // ...applied on two independent nodes...
         let (n1, n2) = (inmem_engine().await, inmem_engine().await);
-        MemStore::new(Some(n1.clone())).apply_request(&req).await;
-        MemStore::new(Some(n2.clone())).apply_request(&req).await;
+        MemStore::new(Some(n1.clone()))
+            .apply_request(&req)
+            .await
+            .unwrap();
+        MemStore::new(Some(n2.clone()))
+            .apply_request(&req)
+            .await
+            .unwrap();
 
         // ...yields identical state (same event id) — the determinism property Raft requires.
         let r1 = n1.query_sql("SELECT id FROM episodic").await.unwrap();
@@ -722,7 +723,8 @@ mod tests {
                     embedding: None,
                 }],
             })
-            .await;
+            .await
+            .unwrap();
         assert!(matches!(resp, AppResponse::MemoryCount(1)));
         assert_eq!(engine.memory_count().await.unwrap(), 1);
     }
@@ -744,7 +746,8 @@ mod tests {
             .apply_request(&AppRequest::MemoryExpire {
                 ids: vec![added.memory.id],
             })
-            .await;
+            .await
+            .unwrap();
         assert!(matches!(resp, AppResponse::MemoryCount(1)));
         // The expired memory is no longer active.
         assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 0);
@@ -768,7 +771,8 @@ mod tests {
                 tenant: None,
                 edge: edge.clone(),
             })
-            .await;
+            .await
+            .unwrap();
         assert!(matches!(resp, AppResponse::Ok));
         let n = engine
             .memory_neighbors("default", "Alice", 10)
@@ -806,7 +810,8 @@ mod tests {
                     tenant: None,
                     edge: seed.clone(),
                 })
-                .await;
+                .await
+                .unwrap();
             let resp = store
                 .apply_request(&AppRequest::GraphSupersede {
                     tenant: None,
@@ -815,7 +820,8 @@ mod tests {
                     at,
                     by: Some(by),
                 })
-                .await;
+                .await
+                .unwrap();
             assert!(matches!(resp, AppResponse::Ok));
             states.push(
                 engine
