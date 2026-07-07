@@ -1,4 +1,26 @@
 {{- if .Values.podDisruptionBudget.enabled }}
+{{- if .Values.sharding.enabled }}
+{{- $root := . }}
+{{- range $shard := until (int .Values.sharding.shards) }}
+---
+# One PDB PER SHARD: each shard is an independent Raft group, so the disruption budget must be
+# scoped per shard. A single fleet-wide PDB (selector without the shard label) could permit evicting
+# a whole shard's quorum at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "strata.fullname" $root }}-shard-{{ $shard }}
+  labels:
+    {{- include "strata.labels" $root | nindent 4 }}
+    strata.io/shard: "{{ $shard }}"
+spec:
+  minAvailable: {{ $root.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "strata.selectorLabels" $root | nindent 6 }}
+      strata.io/shard: "{{ $shard }}"
+{{- end }}
+{{- else }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -10,4 +32,5 @@ spec:
   selector:
     matchLabels:
       {{- include "strata.selectorLabels" . | nindent 6 }}
+{{- end }}
 {{- end }}
