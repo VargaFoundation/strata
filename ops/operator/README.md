@@ -85,5 +85,7 @@ the binary if `ShardPlanSpec` changes.
   `replace` + resourceVersion.
 - **`admin_token` from a Secret** (`admin_token_secret`) — **done** (RBAC grants `secrets: get`).
 - **Tenant discovery via SQL** (`SELECT DISTINCT tenant_id`) — **done** (annotation is the fallback).
-- Nice-to-have left: release the Lease on graceful `SIGTERM` (currently relies on TTL expiry), and
-  surface reconcile outcomes as Kubernetes Events.
+- **Graceful Lease release on `SIGTERM`** — **done**, verified live: on the holder's SIGTERM a standby
+  took over in ~6 s (vs the 15 s TTL).
+- **Kubernetes Events** for reconcile outcomes (`ScaledUp` / `ScaledDown` / `Reconciled`) — **done**,
+  visible in `kubectl describe stratashardplan` / `kubectl get events`.

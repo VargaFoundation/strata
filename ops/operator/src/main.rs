@@ -21,7 +21,8 @@ use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
-use kube::{Client, CustomResource, ResourceExt};
+use kube::runtime::events::{Event, EventType, Recorder, Reporter};
+use kube::{Client, CustomResource, Resource, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -136,6 +137,7 @@ pub fn reconcile_moves(desired: usize, actual: usize, tenants: &[String]) -> Vec
 struct Ctx {
     client: Client,
     http: reqwest::Client,
+    reporter: Reporter,
 }
 
 async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, kube::Error> {
@@ -164,7 +166,8 @@ async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, 
     // the new shard StatefulSets BEFORE moving data onto them; scale-DOWN drains (moves) data OFF the
     // doomed shards BEFORE deleting them — so no move lands on a missing shard and no live shard is
     // deleted with data still on it.
-    match desired.cmp(&actual) {
+    let order = desired.cmp(&actual);
+    match order {
         std::cmp::Ordering::Greater => {
             scale_up(&sts, &plan, actual, desired).await;
             apply_moves(&ctx, &plan, &moves, token.as_deref()).await;
@@ -186,6 +189,42 @@ async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, 
             &PatchParams::default(),
             &Patch::Merge(&status),
         )
+        .await;
+
+    // Emit a Kubernetes Event on the plan describing the outcome (visible in `kubectl describe`).
+    let (reason, note) = match order {
+        std::cmp::Ordering::Greater => (
+            "ScaledUp",
+            format!(
+                "scaled up {actual}→{desired} shards ({} tenant moves)",
+                moves.len()
+            ),
+        ),
+        std::cmp::Ordering::Less => (
+            "ScaledDown",
+            format!(
+                "scaled down {actual}→{desired} shards ({} tenant moves)",
+                moves.len()
+            ),
+        ),
+        std::cmp::Ordering::Equal => (
+            "Reconciled",
+            format!("{desired} shards steady ({} tenant moves)", moves.len()),
+        ),
+    };
+    let recorder = Recorder::new(
+        ctx.client.clone(),
+        ctx.reporter.clone(),
+        plan.object_ref(&()),
+    );
+    let _ = recorder
+        .publish(Event {
+            type_: EventType::Normal,
+            reason: reason.into(),
+            note: Some(note),
+            action: "Reconcile".into(),
+            secondary: None,
+        })
         .await;
 
     Ok(Action::requeue(Duration::from_secs(60)))
@@ -447,6 +486,33 @@ mod lease {
             Err(_) => false,
         }
     }
+
+    /// Release the lease on graceful shutdown — delete it iff we still hold it, so a waiting replica
+    /// acquires immediately instead of waiting out the TTL.
+    pub async fn release(leases: &Api<Lease>, id: &str) {
+        if let Ok(Some(l)) = leases.get_opt(NAME).await {
+            if l.spec.and_then(|s| s.holder_identity).as_deref() == Some(id) {
+                let _ = leases.delete(NAME, &Default::default()).await;
+            }
+        }
+    }
+}
+
+/// Resolve on SIGTERM (k8s pod termination) or Ctrl-C, so we can release the lease before exiting.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! { _ = ctrl_c => {}, _ = term => {} }
 }
 
 #[tokio::main]
@@ -474,7 +540,7 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
     tracing::info!("acquired leadership");
-    {
+    let renew = {
         let leases = leases.clone();
         let id = id.clone();
         tokio::spawn(async move {
@@ -486,24 +552,36 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
-        });
-    }
+        })
+    };
 
     let plans: Api<StrataShardPlan> = Api::all(client.clone());
     let ctx = Arc::new(Ctx {
         client,
         http: reqwest::Client::new(),
+        reporter: Reporter {
+            controller: "strata-operator".into(),
+            instance: Some(id.clone()),
+        },
     });
 
-    Controller::new(plans, Default::default())
+    let controller = Controller::new(plans, Default::default())
         .run(reconcile, on_error, ctx)
         .for_each(|res| async move {
             match res {
                 Ok(o) => tracing::debug!(?o, "reconciled"),
                 Err(e) => tracing::warn!(error = %e, "controller error"),
             }
-        })
-        .await;
+        });
+
+    // Run until the controller stops or we get SIGTERM/Ctrl-C; then stop renewing and release the
+    // lease so a standby replica takes over immediately (no TTL wait).
+    tokio::select! {
+        _ = controller => {}
+        _ = shutdown_signal() => tracing::info!("shutdown signal — releasing leadership"),
+    }
+    renew.abort();
+    lease::release(&leases, &id).await;
     Ok(())
 }
 
