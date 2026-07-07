@@ -121,9 +121,18 @@ pub async fn chat_completions(
     // 2. Build context from both semantic and episodic memory
     let mut context_sections: Vec<String> = Vec::new();
 
-    // 2a. Semantic search: embed the user query and find relevant knowledge
+    // 2a. Semantic search: embed the user query and find relevant knowledge (tenant-scoped so the
+    // proxy never seeds one tenant's prompt with another tenant's events).
     if engine.semantic_count() > 0 && !user_query.is_empty() {
-        if let Ok(results) = engine.embed_and_search(&user_query, 5, None, None).await {
+        let semantic = match req_tenant.as_deref() {
+            Some(t) => {
+                engine
+                    .embed_and_search_for_tenant(&user_query, 5, t, None, None)
+                    .await
+            }
+            None => engine.embed_and_search(&user_query, 5, None, None).await,
+        };
+        if let Ok(results) = semantic {
             let semantic_lines: Vec<String> = results
                 .iter()
                 .filter(|r| r.score >= 0.3)
@@ -151,11 +160,14 @@ pub async fn chat_completions(
         }
     }
 
-    // 2b. Episodic memory: recent events for temporal context
-    let recent_events = engine
-        .query_sql("SELECT source, event_type, payload, ts FROM episodic ORDER BY ts DESC LIMIT 5")
-        .await
-        .unwrap_or_default();
+    // 2b. Episodic memory: recent events for temporal context (tenant-scoped).
+    const RECENT_EVENTS_SQL: &str =
+        "SELECT source, event_type, payload, ts FROM episodic ORDER BY ts DESC LIMIT 5";
+    let recent_events = match req_tenant.as_deref() {
+        Some(t) => engine.query_sql_for_tenant(RECENT_EVENTS_SQL, t).await,
+        None => engine.query_sql(RECENT_EVENTS_SQL).await,
+    }
+    .unwrap_or_default();
 
     if !recent_events.is_empty() {
         let event_lines: Vec<String> = recent_events
@@ -240,7 +252,7 @@ pub async fn chat_completions(
     };
 
     if let Some(ref emb) = query_embedding {
-        if let Some(cached) = cache.get_by_vector(emb).await {
+        if let Some(cached) = cache.get_by_vector(emb, req_tenant.as_deref()).await {
             metrics::counter!("strata_llm_cache_hits_total").increment(1);
             // Return cached response in OpenAI format
             return Json(serde_json::json!({
@@ -285,7 +297,9 @@ pub async fn chat_completions(
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_str())
         {
-            cache.put_with_vector(&user_query, content, Some(emb)).await;
+            cache
+                .put_with_vector(&user_query, content, Some(emb), req_tenant.as_deref())
+                .await;
         }
     }
 

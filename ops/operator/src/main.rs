@@ -142,7 +142,9 @@ async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, 
     tracing::info!(desired, actual, "reconciling shard plan");
 
     // Discover tenants to place (a real build could `SELECT DISTINCT tenant_id`); here from an
-    // annotation `strata.io/tenants`.
+    // annotation `strata.io/tenants`. Whether the annotation is PRESENT matters for scale-down: if
+    // we don't know the tenant set, we can't verify a drain, so we must not delete any shard.
+    let tenants_known = plan.annotations().contains_key("strata.io/tenants");
     let tenants: Vec<String> = plan
         .annotations()
         .get("strata.io/tenants")
@@ -152,18 +154,37 @@ async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, 
 
     // Apply the change with the SAFE ordering (mirrors strata_cluster::scale_plan): scale-UP creates
     // the new shard StatefulSets BEFORE moving data onto them; scale-DOWN drains (moves) data OFF the
-    // doomed shards BEFORE deleting them — so no move lands on a missing shard and no live shard is
-    // deleted with data still on it.
+    // doomed shards BEFORE deleting them — and only deletes once the drain is CONFIRMED complete.
     match desired.cmp(&actual) {
         std::cmp::Ordering::Greater => {
             scale_up(&sts, &plan, actual, desired).await;
-            apply_moves(&ctx, &plan, &moves).await;
+            // Best-effort on scale-up: data stays on its current shard until moved, so a failed move
+            // is retried on the next requeue with no data at risk.
+            let _ = apply_moves(&ctx, &plan, &moves).await;
         }
         std::cmp::Ordering::Less => {
-            apply_moves(&ctx, &plan, &moves).await;
-            scale_down(&sts, &plan, desired, actual).await;
+            // Drain first, then delete — but ONLY once the drain is verifiably complete. Otherwise a
+            // tenant whose move failed (or whose existence we couldn't even enumerate) would be
+            // orphaned on a deleted shard. Block and retry instead of losing data.
+            let all_moves_confirmed = if tenants_known {
+                apply_moves(&ctx, &plan, &moves).await
+            } else {
+                false
+            };
+            if safe_to_delete_after_drain(tenants_known, all_moves_confirmed) {
+                scale_down(&sts, &plan, desired, actual).await;
+            } else {
+                tracing::warn!(
+                    desired, actual, tenants_known, all_moves_confirmed,
+                    "scale-down blocked: refusing to delete shards without a verified drain (need \
+                     the strata.io/tenants annotation AND every tenant move confirmed) — will retry"
+                );
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
         }
-        std::cmp::Ordering::Equal => apply_moves(&ctx, &plan, &moves).await,
+        std::cmp::Ordering::Equal => {
+            let _ = apply_moves(&ctx, &plan, &moves).await;
+        }
     }
 
     // Update status (best-effort).
@@ -236,9 +257,17 @@ async fn scale_down(sts: &Api<StatefulSet>, plan: &StrataShardPlan, desired: usi
 }
 
 /// Drive tenant data movements via each source shard's Strata admin rebalance API.
-async fn apply_moves(ctx: &Ctx, plan: &StrataShardPlan, moves: &[ShardMove]) {
+///
+/// Returns `true` only if EVERY move was confirmed successful — the caller must treat `false` as
+/// "drain incomplete" and NOT delete the source shard (else that tenant's data is orphaned on a
+/// deleted shard). An unaddressable source (no base URL) counts as a failure, not a silent skip.
+async fn apply_moves(ctx: &Ctx, plan: &StrataShardPlan, moves: &[ShardMove]) -> bool {
+    let mut all_confirmed = true;
     for m in moves {
         let Some(src) = plan.spec.shard_base_urls.get(m.from) else {
+            tracing::error!(tenant = %m.key, from = m.from,
+                "rebalance: no base URL for source shard — cannot drain this tenant");
+            all_confirmed = false;
             continue;
         };
         let url = format!("{}/api/v1/admin/rebalance", src.trim_end_matches('/'));
@@ -253,10 +282,24 @@ async fn apply_moves(ctx: &Ctx, plan: &StrataShardPlan, moves: &[ShardMove]) {
             Ok(r) if r.status().is_success() => {
                 tracing::info!(tenant = %m.key, from = m.from, to = m.to, "moved")
             }
-            Ok(r) => tracing::error!(status = %r.status(), tenant = %m.key, "rebalance failed"),
-            Err(e) => tracing::error!(error = %e, tenant = %m.key, "rebalance unreachable"),
+            Ok(r) => {
+                tracing::error!(status = %r.status(), tenant = %m.key, "rebalance failed");
+                all_confirmed = false;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, tenant = %m.key, "rebalance unreachable");
+                all_confirmed = false;
+            }
         }
     }
+    all_confirmed
+}
+
+/// Whether a scale-down may proceed to DELETE drained shards. Only when the tenant set is known
+/// (so we actually know what to drain — a missing `strata.io/tenants` annotation means we don't)
+/// AND every drain move was confirmed. Deleting a shard otherwise orphans un-moved tenant data.
+fn safe_to_delete_after_drain(tenants_known: bool, all_moves_confirmed: bool) -> bool {
+    tenants_known && all_moves_confirmed
 }
 
 /// Set `STRATA_CLUSTER__SHARD_INDEX` on the StatefulSet's first container (so the new shard hashes
@@ -321,6 +364,17 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_down_deletes_only_after_verified_drain() {
+        // Delete drained shards only when the tenant set is known AND every move was confirmed.
+        assert!(safe_to_delete_after_drain(true, true));
+        // Blocked when we can't enumerate tenants (unknown set → unverifiable drain).
+        assert!(!safe_to_delete_after_drain(false, true));
+        // Blocked when any move failed / was unreachable.
+        assert!(!safe_to_delete_after_drain(true, false));
+        assert!(!safe_to_delete_after_drain(false, false));
+    }
 
     #[test]
     fn reconcile_moves_lists_only_changed_and_small() {

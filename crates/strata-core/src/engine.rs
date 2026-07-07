@@ -785,9 +785,44 @@ impl StrataEngine {
                     p.get("question").and_then(|v| v.as_str()).unwrap_or("")
                 )),
                 "tool_call" => {
-                    let q = p.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    let r = p.get("results").map(|v| v.to_string()).unwrap_or_default();
-                    t.push_str(&format!("Assistant: TOOL search: {q}\nObservation: {r}\n"));
+                    // Reconstruct the EXACT line the live loop emitted for this step, dispatching on
+                    // the journaled `tool`. Getting this right is what makes resume correct: the
+                    // idempotency counter is `transcript.matches("TOOL call ").count()`, so external
+                    // calls MUST re-render as `TOOL call …` (else the counter resets and keys shift),
+                    // and the real observations must be replayed (else the LLM re-issues calls blindly).
+                    let tool = p.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+                    match tool {
+                        "search" => {
+                            let q = p.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                            let results: Vec<String> = p
+                                .get("results")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            t.push_str(&format!(
+                                "Assistant: TOOL search: {q}\nObservation: {}\n",
+                                results.join(" | ")
+                            ));
+                        }
+                        "remember" => {
+                            let text = p.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                            t.push_str(&format!(
+                                "Assistant: TOOL remember: {text}\nObservation: stored\n"
+                            ));
+                        }
+                        // Downstream MCP tool, journaled as `tool = "<server>/<tool>"` + a `result`.
+                        other => {
+                            let (server, tool_name) = other.split_once('/').unwrap_or((other, ""));
+                            let result = p.get("result").map(|v| v.to_string()).unwrap_or_default();
+                            t.push_str(&format!(
+                                "Assistant: TOOL call {server} {tool_name}\nObservation: {result}\n"
+                            ));
+                        }
+                    }
                 }
                 "hitl_request" => t.push_str(&format!(
                     "Assistant: requested approval for: {}\nObservation: approved\n",
@@ -4085,6 +4120,66 @@ mod tests {
         let resumed = engine.run_resume(run.id, "default").await.unwrap();
         assert_eq!(resumed.status, RunStatus::Succeeded);
         assert_eq!(resumed.result["answer"], "deployed");
+    }
+
+    #[tokio::test]
+    async fn rebuild_transcript_is_faithful_and_keeps_tool_seq_stable() {
+        // Regression for the resume path: every journaled step type must re-render as the exact line
+        // the live loop emitted. Otherwise the idempotency counter (which counts "TOOL call ") resets
+        // to 0 and external-tool results are erased — defeating effectively-once across a resume.
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let run = engine
+            .run_create("default", Some("a1".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        let rid = run.id;
+        for (et, payload) in [
+            ("run_start", serde_json::json!({ "question": "Q?" })),
+            (
+                "tool_call",
+                serde_json::json!({ "tool": "search", "query": "cats", "results": ["fluffy", "cute"] }),
+            ),
+            (
+                "tool_call",
+                serde_json::json!({ "tool": "remember", "content": "cats are fluffy" }),
+            ),
+            (
+                "tool_call",
+                serde_json::json!({ "tool": "billing/charge", "result": { "ok": true } }),
+            ),
+            (
+                "tool_call",
+                serde_json::json!({ "tool": "email/send", "result": { "sent": 1 } }),
+            ),
+        ] {
+            engine
+                .run_log_step(rid, "default", et, payload)
+                .await
+                .unwrap();
+        }
+
+        let t = engine.rebuild_agent_transcript(rid).await.unwrap();
+
+        assert!(t.contains("Question: Q?"), "{t}");
+        assert!(t.contains("TOOL search: cats"), "{t}");
+        assert!(
+            t.contains("fluffy | cute"),
+            "search results must be replayed: {t}"
+        );
+        assert!(t.contains("TOOL remember: cats are fluffy"), "{t}");
+        // External calls must re-render as `TOOL call …` with their real result replayed…
+        assert!(t.contains("TOOL call billing charge"), "{t}");
+        assert!(t.contains("TOOL call email send"), "{t}");
+        assert!(
+            t.contains("\"ok\":true"),
+            "external result must be replayed: {t}"
+        );
+        // …so on resume the idempotency counter is 2 (the two prior external calls), not 0.
+        assert_eq!(
+            t.matches("TOOL call ").count(),
+            2,
+            "tool_seq must resume at the count of prior external calls: {t}"
+        );
     }
 
     #[tokio::test]

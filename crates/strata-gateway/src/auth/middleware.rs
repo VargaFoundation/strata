@@ -353,8 +353,11 @@ pub async fn require_auth(
     }
 
     // ── RBAC: admin-only paths ───────────────────────────────────
+    // `/admin/*` and Raft cluster membership control (`/cluster/*`) require the Admin role.
     let path = req.uri().path().to_string();
-    if path.contains("/admin/") && !auth_ctx.role.allows_admin_path() {
+    if (path.contains("/admin/") || path.contains("/cluster/"))
+        && !auth_ctx.role.allows_admin_path()
+    {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
 

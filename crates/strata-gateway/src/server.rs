@@ -180,6 +180,9 @@ impl GatewayServer {
         let grpc_shard = shard_state.clone();
         let pg_auth = auth_state.clone();
         let pg_shard = shard_state.clone();
+        // Auth for the cluster admin routes (they are mounted after the global layers below, so
+        // they need auth applied explicitly rather than inheriting it).
+        let raft_auth = auth_state.clone();
 
         let mut app = crate::rest::router_with_engine_and_auth(
             engine.clone(),
@@ -205,8 +208,19 @@ impl GatewayServer {
         if let Some(ref coord) = coordinator {
             let coord_read = coord.read().await;
             if let Some(raft_instance) = coord_read.raft() {
-                let raft_router =
+                let mut raft_router =
                     crate::cluster::raft_routes::raft_router(Arc::new(raft_instance.clone()));
+                // These routes change Raft cluster membership — they must NEVER be reachable
+                // unauthenticated. Because the router is merged after the global layers, apply auth
+                // here explicitly; `require_auth` gates `/cluster/*` on the Admin role (see
+                // auth::middleware). When auth is disabled they stay open (dev posture, same as the
+                // rest of the API) — bind :8432 to a trusted network in that case.
+                if let Some(state) = raft_auth {
+                    raft_router = raft_router.route_layer(axum::middleware::from_fn_with_state(
+                        state,
+                        crate::auth::middleware::require_auth,
+                    ));
+                }
                 app = app.merge(raft_router);
                 tracing::info!("Cluster admin endpoints mounted (/cluster/status, /cluster/*)");
             }

@@ -546,10 +546,23 @@ impl EpisodicStore {
         Ok(())
     }
 
-    /// Validate that a SQL string contains only SELECT statements.
+    /// Validate that a SQL string contains only SELECT statements **and** does not call any DuckDB
+    /// filesystem/network function.
+    ///
+    /// A bare `SELECT` is not enough of a sandbox on its own: DuckDB exposes table- and scalar
+    /// functions such as `read_text`, `read_csv`, `read_blob`, `read_parquet`, `read_json` and
+    /// `glob` that are legal inside a `SELECT` but read the **server's** filesystem (e.g.
+    /// `SELECT * FROM read_text('/etc/passwd')`, `SELECT * FROM glob('/proc/self/environ')`) — and,
+    /// if the `httpfs` extension is loaded, make outbound network requests. Because DuckDB
+    /// `enable_external_access` is a *database-global* setting (the read pool is `try_clone`d from
+    /// the same instance the backup path `EXPORT DATABASE`s through), we can't disable it at the
+    /// connection level without breaking backup/restore — so we reject these functions in the
+    /// untrusted-SQL validator instead. Fails **closed**.
     fn validate_read_only(sql: &str) -> crate::Result<()> {
+        use sqlparser::ast::{visit_expressions, visit_relations, Expr};
         use sqlparser::dialect::DuckDbDialect;
         use sqlparser::parser::Parser;
+        use std::ops::ControlFlow;
 
         let statements = Parser::parse_sql(&DuckDbDialect {}, sql)
             .map_err(|e| crate::Error::Query(format!("SQL parse error: {e}")))?;
@@ -570,7 +583,70 @@ impl EpisodicStore {
             }
         }
 
+        let forbidden = crate::Error::Query(
+            "SQL function is not permitted (filesystem/network access is disabled)".into(),
+        );
+        for stmt in &statements {
+            // Table-function position: `FROM read_text('/etc/passwd')`, `FROM glob('/etc/*')`.
+            let hit = visit_relations(stmt, |name| match name.0.last() {
+                Some(ident) if Self::is_forbidden_sql_function(&ident.value) => {
+                    ControlFlow::Break(())
+                }
+                _ => ControlFlow::Continue(()),
+            });
+            if hit.is_break() {
+                return Err(forbidden);
+            }
+            // Scalar-function position: `SELECT read_text('/etc/passwd')`.
+            let hit = visit_expressions(stmt, |expr| {
+                if let Expr::Function(f) = expr {
+                    if f.name
+                        .0
+                        .last()
+                        .map(|i| Self::is_forbidden_sql_function(&i.value))
+                        .unwrap_or(false)
+                    {
+                        return ControlFlow::Break(());
+                    }
+                }
+                ControlFlow::Continue(())
+            });
+            if hit.is_break() {
+                return Err(forbidden);
+            }
+        }
+
         Ok(())
+    }
+
+    /// Whether `name` is a DuckDB function that reads the filesystem or network. These are the
+    /// clearly function-shaped names (all contain an underscore or are the well-known `glob`), so
+    /// the risk of colliding with a legitimate table/CTE identifier is negligible.
+    fn is_forbidden_sql_function(name: &str) -> bool {
+        const FORBIDDEN: &[&str] = &[
+            "read_text",
+            "read_blob",
+            "read_csv",
+            "read_csv_auto",
+            "read_json",
+            "read_json_auto",
+            "read_json_objects",
+            "read_ndjson",
+            "read_ndjson_auto",
+            "read_ndjson_objects",
+            "read_parquet",
+            "read_xlsx",
+            "parquet_scan",
+            "parquet_metadata",
+            "parquet_schema",
+            "parquet_file_metadata",
+            "parquet_kv_metadata",
+            "csv_sniff",
+            "sniff_csv",
+            "glob",
+        ];
+        let lower = name.to_ascii_lowercase();
+        FORBIDDEN.contains(&lower.as_str())
     }
 
     /// Execute a read-only SQL query and return results as JSON rows.
@@ -636,8 +712,9 @@ impl EpisodicStore {
 
     /// Execute a read-only SQL query scoped to a single tenant.
     ///
-    /// Rewrites every `episodic` table reference (via the SQL AST — never string literals) to a
-    /// per-tenant filtered view, so a tenant can only ever read its own rows. Fails **closed**:
+    /// Rewrites every tenant-owned table reference (`episodic`, `sessions`) — via the SQL AST,
+    /// never string literals — to a per-tenant filtered view, so a tenant can only ever read its
+    /// own rows. Direct references to the internal `*__t_*` views are rejected. Fails **closed**:
     /// if the SQL cannot be parsed/scoped, it is rejected rather than run unscoped.
     pub fn query_sql_for_tenant(
         &self,
@@ -645,22 +722,28 @@ impl EpisodicStore {
         tenant: &str,
         max_rows: usize,
     ) -> crate::Result<Vec<serde_json::Value>> {
-        let view = Self::tenant_view_name(tenant);
-        // Ensure the per-tenant filtered view exists (idempotent; catalog is shared with readers).
+        let ep_view = Self::tenant_view_name(tenant);
+        let sess_view = Self::tenant_session_view_name(tenant);
+        // Ensure the per-tenant filtered views exist (idempotent; catalog is shared with readers).
+        // BOTH `episodic` AND `sessions` are tenant-owned, so both get a filtered view — the scoping
+        // is an allowlist of tenant tables, not just `episodic` (a bare `SELECT * FROM sessions`
+        // used to leak every tenant's sessions).
         {
             let db = self.write_db.lock();
             let escaped = tenant.replace('\'', "''");
             db.execute_batch(&format!(
-                "CREATE OR REPLACE VIEW {view} AS SELECT * FROM episodic WHERE tenant_id = '{escaped}'"
+                "CREATE OR REPLACE VIEW {ep_view} AS SELECT * FROM episodic WHERE tenant_id = '{escaped}';
+                 CREATE OR REPLACE VIEW {sess_view} AS SELECT * FROM sessions WHERE tenant_id = '{escaped}'"
             ))
             .map_err(|e| crate::Error::Query(format!("create tenant view: {e}")))?;
         }
-        let rewritten = Self::scope_sql_to_view(sql, &view)?;
+        let rewritten = Self::scope_sql_to_view(sql, tenant)?;
         self.query_sql_limited(&rewritten, max_rows)
     }
 
-    /// Deterministic, collision-resistant, SQL-safe view name for a tenant.
-    fn tenant_view_name(tenant: &str) -> String {
+    /// Deterministic, collision-resistant, SQL-safe per-tenant view name for `table`
+    /// (`<table>__t_<sanitized-tenant>_<fnv1a-hash>`).
+    fn tenant_scoped_view_name(table: &str, tenant: &str) -> String {
         let mut sani: String = tenant
             .chars()
             .map(|c| {
@@ -678,33 +761,63 @@ impl EpisodicStore {
             h ^= b as u64;
             h = h.wrapping_mul(0x100000001b3);
         }
-        format!("episodic__t_{sani}_{h:016x}")
+        format!("{table}__t_{sani}_{h:016x}")
     }
 
-    /// Rewrite `episodic` relation references to `view` via the SQL AST (not string matching).
-    fn scope_sql_to_view(sql: &str, view: &str) -> crate::Result<String> {
+    /// Per-tenant filtered view name for the `episodic` table.
+    fn tenant_view_name(tenant: &str) -> String {
+        Self::tenant_scoped_view_name("episodic", tenant)
+    }
+
+    /// Per-tenant filtered view name for the `sessions` table.
+    fn tenant_session_view_name(tenant: &str) -> String {
+        Self::tenant_scoped_view_name("sessions", tenant)
+    }
+
+    /// Rewrite tenant-owned relation references (`episodic`, `sessions`) to the caller's per-tenant
+    /// views via the SQL AST (not string matching), and reject any direct reference to an internal
+    /// `*__t_*` view (which would let a tenant read another tenant's rows). Fails closed.
+    fn scope_sql_to_view(sql: &str, tenant: &str) -> crate::Result<String> {
         use sqlparser::ast::{Ident, ObjectName};
         use sqlparser::dialect::DuckDbDialect;
         use sqlparser::parser::Parser;
         use std::ops::ControlFlow;
+
+        let ep_view = Self::tenant_view_name(tenant);
+        let sess_view = Self::tenant_session_view_name(tenant);
 
         let mut statements = Parser::parse_sql(&DuckDbDialect {}, sql)
             .map_err(|e| crate::Error::Query(format!("SQL parse error (tenant scope): {e}")))?;
         if statements.is_empty() {
             return Err(crate::Error::Query("empty SQL statement".into()));
         }
+        let mut forbidden = false;
         for stmt in statements.iter_mut() {
-            let _ = sqlparser::ast::visit_relations_mut(stmt, |name: &mut ObjectName| {
-                if name
+            let flow = sqlparser::ast::visit_relations_mut(stmt, |name: &mut ObjectName| {
+                let last = name
                     .0
                     .last()
-                    .map(|i| i.value.eq_ignore_ascii_case("episodic"))
-                    .unwrap_or(false)
-                {
-                    *name = ObjectName(vec![Ident::new(view)]);
+                    .map(|i| i.value.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if last == "episodic" {
+                    *name = ObjectName(vec![Ident::new(ep_view.as_str())]);
+                } else if last == "sessions" {
+                    *name = ObjectName(vec![Ident::new(sess_view.as_str())]);
+                } else if last.starts_with("episodic__t_") || last.starts_with("sessions__t_") {
+                    // A tenant must never address an internal per-tenant view by name.
+                    return ControlFlow::Break(());
                 }
-                ControlFlow::<()>::Continue(())
+                ControlFlow::Continue(())
             });
+            if flow.is_break() {
+                forbidden = true;
+                break;
+            }
+        }
+        if forbidden {
+            return Err(crate::Error::Query(
+                "reference to an internal per-tenant view is not permitted".into(),
+            ));
         }
         Ok(statements
             .iter()
@@ -1100,6 +1213,61 @@ mod tests {
         let store = EpisodicStore::new();
         let result = store.query_sql("SELECT 1::VARCHAR as v");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn query_sql_rejects_filesystem_functions() {
+        let store = EpisodicStore::new();
+        // These are legal SELECTs but read the server filesystem — must be rejected (fail-closed),
+        // in both table-function and scalar-function position, and through subqueries/CTEs.
+        for sql in [
+            "SELECT * FROM read_text('/etc/passwd')",
+            "SELECT content FROM read_csv('/etc/passwd')",
+            "SELECT * FROM glob('/proc/self/environ')",
+            "SELECT * FROM read_parquet('/data/other-tenant.parquet')",
+            "SELECT read_text('/etc/passwd')",
+            "WITH x AS (SELECT * FROM read_blob('/etc/shadow')) SELECT * FROM x",
+        ] {
+            let result = store.query_sql(sql);
+            assert!(result.is_err(), "must reject: {sql}");
+            assert!(
+                result.unwrap_err().to_string().contains("not permitted"),
+                "wrong error for: {sql}"
+            );
+        }
+        // A string literal that merely spells a function name is fine (not a call).
+        assert!(store.query_sql("SELECT 'read_text' AS label").is_ok());
+    }
+
+    #[tokio::test]
+    async fn tenant_scoping_covers_sessions_and_blocks_internal_views() {
+        let store = EpisodicStore::new();
+        store
+            .start_session_for_tenant("sess-a", "agent", None, None, "tenant-a")
+            .await
+            .unwrap();
+        store
+            .start_session_for_tenant("sess-b", "agent", None, None, "tenant-b")
+            .await
+            .unwrap();
+
+        // `sessions` is now tenant-scoped (previously `SELECT * FROM sessions` leaked all tenants').
+        let a = store
+            .query_sql_for_tenant("SELECT session_id FROM sessions", "tenant-a", 100)
+            .unwrap();
+        assert_eq!(a.len(), 1, "tenant A must see only its own session");
+        assert_eq!(a[0]["session_id"], "sess-a");
+
+        // Addressing another tenant's internal view by name is rejected (fail-closed).
+        let escape = store.query_sql_for_tenant(
+            "SELECT * FROM episodic__t_tenant_b_0000000000000000",
+            "tenant-a",
+            100,
+        );
+        assert!(
+            escape.is_err(),
+            "direct reference to an internal per-tenant view must be rejected"
+        );
     }
 
     #[tokio::test]

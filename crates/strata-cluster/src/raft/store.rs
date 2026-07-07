@@ -11,14 +11,24 @@ use std::sync::Arc;
 
 use openraft::storage::LogState;
 use openraft::{
-    Entry, LogId, OptionalSend, RaftLogReader, RaftSnapshotBuilder, Snapshot, SnapshotMeta,
-    StorageError, StoredMembership, Vote,
+    AnyError, Entry, LogId, OptionalSend, RaftLogReader, RaftSnapshotBuilder, Snapshot,
+    SnapshotMeta, StorageError, StorageIOError, StoredMembership, Vote,
 };
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use strata_core::StrataEngine;
 
 use super::types::{AppRequest, AppResponse, NodeId, NodeInfo, TypeConfig};
+
+/// Convert a storage-write failure (SQLite or serialization) into an openraft `StorageError`.
+///
+/// Returning this from a `RaftStorage` write method makes openraft treat the write as NOT durable
+/// and shut the node down, rather than proceeding as if the vote/log/state were persisted. That is
+/// exactly what prevents a forgotten vote (→ double-vote → split-brain) or a lost committed entry:
+/// we must never report `Ok(())` for a write that did not reach stable storage.
+fn sm_write_err<E: std::error::Error + 'static>(e: &E) -> StorageError<NodeId> {
+    StorageIOError::<NodeId>::write(AnyError::new(e)).into()
+}
 
 /// Shared state for the Raft store (cache + persistent SQLite).
 #[derive(Debug)]
@@ -41,6 +51,10 @@ struct StoreInner {
     committed: Option<LogId<NodeId>>,
 }
 
+// The persistence helpers return openraft's `StorageError`, which is large by design (it carries
+// subject/verb/source for a fatal data-crash report). Boxing it here would just force an unbox at
+// the `RaftStorage` trait boundary, so allow the large-Err variant on these internal helpers.
+#[allow(clippy::result_large_err)]
 impl StoreInner {
     fn init_schema(conn: &Connection) {
         conn.execute_batch(
@@ -56,44 +70,57 @@ impl StoreInner {
         .expect("failed to create raft schema");
     }
 
-    /// Persist a log entry to SQLite.
-    fn persist_entry(&self, idx: u64, entry: &Entry<TypeConfig>) {
+    /// Persist a log entry to SQLite. Errors propagate so openraft never believes an entry is
+    /// durable when the write (or its serialization) actually failed.
+    fn persist_entry(
+        &self,
+        idx: u64,
+        entry: &Entry<TypeConfig>,
+    ) -> Result<(), StorageError<NodeId>> {
         if let Some(ref db) = self.db {
-            let data = rmp_serde::to_vec(entry).unwrap_or_default();
-            let _ = db.execute(
+            let data = rmp_serde::to_vec(entry).map_err(|e| sm_write_err(&e))?;
+            db.execute(
                 "INSERT OR REPLACE INTO raft_log (idx, entry) VALUES (?1, ?2)",
                 rusqlite::params![idx as i64, data],
-            );
+            )
+            .map_err(|e| sm_write_err(&e))?;
         }
+        Ok(())
     }
 
-    /// Delete log entries from SQLite.
-    fn delete_entries_from(&self, from_idx: u64) {
+    /// Delete log entries from SQLite (index >= from_idx).
+    fn delete_entries_from(&self, from_idx: u64) -> Result<(), StorageError<NodeId>> {
         if let Some(ref db) = self.db {
-            let _ = db.execute(
+            db.execute(
                 "DELETE FROM raft_log WHERE idx >= ?1",
                 rusqlite::params![from_idx as i64],
-            );
+            )
+            .map_err(|e| sm_write_err(&e))?;
         }
+        Ok(())
     }
 
-    fn delete_entries_upto(&self, upto_idx: u64) {
+    fn delete_entries_upto(&self, upto_idx: u64) -> Result<(), StorageError<NodeId>> {
         if let Some(ref db) = self.db {
-            let _ = db.execute(
+            db.execute(
                 "DELETE FROM raft_log WHERE idx <= ?1",
                 rusqlite::params![upto_idx as i64],
-            );
+            )
+            .map_err(|e| sm_write_err(&e))?;
         }
+        Ok(())
     }
 
-    /// Persist metadata (vote, committed, etc.) to SQLite.
-    fn persist_meta(&self, key: &str, value: &[u8]) {
+    /// Persist metadata (vote, committed, last_applied, …) to SQLite. Errors propagate.
+    fn persist_meta(&self, key: &str, value: &[u8]) -> Result<(), StorageError<NodeId>> {
         if let Some(ref db) = self.db {
-            let _ = db.execute(
+            db.execute(
                 "INSERT OR REPLACE INTO raft_meta (key, value) VALUES (?1, ?2)",
                 rusqlite::params![key, value],
-            );
+            )
+            .map_err(|e| sm_write_err(&e))?;
         }
+        Ok(())
     }
 
     /// Load metadata from SQLite.
@@ -209,10 +236,14 @@ impl MemStore {
         let conn =
             Connection::open(path).map_err(|e| crate::Error::Raft(format!("open raft db: {e}")))?;
 
-        // Durability: WAL mode survives process crashes without corruption.
+        // Durability: WAL + `synchronous=FULL`. FULL (not NORMAL) is required for a *consensus*
+        // log — NORMAL does not fsync the WAL on commit, so a committed Raft entry or a granted
+        // vote can roll back on an OS crash / power loss, violating Raft's durability guarantee
+        // (lost committed write, or a forgotten vote → double-vote → split-brain). The extra fsync
+        // per commit is the price of that guarantee.
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
+             PRAGMA synchronous=FULL;
              PRAGMA busy_timeout=5000;",
         )
         .map_err(|e| crate::Error::Raft(format!("set pragmas: {e}")))?;
@@ -449,11 +480,13 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     type SnapshotBuilder = Self;
 
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
+        // Persist to stable storage FIRST; only then update the in-memory cache. If the durable
+        // write fails we return the error (openraft shuts the node down) instead of pretending the
+        // vote was granted — the guard against a forgotten vote → double-vote → split-brain.
+        let data = rmp_serde::to_vec(vote).map_err(|e| sm_write_err(&e))?;
         let mut inner = self.inner.lock();
+        inner.persist_meta("vote", &data)?;
         inner.vote = Some(*vote);
-        if let Ok(data) = rmp_serde::to_vec(vote) {
-            inner.persist_meta("vote", &data);
-        }
         Ok(())
     }
 
@@ -465,11 +498,10 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         &mut self,
         committed: Option<LogId<NodeId>>,
     ) -> Result<(), StorageError<NodeId>> {
+        let data = rmp_serde::to_vec(&committed).map_err(|e| sm_write_err(&e))?;
         let mut inner = self.inner.lock();
+        inner.persist_meta("committed", &data)?;
         inner.committed = committed;
-        if let Ok(data) = rmp_serde::to_vec(&committed) {
-            inner.persist_meta("committed", &data);
-        }
         Ok(())
     }
 
@@ -499,7 +531,8 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         let mut inner = self.inner.lock();
         for entry in entries {
             let idx = entry.log_id.index;
-            inner.persist_entry(idx, &entry);
+            // Persist to disk before updating the in-memory cache.
+            inner.persist_entry(idx, &entry)?;
             inner.log.insert(idx, entry);
         }
         Ok(())
@@ -510,7 +543,7 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         log_id: LogId<NodeId>,
     ) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock();
-        inner.delete_entries_from(log_id.index);
+        inner.delete_entries_from(log_id.index)?;
         let to_remove: Vec<u64> = inner.log.range(log_id.index..).map(|(k, _)| *k).collect();
         for key in to_remove {
             inner.log.remove(&key);
@@ -519,12 +552,11 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     }
 
     async fn purge_logs_upto(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
+        let data = rmp_serde::to_vec(&Some(log_id)).map_err(|e| sm_write_err(&e))?;
         let mut inner = self.inner.lock();
+        inner.persist_meta("last_purged", &data)?;
         inner.last_purged = Some(log_id);
-        if let Ok(data) = rmp_serde::to_vec(&Some(log_id)) {
-            inner.persist_meta("last_purged", &data);
-        }
-        inner.delete_entries_upto(log_id.index);
+        inner.delete_entries_upto(log_id.index)?;
         let to_remove: Vec<u64> = inner.log.range(..=log_id.index).map(|(k, _)| *k).collect();
         for key in to_remove {
             inner.log.remove(&key);
@@ -549,32 +581,33 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         for entry in entries {
             let log_id = entry.log_id;
 
-            // Update last applied + persist
-            {
-                let mut inner = self.inner.lock();
-                inner.last_applied = Some(log_id);
-                if let Ok(data) = rmp_serde::to_vec(&Some(log_id)) {
-                    inner.persist_meta("last_applied", &data);
-                }
-            }
-
-            match entry.payload {
-                openraft::EntryPayload::Blank => {
-                    responses.push(AppResponse::Ok);
-                }
-                openraft::EntryPayload::Normal(ref req) => {
-                    let resp = self.apply_request(req).await;
-                    responses.push(resp);
-                }
+            // Apply the entry's effect BEFORE persisting `last_applied`, so a crash between the two
+            // re-applies the entry on restart (safe — apply is idempotent for the common variants)
+            // rather than marking it applied while its data write was lost.
+            // NOTE: full atomicity of the engine data write with `last_applied` (an idempotent
+            // apply, or storing `last_applied` inside the engine transaction) is a separate
+            // follow-up; this ordering only removes the "mark-then-lose" window.
+            let resp = match entry.payload {
+                openraft::EntryPayload::Blank => AppResponse::Ok,
+                openraft::EntryPayload::Normal(ref req) => self.apply_request(req).await,
                 openraft::EntryPayload::Membership(ref membership) => {
                     let mut inner = self.inner.lock();
                     inner.last_membership = StoredMembership::new(Some(log_id), membership.clone());
-                    if let Ok(data) = rmp_serde::to_vec(&inner.last_membership) {
-                        inner.persist_meta("last_membership", &data);
-                    }
-                    responses.push(AppResponse::Ok);
+                    let data =
+                        rmp_serde::to_vec(&inner.last_membership).map_err(|e| sm_write_err(&e))?;
+                    inner.persist_meta("last_membership", &data)?;
+                    AppResponse::Ok
                 }
+            };
+
+            {
+                let data = rmp_serde::to_vec(&Some(log_id)).map_err(|e| sm_write_err(&e))?;
+                let mut inner = self.inner.lock();
+                inner.persist_meta("last_applied", &data)?;
+                inner.last_applied = Some(log_id);
             }
+
+            responses.push(resp);
         }
 
         Ok(responses)
@@ -615,13 +648,11 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
             meta: meta.clone(),
             data,
         });
-        // Persist applied state
-        if let Ok(d) = rmp_serde::to_vec(&inner.last_applied) {
-            inner.persist_meta("last_applied", &d);
-        }
-        if let Ok(d) = rmp_serde::to_vec(&inner.last_membership) {
-            inner.persist_meta("last_membership", &d);
-        }
+        // Persist applied state.
+        let d = rmp_serde::to_vec(&inner.last_applied).map_err(|e| sm_write_err(&e))?;
+        inner.persist_meta("last_applied", &d)?;
+        let d = rmp_serde::to_vec(&inner.last_membership).map_err(|e| sm_write_err(&e))?;
+        inner.persist_meta("last_membership", &d)?;
         Ok(())
     }
 
