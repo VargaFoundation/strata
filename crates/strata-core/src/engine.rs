@@ -980,6 +980,22 @@ impl StrataEngine {
         // interrupted before its result was journaled does not appear in the transcript, so on
         // resume it gets the SAME idempotency key — idempotent downstream tools then run it once.
         let mut tool_seq = transcript.matches("TOOL call ").count();
+        // Server-side idempotency ledger: results of external tool calls already executed in a prior
+        // attempt (read from the journaled trace, keyed by the stable `_idempotency_key`). On resume,
+        // re-issuing the same call reuses the recorded result instead of running the external side
+        // effect again — effectively-once, without a per-turn consensus write.
+        let mut executed: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        for step in self.run_trace(run_id).await.unwrap_or_default() {
+            if let Some(p) = step.get("payload") {
+                if let (Some(k), Some(r)) = (
+                    p.get("idempotency_key").and_then(|v| v.as_str()),
+                    p.get("result"),
+                ) {
+                    executed.insert(k.to_string(), r.clone());
+                }
+            }
+        }
         let mut final_answer = None;
         for _turn in 0..max_turns.max(1) {
             // Renew the lease each turn; if we've lost it (a stale lease re-claimed by another
@@ -1034,20 +1050,43 @@ impl StrataEngine {
                 let tool = parts.next().unwrap_or("").to_string();
                 let mut args: serde_json::Value =
                     serde_json::from_str(args_str.trim()).unwrap_or_else(|_| serde_json::json!({}));
-                // Deterministic idempotency key: stable across resume, so a re-run of an interrupted
-                // call is de-duplicated by tools that honor `_idempotency_key` (best effort —
-                // external effects are otherwise at-least-once; make mutating tools idempotent).
+                // Deterministic idempotency key, stable across resume (`run_id:tool:<n>`).
                 let idem = format!("{run_id}:tool:{tool_seq}");
-                if let Some(obj) = args.as_object_mut() {
-                    obj.insert("_idempotency_key".into(), idem.clone().into());
-                }
-                let executor = self.tool_executor.read().clone();
-                let result = match executor {
-                    Some(ex) => ex
-                        .call_tool(&server, &tool, args)
-                        .await
-                        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
-                    None => serde_json::json!({ "error": "no tool executor configured" }),
+                let result = if let Some(prev) = executed.get(&idem) {
+                    // Server-side effectively-once: this call already ran in a prior attempt (its
+                    // result is in the journaled trace) — reuse it instead of running the external
+                    // side effect again.
+                    tracing::info!(%run_id, idem, "tool already executed — reusing recorded result");
+                    prev.clone()
+                } else {
+                    // Don't execute a side-effecting external tool if we're no longer the leader (a
+                    // stale ex-leader mid-partition) — stop BEFORE the side effect. Cheap local
+                    // metric check (no consensus round-trip).
+                    let replicator = self.run_replicator.read().clone();
+                    let is_leader = match replicator {
+                        Some(r) => r.is_leader().await,
+                        None => true,
+                    };
+                    if !is_leader {
+                        tracing::warn!(%run_id, "no longer the leader — stopping before the external tool call");
+                        return self
+                            .run_get(run_id)
+                            .await?
+                            .ok_or_else(|| crate::Error::State("run vanished".into()));
+                    }
+                    if let Some(obj) = args.as_object_mut() {
+                        obj.insert("_idempotency_key".into(), idem.clone().into());
+                    }
+                    let executor = self.tool_executor.read().clone();
+                    let r = match executor {
+                        Some(ex) => ex
+                            .call_tool(&server, &tool, args)
+                            .await
+                            .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
+                        None => serde_json::json!({ "error": "no tool executor configured" }),
+                    };
+                    executed.insert(idem.clone(), r.clone());
+                    r
                 };
                 self.run_log_step(
                     run_id,
@@ -4461,6 +4500,84 @@ mod tests {
         // The run must be terminal (Failed), so the dispatcher won't resume it forever (poison run).
         let after = engine.run_get(run.id).await.unwrap().unwrap();
         assert_eq!(after.status, RunStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn resume_reuses_recorded_tool_result_without_re_executing() {
+        use crate::llm::CompletionProvider;
+        use crate::runtime::{RunStatus, ToolExecutor};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Scripted model: issues the external call, then answers.
+        struct Scripted {
+            calls: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl CompletionProvider for Scripted {
+            async fn complete(&self, _s: &str, _u: &str) -> crate::Result<String> {
+                Ok(match self.calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => "TOOL call billing charge: {}".to_string(),
+                    _ => "done".to_string(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "scripted"
+            }
+        }
+        // Counts how many times the external tool ACTUALLY runs.
+        struct CountingTool {
+            runs: std::sync::Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl ToolExecutor for CountingTool {
+            async fn call_tool(
+                &self,
+                _server: &str,
+                _tool: &str,
+                _args: serde_json::Value,
+            ) -> crate::Result<serde_json::Value> {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({ "charged": true }))
+            }
+        }
+
+        let runs = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut engine = StrataEngine::new(inmem_config()).await.unwrap();
+        engine.completion = Some(std::sync::Arc::new(Scripted {
+            calls: AtomicUsize::new(0),
+        }));
+        engine.set_tool_executor(std::sync::Arc::new(CountingTool { runs: runs.clone() }));
+
+        // Pre-journal the tool_call (idempotency key :tool:0) as if it already ran in a prior
+        // attempt — the server-side ledger must reuse its result and NOT re-execute the side effect.
+        let run = engine
+            .run_create("default", Some("a".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        engine
+            .run_log_step(
+                run.id,
+                "default",
+                "tool_call",
+                serde_json::json!({
+                    "tool": "billing/charge",
+                    "idempotency_key": format!("{}:tool:0", run.id),
+                    "result": { "charged": true },
+                }),
+            )
+            .await
+            .unwrap();
+
+        let out = engine
+            .drive_agent_loop(run.id, "default", "a", String::new(), 5)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Succeeded);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "the external tool must not re-execute — its recorded result is reused"
+        );
     }
 
     #[tokio::test]

@@ -397,6 +397,10 @@ fn replicate_err(e: crate::Error) -> strata_core::Error {
 
 #[async_trait::async_trait]
 impl strata_core::runtime::RunReplicator for CoordinatorRunReplicator {
+    async fn is_leader(&self) -> bool {
+        self.coord.read().await.is_leader()
+    }
+
     async fn replicate_run_create(
         &self,
         run: &strata_core::runtime::Run,
