@@ -106,6 +106,26 @@ resources:
     cpu: "2"
     memory: 4Gi
 
+# -- Pod-level security context. runAsNonRoot matches the image (uid 1000); fsGroup makes the PVC
+# group-writable; seccomp RuntimeDefault.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context: drop all capabilities and block privilege escalation.
+# readOnlyRootFilesystem is left false by default — enable it once all writes are confined to
+# mounted volumes (data -> PVC) and a writable emptyDir is provided for /tmp (snapshot staging).
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+
 # -- Liveness and readiness probes
 probes:
   liveness:
@@ -116,7 +136,9 @@ probes:
     periodSeconds: 15
   readiness:
     httpGet:
-      path: /health
+      # /ready returns 503 when the node has no Raft leader or a subsystem is down, so a
+      # not-yet-ready pod is kept out of the Service (unlike /health, which is always 200).
+      path: /ready
       port: http
     initialDelaySeconds: 5
     periodSeconds: 5
@@ -138,6 +160,16 @@ prometheusRule:
   enabled: false
   # Extra labels so your Prometheus Operator's ruleSelector picks it up, e.g. { release: kube-prometheus-stack }.
   labels: {}
+
+# -- NetworkPolicy: lock the PG wire (:5432), gRPC (:9432) and Raft (:9433) ports to intra-fleet
+# pod-to-pod traffic (never expose them publicly). The HTTP API (:8432) accepts ingress per
+# `httpFrom` (empty = from anywhere). Requires a CNI that enforces NetworkPolicy.
+networkPolicy:
+  enabled: false
+  # Ingress sources allowed to reach the HTTP API (:8432). Empty = allow from anywhere. Example:
+  # httpFrom:
+  #   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+  httpFrom: []
 
 # -- Node affinity / tolerations
 nodeSelector: {}

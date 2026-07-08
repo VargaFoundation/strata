@@ -52,6 +52,11 @@ impl ClusterCoordinator {
         self.config.shard_index
     }
 
+    /// The fleet-shared cluster secret (also used to authenticate the internal shard-forward marker).
+    pub fn secret(&self) -> Option<String> {
+        self.config.secret.clone()
+    }
+
     /// Base URLs of every shard's HTTP gateway, indexed by shard (empty/whitespace entries dropped).
     pub fn shard_base_urls(&self) -> Vec<String> {
         self.config
@@ -392,6 +397,10 @@ fn replicate_err(e: crate::Error) -> strata_core::Error {
 
 #[async_trait::async_trait]
 impl strata_core::runtime::RunReplicator for CoordinatorRunReplicator {
+    async fn is_leader(&self) -> bool {
+        self.coord.read().await.is_leader()
+    }
+
     async fn replicate_run_create(
         &self,
         run: &strata_core::runtime::Run,

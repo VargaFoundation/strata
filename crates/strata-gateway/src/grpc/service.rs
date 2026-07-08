@@ -591,6 +591,7 @@ mod tests {
             my_shard,
             base_urls: std::sync::Arc::new(vec!["http://s0".into(), "http://s1".into()]),
             http: reqwest::Client::new(),
+            forward_secret: None,
         };
         StrataGrpcService::new(engine, Some(auth), Some(shard))
     }

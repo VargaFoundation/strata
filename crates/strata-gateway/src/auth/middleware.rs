@@ -112,6 +112,12 @@ pub struct AuthState {
     oidc: Option<Arc<super::oidc::OidcValidator>>,
     rate_limiter: Option<Arc<RateLimiter>>,
     audit_log: Option<AuditLog>,
+    /// When true, reject any non-Admin credential that carries no tenant (a "bare" API key, or a
+    /// JWT/OIDC token with no `tenant_id`) so multi-tenant deployments can forbid unscoped access.
+    require_tenant: bool,
+    /// Shared cluster secret used to authenticate the `x-strata-shard-forwarded` marker, so a client
+    /// can't forge it to bypass rate-limiting. `None` → no forwarded request is trusted to skip.
+    shard_forward_secret: Option<Arc<String>>,
 }
 
 impl std::fmt::Debug for AuthState {
@@ -160,7 +166,34 @@ impl AuthState {
             oidc: None,
             rate_limiter,
             audit_log,
+            require_tenant: false,
+            shard_forward_secret: None,
         }
+    }
+
+    /// Opt-in: reject non-Admin credentials that carry no tenant (for multi-tenant deployments).
+    pub fn with_require_tenant(mut self, require: bool) -> Self {
+        self.require_tenant = require;
+        self
+    }
+
+    /// Set the shared cluster secret used to authenticate the internal shard-forward marker.
+    pub fn with_shard_forward_secret(mut self, secret: Option<String>) -> Self {
+        self.shard_forward_secret = secret.map(Arc::new);
+        self
+    }
+
+    /// Apply the `require_tenant` policy to a resolved context: a non-Admin identity with no tenant
+    /// is a bare API key / tenant-less token (an unscoped superuser), rejected when the policy is on.
+    fn enforce_tenant(&self, ctx: AuthContext) -> Option<AuthContext> {
+        if self.require_tenant && ctx.tenant_id.is_none() && ctx.role != Role::Admin {
+            tracing::warn!(
+                identity = %ctx.identity,
+                "rejected: require_tenant is enabled and the credential carries no tenant"
+            );
+            return None;
+        }
+        Some(ctx)
     }
 
     fn validate_api_key(&self, key: &str) -> bool {
@@ -189,7 +222,7 @@ impl AuthState {
                 } else {
                     None
                 });
-                return Some(AuthContext {
+                return self.enforce_tenant(AuthContext {
                     identity: claims.sub,
                     role,
                     agent_id,
@@ -206,7 +239,7 @@ impl AuthState {
                 } else {
                     None
                 });
-                return Some(AuthContext {
+                return self.enforce_tenant(AuthContext {
                     identity: claims.sub,
                     role,
                     agent_id,
@@ -216,7 +249,7 @@ impl AuthState {
         }
         // 3. API key — may carry a tenant + role (parsed from the key config; a bare key = Writer/none).
         if let Some(info) = self.keys.get(token) {
-            return Some(AuthContext {
+            return self.enforce_tenant(AuthContext {
                 identity: "api-key-user".into(),
                 role: info.role.clone(),
                 agent_id: None,
@@ -353,8 +386,11 @@ pub async fn require_auth(
     }
 
     // ── RBAC: admin-only paths ───────────────────────────────────
+    // `/admin/*` and Raft cluster membership control (`/cluster/*`) require the Admin role.
     let path = req.uri().path().to_string();
-    if path.contains("/admin/") && !auth_ctx.role.allows_admin_path() {
+    if (path.contains("/admin/") || path.contains("/cluster/"))
+        && !auth_ctx.role.allows_admin_path()
+    {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
 
@@ -377,9 +413,16 @@ pub async fn require_auth(
     }
 
     // ── Rate limiting ────────────────────────────────────────────
-    // A request reverse-proxied from another shard was already rate-limited on the origin pod
-    // (it carries `x-strata-shard-forwarded`); don't double-count it on the destination shard.
-    let is_shard_forwarded = req.headers().contains_key("x-strata-shard-forwarded");
+    // A request reverse-proxied from another shard was already rate-limited on the origin pod; don't
+    // double-count it. But only trust the `x-strata-shard-forwarded` marker when it carries the
+    // shared cluster secret (constant-time checked) — otherwise a client could set the header to
+    // bypass rate-limiting. With no secret configured, the marker is never trusted (re-count).
+    let is_shard_forwarded = state.shard_forward_secret.as_ref().is_some_and(|secret| {
+        req.headers()
+            .get("x-strata-shard-forwarded")
+            .map(|v| ct_eq(v.as_bytes(), secret.as_bytes()))
+            .unwrap_or(false)
+    });
     // Bucket per (identity, tenant) so a noisy tenant on a shared key can't exhaust others' budget.
     let rl_key = match &auth_ctx.tenant_id {
         Some(t) => format!("{}\u{1f}{}", auth_ctx.identity, t),
@@ -444,6 +487,19 @@ pub async fn require_auth(
     }
 
     Ok(response)
+}
+
+/// Constant-time byte-slice equality (the length is not secret). Prevents a timing side-channel when
+/// comparing the shard-forward marker against the cluster secret.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Best-effort client IP from proxy headers (`X-Forwarded-For` first hop, else `X-Real-IP`).
@@ -604,6 +660,40 @@ mod tests {
         assert_eq!(c.tenant_id.as_deref(), Some("beta"));
         // A wrong secret is rejected.
         assert!(state.authenticate("nope").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn require_tenant_rejects_bare_credentials() {
+        let state = AuthState::new(vec!["bare".into(), "sk_acme@acme".into()], None, 0)
+            .with_require_tenant(true);
+        // A bare key (Writer, no tenant) is rejected under require_tenant.
+        assert!(state.authenticate("bare").await.is_none());
+        // A tenant-scoped key still authenticates.
+        assert!(state.authenticate("sk_acme").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn require_tenant_allows_admin_without_tenant() {
+        let state = AuthState::new(vec!["adm@:admin".into()], None, 0).with_require_tenant(true);
+        // An Admin with no tenant is intentionally cross-tenant → still allowed.
+        let ctx = state.authenticate("adm").await;
+        assert_eq!(ctx.map(|c| c.role), Some(Role::Admin));
+    }
+
+    #[tokio::test]
+    async fn bare_key_allowed_when_require_tenant_off() {
+        // Default (off) preserves the legacy behaviour: a bare key authenticates.
+        let state = AuthState::new(vec!["bare".into()], None, 0);
+        assert!(state.authenticate("bare").await.is_some());
+    }
+
+    #[test]
+    fn ct_eq_matches_only_equal_slices() {
+        assert!(ct_eq(b"secret", b"secret"));
+        assert!(!ct_eq(b"secret", b"secreT"));
+        assert!(!ct_eq(b"secret", b"secre"));
+        assert!(!ct_eq(b"", b"x"));
+        assert!(ct_eq(b"", b""));
     }
 
     #[test]

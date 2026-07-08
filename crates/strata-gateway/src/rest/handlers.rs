@@ -1957,6 +1957,24 @@ pub async fn run_request_approval(
             )
         }
     };
+    // Ownership check — never act on another tenant's run (mirrors run_cancel).
+    match engine.run_get(id).await {
+        Ok(Some(run)) if run.tenant_id == tenant => {}
+        Ok(_) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                "run not found".to_string(),
+            )
+        }
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUN_ERROR",
+                e.to_string(),
+            )
+        }
+    }
     match engine.run_request_approval(id, &tenant, &req.prompt).await {
         Ok(()) => api_ok(serde_json::json!({ "status": "waiting_approval" })),
         Err(e) => api_error(
@@ -1989,6 +2007,24 @@ pub async fn run_approve(
             )
         }
     };
+    // Ownership check — never resolve approval on another tenant's run (mirrors run_cancel).
+    match engine.run_get(id).await {
+        Ok(Some(run)) if run.tenant_id == tenant => {}
+        Ok(_) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                "run not found".to_string(),
+            )
+        }
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUN_ERROR",
+                e.to_string(),
+            )
+        }
+    }
     match engine.run_resolve_approval(id, &tenant, req.approve).await {
         Ok(()) => api_ok(serde_json::json!({
             "status": if req.approve { "approved" } else { "rejected" }
@@ -2054,6 +2090,24 @@ pub async fn run_resume(
             )
         }
     };
+    // Ownership check — never resume another tenant's run (mirrors run_cancel).
+    match engine.run_get(id).await {
+        Ok(Some(run)) if run.tenant_id == tenant => {}
+        Ok(_) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                "run not found".to_string(),
+            )
+        }
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RUN_ERROR",
+                e.to_string(),
+            )
+        }
+    }
     match engine.run_resume(id, &tenant).await {
         Ok(run) => api_ok(serde_json::json!({ "run": run })),
         Err(e) => api_error(

@@ -41,6 +41,25 @@ async fn main() -> anyhow::Result<()> {
     let (tiering_mgr, tiering_handle) = strata_core::storage::tiering::TieringManager::new(3600);
     tokio::spawn(tiering_mgr.run(engine.clone()));
 
+    // Background reindex: embed episodic events that were appended without a vector. The Raft apply
+    // path appends deterministically and leaves embedding to this local, best-effort loop, so each
+    // node builds its own vector index without a non-deterministic external call inside apply (this
+    // also repairs events left unembedded by a transient provider outage during inline ingest).
+    {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                match engine.reindex_unembedded(1000).await {
+                    Ok(n) if n > 0 => tracing::debug!(reindexed = n, "background reindex"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "background reindex failed"),
+                }
+            }
+        });
+    }
+
     // Start Raft cluster if enabled
     let coordinator = Arc::new(RwLock::new(strata_cluster::ClusterCoordinator::new(
         server_config.cluster.clone(),

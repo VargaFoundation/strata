@@ -11,14 +11,24 @@ use std::sync::Arc;
 
 use openraft::storage::LogState;
 use openraft::{
-    Entry, LogId, OptionalSend, RaftLogReader, RaftSnapshotBuilder, Snapshot, SnapshotMeta,
-    StorageError, StoredMembership, Vote,
+    AnyError, Entry, LogId, OptionalSend, RaftLogReader, RaftSnapshotBuilder, Snapshot,
+    SnapshotMeta, StorageError, StorageIOError, StoredMembership, Vote,
 };
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use strata_core::StrataEngine;
 
 use super::types::{AppRequest, AppResponse, NodeId, NodeInfo, TypeConfig};
+
+/// Convert a storage-write failure (SQLite or serialization) into an openraft `StorageError`.
+///
+/// Returning this from a `RaftStorage` write method makes openraft treat the write as NOT durable
+/// and shut the node down, rather than proceeding as if the vote/log/state were persisted. That is
+/// exactly what prevents a forgotten vote (→ double-vote → split-brain) or a lost committed entry:
+/// we must never report `Ok(())` for a write that did not reach stable storage.
+fn sm_write_err<E: std::error::Error + 'static>(e: &E) -> StorageError<NodeId> {
+    StorageIOError::<NodeId>::write(AnyError::new(e)).into()
+}
 
 /// Shared state for the Raft store (cache + persistent SQLite).
 #[derive(Debug)]
@@ -41,6 +51,10 @@ struct StoreInner {
     committed: Option<LogId<NodeId>>,
 }
 
+// The persistence helpers return openraft's `StorageError`, which is large by design (it carries
+// subject/verb/source for a fatal data-crash report). Boxing it here would just force an unbox at
+// the `RaftStorage` trait boundary, so allow the large-Err variant on these internal helpers.
+#[allow(clippy::result_large_err)]
 impl StoreInner {
     fn init_schema(conn: &Connection) {
         conn.execute_batch(
@@ -56,44 +70,57 @@ impl StoreInner {
         .expect("failed to create raft schema");
     }
 
-    /// Persist a log entry to SQLite.
-    fn persist_entry(&self, idx: u64, entry: &Entry<TypeConfig>) {
+    /// Persist a log entry to SQLite. Errors propagate so openraft never believes an entry is
+    /// durable when the write (or its serialization) actually failed.
+    fn persist_entry(
+        &self,
+        idx: u64,
+        entry: &Entry<TypeConfig>,
+    ) -> Result<(), StorageError<NodeId>> {
         if let Some(ref db) = self.db {
-            let data = rmp_serde::to_vec(entry).unwrap_or_default();
-            let _ = db.execute(
+            let data = rmp_serde::to_vec(entry).map_err(|e| sm_write_err(&e))?;
+            db.execute(
                 "INSERT OR REPLACE INTO raft_log (idx, entry) VALUES (?1, ?2)",
                 rusqlite::params![idx as i64, data],
-            );
+            )
+            .map_err(|e| sm_write_err(&e))?;
         }
+        Ok(())
     }
 
-    /// Delete log entries from SQLite.
-    fn delete_entries_from(&self, from_idx: u64) {
+    /// Delete log entries from SQLite (index >= from_idx).
+    fn delete_entries_from(&self, from_idx: u64) -> Result<(), StorageError<NodeId>> {
         if let Some(ref db) = self.db {
-            let _ = db.execute(
+            db.execute(
                 "DELETE FROM raft_log WHERE idx >= ?1",
                 rusqlite::params![from_idx as i64],
-            );
+            )
+            .map_err(|e| sm_write_err(&e))?;
         }
+        Ok(())
     }
 
-    fn delete_entries_upto(&self, upto_idx: u64) {
+    fn delete_entries_upto(&self, upto_idx: u64) -> Result<(), StorageError<NodeId>> {
         if let Some(ref db) = self.db {
-            let _ = db.execute(
+            db.execute(
                 "DELETE FROM raft_log WHERE idx <= ?1",
                 rusqlite::params![upto_idx as i64],
-            );
+            )
+            .map_err(|e| sm_write_err(&e))?;
         }
+        Ok(())
     }
 
-    /// Persist metadata (vote, committed, etc.) to SQLite.
-    fn persist_meta(&self, key: &str, value: &[u8]) {
+    /// Persist metadata (vote, committed, last_applied, …) to SQLite. Errors propagate.
+    fn persist_meta(&self, key: &str, value: &[u8]) -> Result<(), StorageError<NodeId>> {
         if let Some(ref db) = self.db {
-            let _ = db.execute(
+            db.execute(
                 "INSERT OR REPLACE INTO raft_meta (key, value) VALUES (?1, ?2)",
                 rusqlite::params![key, value],
-            );
+            )
+            .map_err(|e| sm_write_err(&e))?;
         }
+        Ok(())
     }
 
     /// Load metadata from SQLite.
@@ -209,10 +236,14 @@ impl MemStore {
         let conn =
             Connection::open(path).map_err(|e| crate::Error::Raft(format!("open raft db: {e}")))?;
 
-        // Durability: WAL mode survives process crashes without corruption.
+        // Durability: WAL + `synchronous=FULL`. FULL (not NORMAL) is required for a *consensus*
+        // log — NORMAL does not fsync the WAL on commit, so a committed Raft entry or a granted
+        // vote can roll back on an OS crash / power loss, violating Raft's durability guarantee
+        // (lost committed write, or a forgotten vote → double-vote → split-brain). The extra fsync
+        // per commit is the price of that guarantee.
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
+             PRAGMA synchronous=FULL;
              PRAGMA busy_timeout=5000;",
         )
         .map_err(|e| crate::Error::Raft(format!("set pragmas: {e}")))?;
@@ -239,33 +270,26 @@ impl MemStore {
     }
 
     /// Apply an application request to the engine.
-    async fn apply_request(&self, req: &AppRequest) -> AppResponse {
+    /// Apply one committed request to the engine. Errors PROPAGATE (they are no longer swallowed):
+    /// a failed apply must not be marked applied, or the entry would be silently dropped on this
+    /// node and diverge from its peers. The caller turns an error into a `StorageError` so openraft
+    /// halts the node; the entry is re-applied on restart (apply is idempotent for these variants).
+    async fn apply_request(&self, req: &AppRequest) -> Result<AppResponse, strata_core::Error> {
         let Some(engine) = &self.engine else {
-            return AppResponse::Ok;
+            return Ok(AppResponse::Ok);
         };
 
-        match req {
+        let resp = match req {
             // Events are already fully formed (ids + timestamps fixed by the leader), so apply
             // is deterministic across nodes.
             AppRequest::Ingest { events, tenant } => {
-                let result = match tenant {
-                    Some(t) => {
-                        engine
-                            .ingest_for_tenant(
-                                events.clone(),
-                                &strata_core::config::TenantContext::new(t.clone()),
-                            )
-                            .await
-                    }
-                    None => engine.ingest(events.clone()).await,
-                };
-                match result {
-                    Ok(n) => AppResponse::Ingested(n),
-                    Err(e) => {
-                        tracing::error!(error = %e, "raft apply: ingest failed");
-                        AppResponse::Ingested(0)
-                    }
-                }
+                // Episodic append ONLY — deterministic. Vectors are indexed locally + best-effort by
+                // the background reindex loop, so apply makes no external, non-deterministic
+                // embedding call (which would diverge the index across nodes and stall apply).
+                let n = engine
+                    .ingest_replicated(events.clone(), tenant.as_deref())
+                    .await?;
+                AppResponse::Ingested(n)
             }
             AppRequest::StateSet {
                 agent_id,
@@ -273,30 +297,24 @@ impl MemStore {
                 value,
                 tenant,
             } => {
-                let res = match tenant {
+                let v = match tenant {
                     Some(t) => {
                         engine
                             .state_set_for_tenant(t, agent_id, key, value.clone())
-                            .await
+                            .await?
                     }
-                    None => engine.state_set(agent_id, key, value.clone()).await,
+                    None => engine.state_set(agent_id, key, value.clone()).await?,
                 };
-                match res {
-                    Ok(v) => AppResponse::StateVersion(v),
-                    Err(e) => {
-                        tracing::error!(error = %e, "raft apply: state_set failed");
-                        AppResponse::StateVersion(0)
-                    }
-                }
+                AppResponse::StateVersion(v)
             }
             AppRequest::StateDelete {
                 agent_id,
                 key,
                 tenant,
             } => {
-                let _ = match tenant {
-                    Some(t) => engine.state_delete_for_tenant(t, agent_id, key).await,
-                    None => engine.state_delete(agent_id, key).await,
+                match tenant {
+                    Some(t) => engine.state_delete_for_tenant(t, agent_id, key).await?,
+                    None => engine.state_delete(agent_id, key).await?,
                 };
                 AppResponse::Deleted
             }
@@ -312,29 +330,24 @@ impl MemStore {
                     embedding: embedding.clone(),
                     metadata: metadata.clone(),
                 };
-                let _ = engine.semantic_upsert(&entry).await;
+                engine.semantic_upsert(&entry).await?;
                 AppResponse::Ok
             }
             AppRequest::SemanticDelete { id } => {
-                let _ = engine.semantic_delete(*id).await;
+                engine.semantic_delete(*id).await?;
                 AppResponse::Ok
             }
             // Materialized memory rows (leader already ran cognition) → deterministic replay.
             AppRequest::MemoryUpsert { rows } => {
-                match engine.memory_apply_rows(rows.clone()).await {
-                    Ok(n) => AppResponse::MemoryCount(n),
-                    Err(e) => {
-                        tracing::error!(error = %e, "raft apply: memory upsert failed");
-                        AppResponse::MemoryCount(0)
-                    }
-                }
+                let n = engine.memory_apply_rows(rows.clone()).await?;
+                AppResponse::MemoryCount(n)
             }
             AppRequest::MemoryDelete { id } => {
-                let _ = engine.memory_delete(*id).await;
+                engine.memory_delete(*id).await?;
                 AppResponse::MemoryCount(1)
             }
             AppRequest::GraphAddEdge { tenant, edge } => {
-                let _ = engine.graph_apply_edge(tenant.as_deref(), edge).await;
+                engine.graph_apply_edge(tenant.as_deref(), edge).await?;
                 AppResponse::Ok
             }
             AppRequest::GraphSupersede {
@@ -344,17 +357,17 @@ impl MemStore {
                 at,
                 by,
             } => {
-                let _ = engine
+                engine
                     .graph_supersede_apply(tenant.as_deref(), src, relation, *at, *by)
-                    .await;
+                    .await?;
                 AppResponse::Ok
             }
             AppRequest::MemoryExpire { ids } => {
-                let _ = engine.memory_expire(ids).await;
+                engine.memory_expire(ids).await?;
                 AppResponse::MemoryCount(ids.len() as u64)
             }
             AppRequest::RunCreate { run } => {
-                let _ = engine.run_apply_create(run).await;
+                engine.run_apply_create(run).await?;
                 AppResponse::Ok
             }
             AppRequest::RunUpdate {
@@ -362,10 +375,11 @@ impl MemStore {
                 patch,
                 updated_at,
             } => {
-                let _ = engine.run_apply_update(*id, patch, *updated_at).await;
+                engine.run_apply_update(*id, patch, *updated_at).await?;
                 AppResponse::Ok
             }
-        }
+        };
+        Ok(resp)
     }
 }
 
@@ -399,15 +413,13 @@ impl RaftSnapshotBuilder<TypeConfig> for MemStore {
             (inner.last_applied, inner.last_membership.clone())
         };
 
-        // Build a real snapshot from the engine state
+        // Build a real snapshot from the engine state. If it FAILS, return an error rather than
+        // emitting an empty blob with a real `last_log_id` — a follower installing that would
+        // fast-forward `last_applied` over state it never received (silent divergence).
         let data = if let Some(engine) = &self.engine {
-            match crate::replication::snapshot::SnapshotManager::build(engine).await {
-                Ok(snapshot_data) => snapshot_data,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to build snapshot, using empty");
-                    Vec::new()
-                }
-            }
+            crate::replication::snapshot::SnapshotManager::build(engine)
+                .await
+                .map_err(|e| StorageIOError::<NodeId>::write_snapshot(None, AnyError::new(&e)))?
         } else {
             Vec::new()
         };
@@ -449,11 +461,13 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     type SnapshotBuilder = Self;
 
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
+        // Persist to stable storage FIRST; only then update the in-memory cache. If the durable
+        // write fails we return the error (openraft shuts the node down) instead of pretending the
+        // vote was granted — the guard against a forgotten vote → double-vote → split-brain.
+        let data = rmp_serde::to_vec(vote).map_err(|e| sm_write_err(&e))?;
         let mut inner = self.inner.lock();
+        inner.persist_meta("vote", &data)?;
         inner.vote = Some(*vote);
-        if let Ok(data) = rmp_serde::to_vec(vote) {
-            inner.persist_meta("vote", &data);
-        }
         Ok(())
     }
 
@@ -465,11 +479,10 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         &mut self,
         committed: Option<LogId<NodeId>>,
     ) -> Result<(), StorageError<NodeId>> {
+        let data = rmp_serde::to_vec(&committed).map_err(|e| sm_write_err(&e))?;
         let mut inner = self.inner.lock();
+        inner.persist_meta("committed", &data)?;
         inner.committed = committed;
-        if let Ok(data) = rmp_serde::to_vec(&committed) {
-            inner.persist_meta("committed", &data);
-        }
         Ok(())
     }
 
@@ -499,7 +512,8 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         let mut inner = self.inner.lock();
         for entry in entries {
             let idx = entry.log_id.index;
-            inner.persist_entry(idx, &entry);
+            // Persist to disk before updating the in-memory cache.
+            inner.persist_entry(idx, &entry)?;
             inner.log.insert(idx, entry);
         }
         Ok(())
@@ -510,7 +524,7 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         log_id: LogId<NodeId>,
     ) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock();
-        inner.delete_entries_from(log_id.index);
+        inner.delete_entries_from(log_id.index)?;
         let to_remove: Vec<u64> = inner.log.range(log_id.index..).map(|(k, _)| *k).collect();
         for key in to_remove {
             inner.log.remove(&key);
@@ -519,12 +533,11 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     }
 
     async fn purge_logs_upto(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
+        let data = rmp_serde::to_vec(&Some(log_id)).map_err(|e| sm_write_err(&e))?;
         let mut inner = self.inner.lock();
+        inner.persist_meta("last_purged", &data)?;
         inner.last_purged = Some(log_id);
-        if let Ok(data) = rmp_serde::to_vec(&Some(log_id)) {
-            inner.persist_meta("last_purged", &data);
-        }
-        inner.delete_entries_upto(log_id.index);
+        inner.delete_entries_upto(log_id.index)?;
         let to_remove: Vec<u64> = inner.log.range(..=log_id.index).map(|(k, _)| *k).collect();
         for key in to_remove {
             inner.log.remove(&key);
@@ -549,32 +562,40 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
         for entry in entries {
             let log_id = entry.log_id;
 
-            // Update last applied + persist
-            {
-                let mut inner = self.inner.lock();
-                inner.last_applied = Some(log_id);
-                if let Ok(data) = rmp_serde::to_vec(&Some(log_id)) {
-                    inner.persist_meta("last_applied", &data);
-                }
-            }
-
-            match entry.payload {
-                openraft::EntryPayload::Blank => {
-                    responses.push(AppResponse::Ok);
-                }
-                openraft::EntryPayload::Normal(ref req) => {
-                    let resp = self.apply_request(req).await;
-                    responses.push(resp);
-                }
+            // Apply the entry's effect BEFORE persisting `last_applied`, so a crash between the two
+            // re-applies the entry on restart (safe — apply is idempotent for the common variants)
+            // rather than marking it applied while its data write was lost.
+            // NOTE: full atomicity of the engine data write with `last_applied` (an idempotent
+            // apply, or storing `last_applied` inside the engine transaction) is a separate
+            // follow-up; this ordering only removes the "mark-then-lose" window.
+            let resp = match entry.payload {
+                openraft::EntryPayload::Blank => AppResponse::Ok,
+                // A committed entry that fails to apply must NOT be marked applied (that would
+                // silently drop it and diverge from peers). Surface a StorageError so openraft halts
+                // this node; on restart the entry is re-applied (apply is idempotent for the
+                // replicated variants).
+                openraft::EntryPayload::Normal(ref req) => match self.apply_request(req).await {
+                    Ok(resp) => resp,
+                    Err(e) => return Err(StorageIOError::apply(log_id, AnyError::new(&e)).into()),
+                },
                 openraft::EntryPayload::Membership(ref membership) => {
                     let mut inner = self.inner.lock();
                     inner.last_membership = StoredMembership::new(Some(log_id), membership.clone());
-                    if let Ok(data) = rmp_serde::to_vec(&inner.last_membership) {
-                        inner.persist_meta("last_membership", &data);
-                    }
-                    responses.push(AppResponse::Ok);
+                    let data =
+                        rmp_serde::to_vec(&inner.last_membership).map_err(|e| sm_write_err(&e))?;
+                    inner.persist_meta("last_membership", &data)?;
+                    AppResponse::Ok
                 }
+            };
+
+            {
+                let data = rmp_serde::to_vec(&Some(log_id)).map_err(|e| sm_write_err(&e))?;
+                let mut inner = self.inner.lock();
+                inner.persist_meta("last_applied", &data)?;
+                inner.last_applied = Some(log_id);
             }
+
+            responses.push(resp);
         }
 
         Ok(responses)
@@ -597,14 +618,25 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     ) -> Result<(), StorageError<NodeId>> {
         let data = snapshot.into_inner();
 
-        // Restore engine state from the snapshot data
+        // A snapshot that claims a real `last_log_id` but carries no data is broken: installing it
+        // would fast-forward `last_applied` over state we never received. Refuse it.
+        if data.is_empty() && meta.last_log_id.is_some() {
+            return Err(StorageIOError::<NodeId>::read_snapshot(
+                None,
+                AnyError::error("empty snapshot with a non-null last_log_id — refusing to install"),
+            )
+            .into());
+        }
+
+        // Restore engine state from the snapshot data. If the restore FAILS, do NOT advance
+        // `last_applied` (that would silently diverge) — surface the error so openraft retries.
         if !data.is_empty() {
             if let Some(engine) = &self.engine {
-                if let Err(e) =
-                    crate::replication::snapshot::SnapshotManager::restore(engine, &data).await
-                {
-                    tracing::error!(error = %e, "failed to restore snapshot to engine");
-                }
+                crate::replication::snapshot::SnapshotManager::restore(engine, &data)
+                    .await
+                    .map_err(|e| {
+                        StorageIOError::<NodeId>::read_snapshot(None, AnyError::new(&e))
+                    })?;
             }
         }
 
@@ -615,13 +647,11 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
             meta: meta.clone(),
             data,
         });
-        // Persist applied state
-        if let Ok(d) = rmp_serde::to_vec(&inner.last_applied) {
-            inner.persist_meta("last_applied", &d);
-        }
-        if let Ok(d) = rmp_serde::to_vec(&inner.last_membership) {
-            inner.persist_meta("last_membership", &d);
-        }
+        // Persist applied state.
+        let d = rmp_serde::to_vec(&inner.last_applied).map_err(|e| sm_write_err(&e))?;
+        inner.persist_meta("last_applied", &d)?;
+        let d = rmp_serde::to_vec(&inner.last_membership).map_err(|e| sm_write_err(&e))?;
+        inner.persist_meta("last_membership", &d)?;
         Ok(())
     }
 
@@ -665,8 +695,14 @@ mod tests {
 
         // ...applied on two independent nodes...
         let (n1, n2) = (inmem_engine().await, inmem_engine().await);
-        MemStore::new(Some(n1.clone())).apply_request(&req).await;
-        MemStore::new(Some(n2.clone())).apply_request(&req).await;
+        MemStore::new(Some(n1.clone()))
+            .apply_request(&req)
+            .await
+            .unwrap();
+        MemStore::new(Some(n2.clone()))
+            .apply_request(&req)
+            .await
+            .unwrap();
 
         // ...yields identical state (same event id) — the determinism property Raft requires.
         let r1 = n1.query_sql("SELECT id FROM episodic").await.unwrap();
@@ -691,7 +727,8 @@ mod tests {
                     embedding: None,
                 }],
             })
-            .await;
+            .await
+            .unwrap();
         assert!(matches!(resp, AppResponse::MemoryCount(1)));
         assert_eq!(engine.memory_count().await.unwrap(), 1);
     }
@@ -713,7 +750,8 @@ mod tests {
             .apply_request(&AppRequest::MemoryExpire {
                 ids: vec![added.memory.id],
             })
-            .await;
+            .await
+            .unwrap();
         assert!(matches!(resp, AppResponse::MemoryCount(1)));
         // The expired memory is no longer active.
         assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 0);
@@ -737,7 +775,8 @@ mod tests {
                 tenant: None,
                 edge: edge.clone(),
             })
-            .await;
+            .await
+            .unwrap();
         assert!(matches!(resp, AppResponse::Ok));
         let n = engine
             .memory_neighbors("default", "Alice", 10)
@@ -775,7 +814,8 @@ mod tests {
                     tenant: None,
                     edge: seed.clone(),
                 })
-                .await;
+                .await
+                .unwrap();
             let resp = store
                 .apply_request(&AppRequest::GraphSupersede {
                     tenant: None,
@@ -784,7 +824,8 @@ mod tests {
                     at,
                     by: Some(by),
                 })
-                .await;
+                .await
+                .unwrap();
             assert!(matches!(resp, AppResponse::Ok));
             states.push(
                 engine

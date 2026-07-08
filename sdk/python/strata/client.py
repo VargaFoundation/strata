@@ -17,6 +17,13 @@ from typing import (
 import httpx
 
 
+def _sql_str(value: object) -> str:
+    """Escape a value for safe inclusion inside a single-quoted SQL string literal
+    (doubles embedded single quotes). The server exposes a raw-SQL query API with no
+    bind parameters, so the SDK must escape values it interpolates into SQL."""
+    return str(value).replace("'", "''")
+
+
 class SearchFilters(TypedDict, total=False):
     source: str
     event_type: str
@@ -335,12 +342,15 @@ class StrataClient:
         """
         conditions: list[str] = []
         if source:
-            conditions.append(f"source = '{source}'")
+            conditions.append(f"source = '{_sql_str(source)}'")
         if event_type:
-            conditions.append(f"event_type = '{event_type}'")
+            conditions.append(f"event_type = '{_sql_str(event_type)}'")
 
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"SELECT * FROM episodic{where} ORDER BY ts {order} LIMIT {limit}"
+        # Validate the non-string parts too: `order` against a whitelist and `limit` as an int, so
+        # neither can be used to inject SQL.
+        order_sql = "ASC" if str(order).strip().upper() == "ASC" else "DESC"
+        sql = f"SELECT * FROM episodic{where} ORDER BY ts {order_sql} LIMIT {int(limit)}"
         return await self.query(sql)
 
     async def sources(self) -> list[str]:

@@ -128,6 +128,18 @@ impl IngestPipeline {
         Ok(count)
     }
 
+    /// Append events to the episodic store WITHOUT embedding — the deterministic half of ingest.
+    /// Used on the Raft apply path: apply must be a pure function of the request, so it must not make
+    /// a (non-deterministic, external, un-timed) embedding call that would diverge the vector index
+    /// across nodes and stall the apply loop on a hung provider. Events land `embedded = false` and
+    /// their vectors are (re)built locally + best-effort by the background reindex loop.
+    pub async fn ingest_episodic_only(&self, events: Vec<Event>) -> crate::Result<u64> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        self.episodic.append(&events).await
+    }
+
     /// Embed events, upsert their vectors, and mark the **successful** ones `embedded = true` in
     /// episodic. No-op (returns 0) when no embedding provider is configured. This is the shared path
     /// for both initial ingest and reindex/repair of previously-unembedded events — so a transient
@@ -224,6 +236,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 2);
+        assert_eq!(store.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn ingest_episodic_only_appends_without_embedding() {
+        let store = Arc::new(EpisodicStore::new());
+        let pipeline = IngestPipeline::new(store.clone());
+        let n = pipeline
+            .ingest_episodic_only(vec![make_event("a"), make_event("b")])
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
         assert_eq!(store.count().await.unwrap(), 2);
     }
 

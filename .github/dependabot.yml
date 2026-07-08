@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Keep third-party GitHub Actions current (and, if SHA-pinned, bumped) — supply-chain hygiene,
+  # so the CI workflows don't drift on floating tags without oversight.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Rust dependencies (root workspace).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The standalone k8s operator crate has its own lockfile, outside the workspace.
+  - package-ecosystem: cargo
+    directory: /ops/operator
+    schedule:
+      interval: weekly
+
+  # Python SDK.
+  - package-ecosystem: pip
+    directory: /sdk/python
+    schedule:
+      interval: weekly

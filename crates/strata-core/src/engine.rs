@@ -42,6 +42,8 @@ pub struct StrataEngine {
     reranker: Option<Arc<dyn Reranker>>,
     /// Durable agent-run ledger (agentic-platform substrate).
     runs: Arc<RunStore>,
+    /// Unique id for THIS engine instance — the owner of agent-run driver leases (concurrency guard).
+    driver_id: String,
     /// Optional executor for external tools (e.g. downstream MCP servers), injected by the gateway.
     tool_executor: parking_lot::RwLock<Option<Arc<dyn ToolExecutor>>>,
     /// Optional replicator routing run-ledger writes through Raft (cluster mode), injected by the
@@ -73,11 +75,30 @@ impl StrataEngine {
             tracing::info!(path = %config.memory.episodic.db_path, "episodic store: file-backed");
         }
 
-        // Initialize semantic store
-        let semantic = Arc::new(
-            SemanticStore::with_dimension(config.embedding.dimension)
-                .unwrap_or_else(|_| SemanticStore::new()),
-        );
+        // Initialize the event vector index. In file-backed (persistent) mode, reload the index that
+        // was saved on the last shutdown/backup so semantic search over pre-restart events survives a
+        // restart. Previously it was created empty and never reloaded, and because indexed events are
+        // flagged `embedded=true` the reindex path skipped them — so every pre-restart event silently
+        // dropped out of semantic/RAG search until re-ingested.
+        let semantic = Arc::new({
+            let index_dir = &config.memory.semantic.index_dir;
+            let reloaded = if config.memory.episodic.db_path != ":memory:"
+                && !index_dir.is_empty()
+                && index_dir != ":memory:"
+            {
+                SemanticStore::load(std::path::Path::new(index_dir)).ok()
+            } else {
+                None
+            };
+            match reloaded {
+                Some(s) => {
+                    tracing::info!(entries = s.len(), dir = %index_dir, "reloaded event vector index from disk");
+                    s
+                }
+                None => SemanticStore::with_dimension(config.embedding.dimension)
+                    .unwrap_or_else(|_| SemanticStore::new()),
+            }
+        });
 
         // Initialize state store
         let state_path = Path::new(&config.memory.state.db_path);
@@ -323,6 +344,7 @@ impl StrataEngine {
             completion,
             reranker,
             runs,
+            driver_id: uuid::Uuid::new_v4().to_string(),
             tool_executor: parking_lot::RwLock::new(None),
             run_replicator: parking_lot::RwLock::new(None),
         })
@@ -555,6 +577,21 @@ impl StrataEngine {
         tenant: &str,
         approved: bool,
     ) -> Result<()> {
+        // Only a *pending* approval may be resolved: reject a double-approve / approve-then-reject
+        // race and any resolve of a run that isn't actually awaiting approval (which would otherwise
+        // flip a terminal run back to Running, or resolve the same approval twice).
+        let is_pending = self
+            .run_approval_status(run_id)
+            .await?
+            .as_ref()
+            .and_then(|v| v.get("state"))
+            .and_then(|s| s.as_str())
+            == Some("pending");
+        if !is_pending {
+            return Err(crate::Error::State(
+                "no pending approval to resolve for this run".into(),
+            ));
+        }
         self.state_set_via_driver(
             &format!("__approval:{run_id}"),
             "status",
@@ -797,9 +834,44 @@ impl StrataEngine {
                     p.get("question").and_then(|v| v.as_str()).unwrap_or("")
                 )),
                 "tool_call" => {
-                    let q = p.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    let r = p.get("results").map(|v| v.to_string()).unwrap_or_default();
-                    t.push_str(&format!("Assistant: TOOL search: {q}\nObservation: {r}\n"));
+                    // Reconstruct the EXACT line the live loop emitted for this step, dispatching on
+                    // the journaled `tool`. Getting this right is what makes resume correct: the
+                    // idempotency counter is `transcript.matches("TOOL call ").count()`, so external
+                    // calls MUST re-render as `TOOL call …` (else the counter resets and keys shift),
+                    // and the real observations must be replayed (else the LLM re-issues calls blindly).
+                    let tool = p.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+                    match tool {
+                        "search" => {
+                            let q = p.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                            let results: Vec<String> = p
+                                .get("results")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            t.push_str(&format!(
+                                "Assistant: TOOL search: {q}\nObservation: {}\n",
+                                results.join(" | ")
+                            ));
+                        }
+                        "remember" => {
+                            let text = p.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                            t.push_str(&format!(
+                                "Assistant: TOOL remember: {text}\nObservation: stored\n"
+                            ));
+                        }
+                        // Downstream MCP tool, journaled as `tool = "<server>/<tool>"` + a `result`.
+                        other => {
+                            let (server, tool_name) = other.split_once('/').unwrap_or((other, ""));
+                            let result = p.get("result").map(|v| v.to_string()).unwrap_or_default();
+                            t.push_str(&format!(
+                                "Assistant: TOOL call {server} {tool_name}\nObservation: {result}\n"
+                            ));
+                        }
+                    }
                 }
                 "hitl_request" => t.push_str(&format!(
                     "Assistant: requested approval for: {}\nObservation: approved\n",
@@ -811,10 +883,74 @@ impl StrataEngine {
         Ok(t)
     }
 
+    /// Drive an agent run, marking it `Failed` if the loop returns an error — so a poison run (e.g.
+    /// an LLM/tool call that keeps erroring) is NOT resumed forever by the dispatcher. A genuine
+    /// process crash never returns here: the run stays `Running` and is resumed after failover, as
+    /// intended. Shared by [`Self::run_agent`] and resume.
+    async fn drive_agent_loop(
+        &self,
+        run_id: uuid::Uuid,
+        tenant: &str,
+        agent_id: &str,
+        transcript: String,
+        max_turns: usize,
+    ) -> Result<Run> {
+        // Claim the driver lease so two concurrent drivers (a duplicate resume, or the dispatcher and
+        // a manual resume) don't both execute this run. If another worker holds a valid lease, don't
+        // drive — return the run's current state (not an error; don't mark it failed).
+        if !self.run_try_claim(run_id).await? {
+            tracing::debug!(%run_id, "run already leased by another worker — not driving");
+            return self
+                .run_get(run_id)
+                .await?
+                .ok_or_else(|| crate::Error::State("run vanished".into()));
+        }
+        let result = self
+            .drive_agent_loop_inner(run_id, tenant, agent_id, transcript, max_turns)
+            .await;
+        self.run_release_lease(run_id).await;
+        match result {
+            Ok(run) => Ok(run),
+            Err(e) => {
+                let now = chrono::Utc::now();
+                let _ = self
+                    .run_update(
+                        run_id,
+                        RunPatch {
+                            status: Some(RunStatus::Failed),
+                            error: Some(e.to_string()),
+                            ended_at: Some(now),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Agent-run driver lease TTL. Renewed each turn; a run whose lease is older than this is
+    /// considered orphaned and may be re-claimed by another worker.
+    const LEASE_TTL_SECS: i64 = 300;
+
+    /// Try to claim (or renew) this instance's driver lease on a run. `false` → another worker holds it.
+    async fn run_try_claim(&self, run_id: uuid::Uuid) -> Result<bool> {
+        let now = chrono::Utc::now();
+        let expires = now + chrono::Duration::seconds(Self::LEASE_TTL_SECS);
+        self.runs
+            .try_claim_lease(run_id, &self.driver_id, now, expires)
+            .await
+    }
+
+    /// Release this instance's driver lease on a run (best-effort; a no-op if it isn't ours).
+    async fn run_release_lease(&self, run_id: uuid::Uuid) {
+        let _ = self.runs.release_lease(run_id, &self.driver_id).await;
+    }
+
     /// The agent loop over an **existing** run: LLM↔tool turns until a final answer, a pause for
     /// approval (`TOOL approve: <reason>` → `WaitingApproval`, resumable via [`Self::run_resume`]),
-    /// or max turns. Journals every step. Shared by [`Self::run_agent`] and resume.
-    async fn drive_agent_loop(
+    /// or max turns. Journals every step.
+    async fn drive_agent_loop_inner(
         &self,
         run_id: uuid::Uuid,
         tenant: &str,
@@ -844,8 +980,33 @@ impl StrataEngine {
         // interrupted before its result was journaled does not appear in the transcript, so on
         // resume it gets the SAME idempotency key — idempotent downstream tools then run it once.
         let mut tool_seq = transcript.matches("TOOL call ").count();
+        // Server-side idempotency ledger: results of external tool calls already executed in a prior
+        // attempt (read from the journaled trace, keyed by the stable `_idempotency_key`). On resume,
+        // re-issuing the same call reuses the recorded result instead of running the external side
+        // effect again — effectively-once, without a per-turn consensus write.
+        let mut executed: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        for step in self.run_trace(run_id).await.unwrap_or_default() {
+            if let Some(p) = step.get("payload") {
+                if let (Some(k), Some(r)) = (
+                    p.get("idempotency_key").and_then(|v| v.as_str()),
+                    p.get("result"),
+                ) {
+                    executed.insert(k.to_string(), r.clone());
+                }
+            }
+        }
         let mut final_answer = None;
         for _turn in 0..max_turns.max(1) {
+            // Renew the lease each turn; if we've lost it (a stale lease re-claimed by another
+            // worker), stop driving to avoid concurrent execution — return the current run state.
+            if !self.run_try_claim(run_id).await? {
+                tracing::warn!(%run_id, "lost the run lease mid-loop — another worker took over");
+                return self
+                    .run_get(run_id)
+                    .await?
+                    .ok_or_else(|| crate::Error::State("run vanished".into()));
+            }
             let reply = completion.complete(system, &transcript).await?;
             let trimmed = reply.trim().to_string();
             if let Some(q) = trimmed.strip_prefix("TOOL search:") {
@@ -889,20 +1050,43 @@ impl StrataEngine {
                 let tool = parts.next().unwrap_or("").to_string();
                 let mut args: serde_json::Value =
                     serde_json::from_str(args_str.trim()).unwrap_or_else(|_| serde_json::json!({}));
-                // Deterministic idempotency key: stable across resume, so a re-run of an interrupted
-                // call is de-duplicated by tools that honor `_idempotency_key` (best effort —
-                // external effects are otherwise at-least-once; make mutating tools idempotent).
+                // Deterministic idempotency key, stable across resume (`run_id:tool:<n>`).
                 let idem = format!("{run_id}:tool:{tool_seq}");
-                if let Some(obj) = args.as_object_mut() {
-                    obj.insert("_idempotency_key".into(), idem.clone().into());
-                }
-                let executor = self.tool_executor.read().clone();
-                let result = match executor {
-                    Some(ex) => ex
-                        .call_tool(&server, &tool, args)
-                        .await
-                        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
-                    None => serde_json::json!({ "error": "no tool executor configured" }),
+                let result = if let Some(prev) = executed.get(&idem) {
+                    // Server-side effectively-once: this call already ran in a prior attempt (its
+                    // result is in the journaled trace) — reuse it instead of running the external
+                    // side effect again.
+                    tracing::info!(%run_id, idem, "tool already executed — reusing recorded result");
+                    prev.clone()
+                } else {
+                    // Don't execute a side-effecting external tool if we're no longer the leader (a
+                    // stale ex-leader mid-partition) — stop BEFORE the side effect. Cheap local
+                    // metric check (no consensus round-trip).
+                    let replicator = self.run_replicator.read().clone();
+                    let is_leader = match replicator {
+                        Some(r) => r.is_leader().await,
+                        None => true,
+                    };
+                    if !is_leader {
+                        tracing::warn!(%run_id, "no longer the leader — stopping before the external tool call");
+                        return self
+                            .run_get(run_id)
+                            .await?
+                            .ok_or_else(|| crate::Error::State("run vanished".into()));
+                    }
+                    if let Some(obj) = args.as_object_mut() {
+                        obj.insert("_idempotency_key".into(), idem.clone().into());
+                    }
+                    let executor = self.tool_executor.read().clone();
+                    let r = match executor {
+                        Some(ex) => ex
+                            .call_tool(&server, &tool, args)
+                            .await
+                            .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
+                        None => serde_json::json!({ "error": "no tool executor configured" }),
+                    };
+                    executed.insert(idem.clone(), r.clone());
+                    r
                 };
                 self.run_log_step(
                     run_id,
@@ -1108,6 +1292,29 @@ impl StrataEngine {
             }
         }
         self.ingest.ingest(events).await
+    }
+
+    /// Append fully-materialized events to episodic ONLY (no embedding) — the deterministic write
+    /// used on the Raft apply path. Tags `_tenant_id` (if scoped) at insert time like
+    /// `ingest_for_tenant`, but leaves vector indexing to the local background reindex loop, so
+    /// apply stays a pure function of the request (no external, non-deterministic embedding call
+    /// that would diverge the index across nodes or stall the apply loop on a hung provider).
+    pub async fn ingest_replicated(
+        &self,
+        mut events: Vec<Event>,
+        tenant: Option<&str>,
+    ) -> Result<u64> {
+        if let Some(t) = tenant {
+            for event in &mut events {
+                if let serde_json::Value::Object(ref mut map) = event.payload {
+                    map.insert(
+                        "_tenant_id".to_string(),
+                        serde_json::Value::String(t.to_string()),
+                    );
+                }
+            }
+        }
+        self.ingest.ingest_episodic_only(events).await
     }
 
     /// Query events by source.
@@ -4146,6 +4353,231 @@ mod tests {
         let resumed = engine.run_resume(run.id, "default").await.unwrap();
         assert_eq!(resumed.status, RunStatus::Succeeded);
         assert_eq!(resumed.result["answer"], "deployed");
+    }
+
+    #[tokio::test]
+    async fn rebuild_transcript_is_faithful_and_keeps_tool_seq_stable() {
+        // Regression for the resume path: every journaled step type must re-render as the exact line
+        // the live loop emitted. Otherwise the idempotency counter (which counts "TOOL call ") resets
+        // to 0 and external-tool results are erased — defeating effectively-once across a resume.
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let run = engine
+            .run_create("default", Some("a1".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        let rid = run.id;
+        for (et, payload) in [
+            ("run_start", serde_json::json!({ "question": "Q?" })),
+            (
+                "tool_call",
+                serde_json::json!({ "tool": "search", "query": "cats", "results": ["fluffy", "cute"] }),
+            ),
+            (
+                "tool_call",
+                serde_json::json!({ "tool": "remember", "content": "cats are fluffy" }),
+            ),
+            (
+                "tool_call",
+                serde_json::json!({ "tool": "billing/charge", "result": { "ok": true } }),
+            ),
+            (
+                "tool_call",
+                serde_json::json!({ "tool": "email/send", "result": { "sent": 1 } }),
+            ),
+        ] {
+            engine
+                .run_log_step(rid, "default", et, payload)
+                .await
+                .unwrap();
+        }
+
+        let t = engine.rebuild_agent_transcript(rid).await.unwrap();
+
+        assert!(t.contains("Question: Q?"), "{t}");
+        assert!(t.contains("TOOL search: cats"), "{t}");
+        assert!(
+            t.contains("fluffy | cute"),
+            "search results must be replayed: {t}"
+        );
+        assert!(t.contains("TOOL remember: cats are fluffy"), "{t}");
+        // External calls must re-render as `TOOL call …` with their real result replayed…
+        assert!(t.contains("TOOL call billing charge"), "{t}");
+        assert!(t.contains("TOOL call email send"), "{t}");
+        assert!(
+            t.contains("\"ok\":true"),
+            "external result must be replayed: {t}"
+        );
+        // …so on resume the idempotency counter is 2 (the two prior external calls), not 0.
+        assert_eq!(
+            t.matches("TOOL call ").count(),
+            2,
+            "tool_seq must resume at the count of prior external calls: {t}"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_cannot_be_resolved_twice() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let run = engine
+            .run_create("default", Some("a1".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        engine
+            .run_request_approval(run.id, "default", "ok to proceed?")
+            .await
+            .unwrap();
+        // First resolution succeeds...
+        engine
+            .run_resolve_approval(run.id, "default", true)
+            .await
+            .unwrap();
+        // ...a second (double-approve / late reject) is rejected — approval is no longer pending.
+        assert!(engine
+            .run_resolve_approval(run.id, "default", false)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn event_vector_index_reloads_on_startup() {
+        use crate::memory::semantic::{SemanticEntry, SemanticStore};
+        let dir = tempfile::tempdir().unwrap();
+        let idx_dir = dir.path().join("vectors");
+        // Pre-populate + persist an event vector index to disk.
+        {
+            let store = SemanticStore::with_dimension(4).unwrap();
+            store
+                .upsert(&SemanticEntry {
+                    id: uuid::Uuid::new_v4(),
+                    content: "hello".into(),
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                    metadata: serde_json::json!({}),
+                })
+                .await
+                .unwrap();
+            store.save(&idx_dir).unwrap();
+        }
+        // A file-backed engine pointed at that index_dir must RELOAD it (not start empty).
+        let mut c = CoreConfig::default();
+        c.embedding.dimension = 4;
+        c.memory.episodic.db_path = dir.path().join("ep.duckdb").to_string_lossy().into_owned();
+        c.memory.state.db_path = dir.path().join("st.db").to_string_lossy().into_owned();
+        c.memory.cognition.db_path = dir.path().join("cog.duckdb").to_string_lossy().into_owned();
+        c.runtime.db_path = ":memory:".into();
+        c.memory.semantic.index_dir = idx_dir.to_string_lossy().into_owned();
+        let engine = StrataEngine::new(c).await.unwrap();
+        assert_eq!(
+            engine.semantic_count(),
+            1,
+            "event vector index must be reloaded from disk on startup"
+        );
+    }
+
+    #[tokio::test]
+    async fn erroring_agent_run_is_marked_failed_not_left_running() {
+        use crate::llm::CompletionProvider;
+        // A provider that always errors → the loop returns Err on the first turn.
+        struct Boom;
+        #[async_trait::async_trait]
+        impl CompletionProvider for Boom {
+            async fn complete(&self, _s: &str, _u: &str) -> crate::Result<String> {
+                Err(crate::Error::Llm("boom".into()))
+            }
+            fn model_name(&self) -> &str {
+                "boom"
+            }
+        }
+        let mut engine = StrataEngine::new(inmem_config()).await.unwrap();
+        engine.completion = Some(std::sync::Arc::new(Boom));
+        let run = engine
+            .run_create("default", Some("a1".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        let res = engine
+            .drive_agent_loop(run.id, "default", "a1", String::new(), 8)
+            .await;
+        assert!(res.is_err(), "the erroring loop must surface the error");
+        // The run must be terminal (Failed), so the dispatcher won't resume it forever (poison run).
+        let after = engine.run_get(run.id).await.unwrap().unwrap();
+        assert_eq!(after.status, RunStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn resume_reuses_recorded_tool_result_without_re_executing() {
+        use crate::llm::CompletionProvider;
+        use crate::runtime::{RunStatus, ToolExecutor};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Scripted model: issues the external call, then answers.
+        struct Scripted {
+            calls: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl CompletionProvider for Scripted {
+            async fn complete(&self, _s: &str, _u: &str) -> crate::Result<String> {
+                Ok(match self.calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => "TOOL call billing charge: {}".to_string(),
+                    _ => "done".to_string(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "scripted"
+            }
+        }
+        // Counts how many times the external tool ACTUALLY runs.
+        struct CountingTool {
+            runs: std::sync::Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl ToolExecutor for CountingTool {
+            async fn call_tool(
+                &self,
+                _server: &str,
+                _tool: &str,
+                _args: serde_json::Value,
+            ) -> crate::Result<serde_json::Value> {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({ "charged": true }))
+            }
+        }
+
+        let runs = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut engine = StrataEngine::new(inmem_config()).await.unwrap();
+        engine.completion = Some(std::sync::Arc::new(Scripted {
+            calls: AtomicUsize::new(0),
+        }));
+        engine.set_tool_executor(std::sync::Arc::new(CountingTool { runs: runs.clone() }));
+
+        // Pre-journal the tool_call (idempotency key :tool:0) as if it already ran in a prior
+        // attempt — the server-side ledger must reuse its result and NOT re-execute the side effect.
+        let run = engine
+            .run_create("default", Some("a".into()), None, serde_json::json!({}))
+            .await
+            .unwrap();
+        engine
+            .run_log_step(
+                run.id,
+                "default",
+                "tool_call",
+                serde_json::json!({
+                    "tool": "billing/charge",
+                    "idempotency_key": format!("{}:tool:0", run.id),
+                    "result": { "charged": true },
+                }),
+            )
+            .await
+            .unwrap();
+
+        let out = engine
+            .drive_agent_loop(run.id, "default", "a", String::new(), 5)
+            .await
+            .unwrap();
+        assert_eq!(out.status, RunStatus::Succeeded);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "the external tool must not re-execute — its recorded result is reused"
+        );
     }
 
     #[tokio::test]

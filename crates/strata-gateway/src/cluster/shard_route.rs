@@ -79,6 +79,10 @@ pub struct ShardRoutingState {
     pub my_shard: usize,
     pub base_urls: Arc<Vec<String>>,
     pub http: reqwest::Client,
+    /// Value stamped into the forward marker so the destination can AUTHENTICATE it (the fleet's
+    /// shared cluster secret). `None` → the destination re-counts the request (rate-limit not
+    /// skipped), which is safe: only an authenticated marker may bypass rate-limiting.
+    pub forward_secret: Option<Arc<String>>,
 }
 
 /// Hop-by-hop headers that must not be forwarded across a proxy.
@@ -130,13 +134,20 @@ pub async fn route_to_owning_shard(
                 )
                     .into_response();
             }
-            proxy(&state.http, &base, req).await
+            let marker = state.forward_secret.as_ref().map(|s| s.as_str());
+            proxy(&state.http, &base, req, marker).await
         }
     }
 }
 
-/// Reverse-proxy `req` to `base` + its path/query, returning the upstream response.
-async fn proxy(client: &reqwest::Client, base: &str, req: Request) -> Response {
+/// Reverse-proxy `req` to `base` + its path/query, returning the upstream response. `marker` is the
+/// value stamped into the forward marker (the shared secret) so the destination can authenticate it.
+async fn proxy(
+    client: &reqwest::Client,
+    base: &str,
+    req: Request,
+    marker: Option<&str>,
+) -> Response {
     let (parts, body) = req.into_parts();
     let pq = parts
         .uri
@@ -169,10 +180,11 @@ async fn proxy(client: &reqwest::Client, base: &str, req: Request) -> Response {
         }
         fwd_headers.insert(name.clone(), value.clone());
     }
-    fwd_headers.insert(
-        HeaderName::from_static(FORWARD_MARKER),
-        HeaderValue::from_static("1"),
-    );
+    // Stamp the marker with the shared secret (falls back to "1" for the loop-guard when no secret
+    // is configured or the secret isn't a valid header value — the destination then re-counts).
+    let marker_val = HeaderValue::from_str(marker.unwrap_or("1"))
+        .unwrap_or_else(|_| HeaderValue::from_static("1"));
+    fwd_headers.insert(HeaderName::from_static(FORWARD_MARKER), marker_val);
 
     // The destination's intra-shard leader-forward may 307 a write that lands on a follower; retry a
     // few times so a subsequent connection (via the shard Service) reaches the leader.
@@ -316,6 +328,7 @@ mod tests {
                 "http://127.0.0.1:9".into(), // discard port — would fail if proxied
             ]),
             http: reqwest::Client::new(),
+            forward_secret: None,
         };
         let app = axum::Router::new()
             .route(
@@ -379,6 +392,7 @@ mod tests {
                 format!("http://{addr_b}"),
             ]),
             http: reqwest::Client::new(),
+            forward_secret: None,
         };
         let router_a = crate::rest::router_with_engine_and_auth(
             engine_a.clone(),
@@ -487,6 +501,7 @@ mod tests {
                 format!("http://{addr}"), // shard 1 = the downstream
             ]),
             http: reqwest::Client::new(),
+            forward_secret: None,
         };
 
         let app = axum::Router::new()

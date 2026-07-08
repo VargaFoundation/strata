@@ -16,6 +16,10 @@ struct CachedResponse {
     created_at: Instant,
     /// USearch key for this entry's vector.
     vector_key: Option<u64>,
+    /// Tenant this response was produced for (`None` = no tenant / auth disabled). The vector
+    /// index is shared across tenants, so a similarity hit MUST be re-checked against this to avoid
+    /// serving one tenant's (RAG-augmented) answer to another.
+    tenant: Option<String>,
 }
 
 /// Cache for LLM responses with both exact-match and vector similarity lookup.
@@ -92,43 +96,41 @@ impl SemanticCache {
         None
     }
 
-    /// Look up a cached response by vector similarity.
+    /// Look up a cached response by vector similarity, scoped to `tenant`.
     ///
-    /// Searches the vector index for the nearest cached query. If the similarity
-    /// score exceeds the threshold, returns the cached response.
-    pub async fn get_by_vector(&self, embedding: &[f32]) -> Option<String> {
+    /// Searches the vector index for the nearest cached queries and returns the first whose
+    /// similarity exceeds the threshold **and** whose tenant matches the caller. Because the vector
+    /// index is shared across tenants, the tenant re-check is what prevents a cross-tenant leak: a
+    /// nearest neighbour belonging to another tenant is skipped rather than served.
+    pub async fn get_by_vector(&self, embedding: &[f32], tenant: Option<&str>) -> Option<String> {
         if embedding.is_empty() {
             return None;
         }
 
-        let index = self.index.lock();
-        if index.size() == 0 {
-            return None;
-        }
+        let results = {
+            let index = self.index.lock();
+            if index.size() == 0 {
+                return None;
+            }
+            index.search(embedding, 5).ok()?
+        };
 
-        let results = index.search(embedding, 1).ok()?;
-        if results.keys.is_empty() {
-            return None;
-        }
-
-        let best_key = results.keys[0];
-        let best_distance = results.distances[0];
-        // USearch cosine returns distance (1 - similarity), convert to similarity
-        let similarity = 1.0 - best_distance;
-
-        if similarity < self.similarity_threshold {
-            return None;
-        }
-
-        // Look up the prompt key from the vector key
-        let prompt_key = self.key_to_prompt.get(&best_key)?;
-        let prompt = prompt_key.value().clone();
-        drop(prompt_key);
-
-        // Check if the entry is still valid
-        if let Some(entry) = self.entries.get(&prompt) {
-            if entry.created_at.elapsed() < self.ttl {
-                return Some(entry.response.clone());
+        // Results are sorted by ascending distance (descending similarity), so once we drop below
+        // the threshold every later candidate is worse — stop.
+        for (&vk, &dist) in results.keys.iter().zip(results.distances.iter()) {
+            let similarity = 1.0 - dist;
+            if similarity < self.similarity_threshold {
+                break;
+            }
+            let Some(prompt_key) = self.key_to_prompt.get(&vk) else {
+                continue;
+            };
+            let prompt = prompt_key.value().clone();
+            drop(prompt_key);
+            if let Some(entry) = self.entries.get(&prompt) {
+                if entry.created_at.elapsed() < self.ttl && entry.tenant.as_deref() == tenant {
+                    return Some(entry.response.clone());
+                }
             }
         }
 
@@ -137,17 +139,25 @@ impl SemanticCache {
 
     /// Store a response in the cache with an optional embedding vector.
     pub async fn put(&self, query: &str, response: &str) {
-        self.put_with_vector(query, response, None).await;
+        self.put_with_vector(query, response, None, None).await;
     }
 
-    /// Store a response with its embedding vector for similarity-based retrieval.
-    pub async fn put_with_vector(&self, query: &str, response: &str, embedding: Option<&[f32]>) {
+    /// Store a response (with its embedding vector) scoped to `tenant`. The entries-map key is
+    /// namespaced by tenant so two tenants asking the same question don't collide, and the tenant
+    /// is recorded on the entry so the shared vector index can be re-checked on lookup.
+    pub async fn put_with_vector(
+        &self,
+        query: &str,
+        response: &str,
+        embedding: Option<&[f32]>,
+        tenant: Option<&str>,
+    ) {
         // Evict oldest entries if at capacity
         if self.entries.len() >= self.max_entries {
             self.evict_oldest();
         }
 
-        let key = normalize_key(query);
+        let key = cache_key(tenant, query);
         let vector_key = if let Some(emb) = embedding {
             let vk = self.next_key.fetch_add(1, Ordering::Relaxed);
             let index = self.index.lock();
@@ -167,6 +177,7 @@ impl SemanticCache {
                 response: response.to_string(),
                 created_at: Instant::now(),
                 vector_key,
+                tenant: tenant.map(|t| t.to_string()),
             },
         );
     }
@@ -209,6 +220,16 @@ fn normalize_key(query: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Namespace a cache key by tenant so one tenant's cached response is never keyed identically to
+/// another's. `None` (no tenant / auth disabled) uses the bare normalized prompt. Uses the ASCII
+/// unit-separator, which cannot appear in a normalized (whitespace-collapsed) prompt.
+fn cache_key(tenant: Option<&str>, query: &str) -> String {
+    match tenant {
+        Some(t) => format!("{}\u{1f}{}", t, normalize_key(query)),
+        None => normalize_key(query),
+    }
 }
 
 #[cfg(test)]
@@ -279,7 +300,7 @@ mod tests {
     async fn vector_cache_miss_when_empty() {
         let cache = SemanticCache::new();
         let emb = vec![0.1_f32; 768];
-        assert!(cache.get_by_vector(&emb).await.is_none());
+        assert!(cache.get_by_vector(&emb, None).await.is_none());
     }
 
     #[tokio::test]
@@ -287,7 +308,7 @@ mod tests {
         let cache = SemanticCache::new();
         let emb = vec![0.1_f32; 768];
         cache
-            .put_with_vector("test query", "test response", Some(&emb))
+            .put_with_vector("test query", "test response", Some(&emb), None)
             .await;
         // Exact match should still work
         assert_eq!(cache.get("test query").await.unwrap(), "test response");
@@ -298,11 +319,14 @@ mod tests {
         let cache = SemanticCache::with_config(Duration::from_secs(3600), 1000, 0.90);
         let emb = vec![0.5_f32; 768];
         cache
-            .put_with_vector("billing question", "billing answer", Some(&emb))
+            .put_with_vector("billing question", "billing answer", Some(&emb), None)
             .await;
 
         // Same vector should be a hit
-        assert_eq!(cache.get_by_vector(&emb).await.unwrap(), "billing answer");
+        assert_eq!(
+            cache.get_by_vector(&emb, None).await.unwrap(),
+            "billing answer"
+        );
     }
 
     #[tokio::test]
@@ -310,13 +334,33 @@ mod tests {
         let cache = SemanticCache::with_config(Duration::from_secs(3600), 1000, 0.99);
         let emb1 = vec![1.0_f32; 768];
         cache
-            .put_with_vector("query1", "response1", Some(&emb1))
+            .put_with_vector("query1", "response1", Some(&emb1), None)
             .await;
 
         // Very different vector should miss
         let mut emb2 = vec![0.0_f32; 768];
         emb2[0] = 1.0; // Only first element set
-        assert!(cache.get_by_vector(&emb2).await.is_none());
+        assert!(cache.get_by_vector(&emb2, None).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn vector_cache_is_tenant_isolated() {
+        // Regression: the shared vector index must not serve one tenant's cached (RAG-augmented)
+        // answer to another tenant on a similar/identical prompt.
+        let cache = SemanticCache::with_config(Duration::from_secs(3600), 1000, 0.90);
+        let emb = vec![0.5_f32; 768];
+        cache
+            .put_with_vector("q", "answer-for-a", Some(&emb), Some("tenant-a"))
+            .await;
+        // Same tenant, same vector → hit.
+        assert_eq!(
+            cache.get_by_vector(&emb, Some("tenant-a")).await.unwrap(),
+            "answer-for-a"
+        );
+        // Different tenant, identical vector → MUST miss (no cross-tenant leak).
+        assert!(cache.get_by_vector(&emb, Some("tenant-b")).await.is_none());
+        // The no-tenant namespace is also distinct from tenant A's.
+        assert!(cache.get_by_vector(&emb, None).await.is_none());
     }
 
     #[test]

@@ -17,6 +17,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use futures::stream::Stream;
+
+use crate::auth::middleware::AuthContext;
 use strata_cluster::raft::types::{AppRequest, AppResponse};
 use strata_cluster::ClusterCoordinator;
 use strata_core::memory::cognition::{MemoryInput, MemoryScope};
@@ -84,10 +86,19 @@ pub async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible
 pub async fn handle_mcp(
     State(engine): State<Arc<StrataEngine>>,
     cluster: Option<Extension<Arc<RwLock<ClusterCoordinator>>>>,
+    auth: Option<Extension<AuthContext>>,
     Json(req): Json<McpRequest>,
 ) -> Response {
     let id = req.id.clone();
     let is_initialize = req.method == "initialize";
+
+    // Bind every tool call to the AUTHENTICATED tenant (from the Bearer token). A client can NOT
+    // widen its scope with a `tenant_id` argument — the token's tenant is authoritative. When auth
+    // is disabled (or a legacy bare key carries no tenant) this is `None` → unscoped/"default",
+    // matching the REST handlers' behaviour.
+    let tenant: Option<String> = auth
+        .as_ref()
+        .and_then(|Extension(ctx)| ctx.tenant_id.clone());
 
     let response = match req.method.as_str() {
         "initialize" => McpResponse::success(
@@ -128,7 +139,7 @@ pub async fn handle_mcp(
                 .unwrap_or("");
             let args = req.params.get("arguments").cloned().unwrap_or_default();
             let coord = cluster.as_ref().map(|Extension(c)| c.clone());
-            match call_tool(&engine, coord, tool_name, &args).await {
+            match call_tool(&engine, coord, tenant.as_deref(), tool_name, &args).await {
                 Ok(result) => McpResponse::success(
                     id,
                     serde_json::json!({
@@ -193,6 +204,16 @@ fn scope_from_args(args: &serde_json::Value) -> MemoryScope {
     }
 }
 
+/// Like [`scope_from_args`] but forces the tenant to the authenticated one when present, so a
+/// client-supplied `tenant_id` argument can never widen the scope to another tenant's memories.
+fn scoped_for(args: &serde_json::Value, tenant: Option<&str>) -> MemoryScope {
+    let mut scope = scope_from_args(args);
+    if let Some(t) = tenant {
+        scope.tenant_id = t.to_string();
+    }
+    scope
+}
+
 /// Replicate a write through the Raft log via the leader. MCP isn't leader-forwarded, so a write
 /// that reaches a follower surfaces a clear "retry on the leader" message.
 async fn mcp_cluster_write(
@@ -212,6 +233,7 @@ async fn mcp_cluster_write(
 async fn call_tool(
     engine: &StrataEngine,
     cluster: Option<Arc<RwLock<ClusterCoordinator>>>,
+    tenant: Option<&str>,
     name: &str,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -221,14 +243,13 @@ async fn call_tool(
                 .get("sql")
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'sql' parameter")?;
-            engine
-                .query_sql(sql)
-                .await
-                .map(|rows| {
-                    let count = rows.len();
-                    serde_json::json!({"rows": rows, "count": count})
-                })
-                .map_err(|e| e.to_string())
+            let rows = match tenant {
+                Some(t) => engine.query_sql_for_tenant(sql, t).await,
+                None => engine.query_sql(sql).await,
+            }
+            .map_err(|e| e.to_string())?;
+            let count = rows.len();
+            Ok(serde_json::json!({"rows": rows, "count": count}))
         }
 
         "ingest" => {
@@ -265,7 +286,7 @@ async fn call_tool(
                     coord,
                     AppRequest::Ingest {
                         events,
-                        tenant: None,
+                        tenant: tenant.map(|t| t.to_string()),
                     },
                 )
                 .await?
@@ -275,11 +296,15 @@ async fn call_tool(
                 };
                 return Ok(serde_json::json!({ "ingested": n }));
             }
-            engine
-                .ingest(events)
-                .await
-                .map(|count| serde_json::json!({"ingested": count}))
-                .map_err(|e| e.to_string())
+            match tenant {
+                Some(t) => {
+                    let tc = strata_core::config::TenantContext::new(t.to_string());
+                    engine.ingest_for_tenant(events, &tc).await
+                }
+                None => engine.ingest(events).await,
+            }
+            .map(|count| serde_json::json!({ "ingested": count }))
+            .map_err(|e| e.to_string())
         }
 
         "get_state" => {
@@ -291,19 +316,20 @@ async fn call_tool(
                 .get("key")
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'key'")?;
-            engine
-                .state_get(agent_id, key)
-                .await
-                .map(|entry| match entry {
-                    Some(e) => serde_json::json!({
-                        "agent_id": e.agent_id,
-                        "key": e.key,
-                        "value": e.value,
-                        "version": e.version,
-                    }),
-                    None => serde_json::json!({"error": "not found"}),
-                })
-                .map_err(|e| e.to_string())
+            let entry = match tenant {
+                Some(t) => engine.state_get_for_tenant(t, agent_id, key).await,
+                None => engine.state_get(agent_id, key).await,
+            }
+            .map_err(|e| e.to_string())?;
+            Ok(match entry {
+                Some(e) => serde_json::json!({
+                    "agent_id": e.agent_id,
+                    "key": e.key,
+                    "value": e.value,
+                    "version": e.version,
+                }),
+                None => serde_json::json!({"error": "not found"}),
+            })
         }
 
         "set_state" => {
@@ -323,7 +349,7 @@ async fn call_tool(
                         agent_id: agent_id.to_string(),
                         key: key.to_string(),
                         value,
-                        tenant: None,
+                        tenant: tenant.map(|t| t.to_string()),
                     },
                 )
                 .await?
@@ -333,11 +359,12 @@ async fn call_tool(
                 };
                 return Ok(serde_json::json!({ "version": v }));
             }
-            engine
-                .state_set(agent_id, key, value)
-                .await
-                .map(|version| serde_json::json!({"version": version}))
-                .map_err(|e| e.to_string())
+            match tenant {
+                Some(t) => engine.state_set_for_tenant(t, agent_id, key, value).await,
+                None => engine.state_set(agent_id, key, value).await,
+            }
+            .map(|version| serde_json::json!({ "version": version }))
+            .map_err(|e| e.to_string())
         }
 
         "search" => {
@@ -346,24 +373,27 @@ async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'text' parameter")?;
             let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-            engine
-                .embed_and_search(text, k, None, None)
-                .await
-                .map(|results| {
-                    let items: Vec<serde_json::Value> = results
-                        .iter()
-                        .map(|r| {
-                            serde_json::json!({
-                                "id": r.entry.id.to_string(),
-                                "content": r.entry.content,
-                                "metadata": r.entry.metadata,
-                                "score": r.score,
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({"results": items, "count": items.len()})
+            let results = match tenant {
+                Some(t) => {
+                    engine
+                        .embed_and_search_for_tenant(text, k, t, None, None)
+                        .await
+                }
+                None => engine.embed_and_search(text, k, None, None).await,
+            }
+            .map_err(|e| e.to_string())?;
+            let items: Vec<serde_json::Value> = results
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.entry.id.to_string(),
+                        "content": r.entry.content,
+                        "metadata": r.entry.metadata,
+                        "score": r.score,
+                    })
                 })
-                .map_err(|e| e.to_string())
+                .collect();
+            Ok(serde_json::json!({"results": items, "count": items.len()}))
         }
 
         "embed" => {
@@ -388,11 +418,20 @@ async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'agent_id'")?;
             let parent = args.get("parent_session_id").and_then(|v| v.as_str());
-            engine
-                .session_start(session_id, agent_id, parent, None)
-                .await
-                .map(|()| serde_json::json!({"session_id": session_id, "status": "started"}))
-                .map_err(|e| e.to_string())
+            match tenant {
+                Some(t) => {
+                    engine
+                        .session_start_for_tenant(session_id, agent_id, parent, None, t)
+                        .await
+                }
+                None => {
+                    engine
+                        .session_start(session_id, agent_id, parent, None)
+                        .await
+                }
+            }
+            .map(|()| serde_json::json!({"session_id": session_id, "status": "started"}))
+            .map_err(|e| e.to_string())
         }
 
         "end_session" => {
@@ -401,11 +440,15 @@ async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'session_id'")?;
             let summary = args.get("summary").and_then(|v| v.as_str());
-            engine
-                .session_end(session_id, summary)
-                .await
-                .map(|()| serde_json::json!({"session_id": session_id, "status": "ended"}))
-                .map_err(|e| e.to_string())
+            match tenant {
+                Some(t) => engine
+                    .session_end_for_tenant(session_id, summary, t)
+                    .await
+                    .map(|_| ()),
+                None => engine.session_end(session_id, summary).await,
+            }
+            .map(|()| serde_json::json!({"session_id": session_id, "status": "ended"}))
+            .map_err(|e| e.to_string())
         }
 
         "recall_session" => {
@@ -413,17 +456,16 @@ async fn call_tool(
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'session_id'")?;
-            engine
-                .session_recall(session_id)
-                .await
-                .map(|events| {
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "events": events,
-                        "count": events.len(),
-                    })
-                })
-                .map_err(|e| e.to_string())
+            let events = match tenant {
+                Some(t) => engine.session_recall_for_tenant(session_id, t).await,
+                None => engine.session_recall(session_id).await,
+            }
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "events": events,
+                "count": events.len(),
+            }))
         }
 
         "add_memory" => {
@@ -432,7 +474,7 @@ async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'content' parameter")?;
             let input = MemoryInput {
-                scope: scope_from_args(args),
+                scope: scoped_for(args, tenant),
                 subject: args
                     .get("subject")
                     .and_then(|v| v.as_str())
@@ -469,7 +511,7 @@ async fn call_tool(
                 .ok_or("missing 'query' parameter")?;
             let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
             engine
-                .memory_search(query, &scope_from_args(args), k)
+                .memory_search(query, &scoped_for(args, tenant), k)
                 .await
                 .map(|hits| serde_json::json!({"results": hits, "count": hits.len()}))
                 .map_err(|e| e.to_string())
@@ -478,7 +520,7 @@ async fn call_tool(
         "get_memories" => {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
             engine
-                .memory_all(&scope_from_args(args), limit)
+                .memory_all(&scoped_for(args, tenant), limit)
                 .await
                 .map(|mems| serde_json::json!({"memories": mems, "count": mems.len()}))
                 .map_err(|e| e.to_string())
@@ -490,11 +532,13 @@ async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'id' parameter")?;
             let uuid = uuid::Uuid::parse_str(id).map_err(|_| "invalid 'id'".to_string())?;
-            let mem = engine
-                .memory_get(uuid)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "memory not found".to_string())?;
+            // Fetch tenant-scoped so a cross-tenant id reads as "not found".
+            let mem = match tenant {
+                Some(t) => engine.memory_get_scoped(uuid, t).await,
+                None => engine.memory_get(uuid).await,
+            }
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "memory not found".to_string())?;
             match mem.subject.clone() {
                 Some(subject) => engine
                     .memory_history(&mem.scope, &subject)
@@ -514,14 +558,26 @@ async fn call_tool(
                 .ok_or("missing 'id' parameter")?;
             let uuid = uuid::Uuid::parse_str(id).map_err(|_| "invalid 'id'".to_string())?;
             if let Some(coord) = &cluster {
+                // Only replicate a delete for a memory the tenant actually owns.
+                if let Some(t) = tenant {
+                    if engine
+                        .memory_get_scoped(uuid, t)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .is_none()
+                    {
+                        return Err("memory not found".to_string());
+                    }
+                }
                 mcp_cluster_write(coord, AppRequest::MemoryDelete { id: uuid }).await?;
                 return Ok(serde_json::json!({ "id": id, "deleted": true }));
             }
-            engine
-                .memory_delete(uuid)
-                .await
-                .map(|()| serde_json::json!({"id": id, "deleted": true}))
-                .map_err(|e| e.to_string())
+            let deleted = match tenant {
+                Some(t) => engine.memory_delete_scoped(uuid, t).await,
+                None => engine.memory_delete(uuid).await.map(|()| true),
+            }
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({"id": id, "deleted": deleted}))
         }
 
         "remember" => {
@@ -530,7 +586,7 @@ async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'text' parameter")?;
             engine
-                .memory_remember(text, &scope_from_args(args))
+                .memory_remember(text, &scoped_for(args, tenant))
                 .await
                 .map(|added| serde_json::json!({"remembered": added.len(), "memories": added}))
                 .map_err(|e| e.to_string())
@@ -560,7 +616,7 @@ mod tests {
             method: "initialize".into(),
             params: serde_json::json!({}),
         };
-        let resp = handle_mcp(State(engine().await), None, Json(req)).await;
+        let resp = handle_mcp(State(engine().await), None, None, Json(req)).await;
         assert!(resp.headers().get("Mcp-Session-Id").is_some());
     }
 
@@ -572,8 +628,50 @@ mod tests {
             method: "ping".into(),
             params: serde_json::json!({}),
         };
-        let resp = handle_mcp(State(engine().await), None, Json(req)).await;
+        let resp = handle_mcp(State(engine().await), None, None, Json(req)).await;
         assert!(resp.headers().get("Mcp-Session-Id").is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_calls_are_tenant_scoped() {
+        // Regression test: MCP tool calls must be bound to the authenticated tenant, so one tenant
+        // cannot read another's data via the `query` tool (or by naming a `tenant_id` in args).
+        let e = engine().await;
+        let ingest_args = serde_json::json!({
+            "source": "test",
+            "events": [{"event_type": "note", "msg": "secret-of-a"}],
+        });
+        // Tenant A ingests one event.
+        call_tool(&e, None, Some("tenant-a"), "ingest", &ingest_args)
+            .await
+            .unwrap();
+
+        let query = serde_json::json!({"sql": "SELECT * FROM episodic"});
+        // Tenant B must see zero rows (isolation) …
+        let res_b = call_tool(&e, None, Some("tenant-b"), "query", &query)
+            .await
+            .unwrap();
+        assert_eq!(res_b["count"], 0, "tenant B must not see tenant A's events");
+        // … while tenant A sees its own event.
+        let res_a = call_tool(&e, None, Some("tenant-a"), "query", &query)
+            .await
+            .unwrap();
+        assert_eq!(res_a["count"], 1, "tenant A must see its own event");
+
+        // A client-supplied tenant_id argument on a memory write cannot widen scope: the memory is
+        // stored under the authenticated tenant, so the other tenant's search can't find it.
+        let add = serde_json::json!({"content": "b likes green", "tenant_id": "tenant-a"});
+        call_tool(&e, None, Some("tenant-b"), "add_memory", &add)
+            .await
+            .unwrap();
+        let search = serde_json::json!({"query": "green"});
+        let seen_by_a = call_tool(&e, None, Some("tenant-a"), "search_memory", &search)
+            .await
+            .unwrap();
+        assert_eq!(
+            seen_by_a["count"], 0,
+            "tenant A must not see tenant B's memory even though the arg named tenant-a"
+        );
     }
 
     #[tokio::test]

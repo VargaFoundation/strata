@@ -206,9 +206,56 @@ impl RunStore {
         )
         .map_err(|e| crate::Error::State(format!("create runs table: {e}")))?;
 
+        // Driver-lease columns (concurrency control). Best-effort ALTER for pre-existing DBs — each
+        // runs independently so a partially-migrated DB still gets both. These columns are LOCAL to
+        // the node (never replicated through Raft), unlike status/cursor.
+        let _ = conn.execute("ALTER TABLE runs ADD COLUMN lease_owner TEXT", []);
+        let _ = conn.execute("ALTER TABLE runs ADD COLUMN lease_expires_at TEXT", []);
+
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Atomically claim (or renew) the driver lease on a run: succeeds if the run is unleased, its
+    /// lease has expired, or `owner` already holds it. Returns true iff `owner` now holds it — a
+    /// concurrent driver (duplicate resume, dispatcher + manual) gets false and must not drive.
+    pub async fn try_claim_lease(
+        &self,
+        id: Uuid,
+        owner: &str,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> crate::Result<bool> {
+        let db = self.db.lock();
+        // RFC3339 UTC timestamps compare lexicographically, so `lease_expires_at <= now` is a valid
+        // expiry test.
+        let n = db
+            .execute(
+                "UPDATE runs SET lease_owner = ?1, lease_expires_at = ?2 \
+                 WHERE id = ?3 AND (lease_owner IS NULL OR lease_owner = ?1 \
+                                    OR lease_expires_at IS NULL OR lease_expires_at <= ?4)",
+                rusqlite::params![
+                    owner,
+                    expires_at.to_rfc3339(),
+                    id.to_string(),
+                    now.to_rfc3339(),
+                ],
+            )
+            .map_err(|e| crate::Error::State(format!("claim run lease: {e}")))?;
+        Ok(n == 1)
+    }
+
+    /// Release the driver lease `owner` holds on a run (no-op if it holds a different owner's lease).
+    pub async fn release_lease(&self, id: Uuid, owner: &str) -> crate::Result<()> {
+        let db = self.db.lock();
+        db.execute(
+            "UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL \
+             WHERE id = ?1 AND lease_owner = ?2",
+            rusqlite::params![id.to_string(), owner],
+        )
+        .map_err(|e| crate::Error::State(format!("release run lease: {e}")))?;
+        Ok(())
     }
 
     pub fn new() -> Self {
@@ -353,5 +400,53 @@ impl RunStore {
 impl Default for RunStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_run(id: Uuid) -> Run {
+        let now = Utc::now();
+        Run {
+            id,
+            tenant_id: "default".into(),
+            agent_id: None,
+            parent_run_id: None,
+            status: RunStatus::Running,
+            input: serde_json::Value::Null,
+            result: serde_json::Value::Null,
+            error: None,
+            cursor: serde_json::Value::Null,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            ended_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_is_exclusive_until_expiry_or_release() {
+        let store = RunStore::new();
+        let id = Uuid::new_v4();
+        store.create(&make_run(id)).await.unwrap();
+        let now = Utc::now();
+        let far = now + chrono::Duration::seconds(300);
+
+        // A claims the lease; B cannot while it is valid; A can renew its own.
+        assert!(store.try_claim_lease(id, "A", now, far).await.unwrap());
+        assert!(!store.try_claim_lease(id, "B", now, far).await.unwrap());
+        assert!(store.try_claim_lease(id, "A", now, far).await.unwrap());
+
+        // Once A's lease has expired, B can claim; A can no longer renew.
+        let later = far + chrono::Duration::seconds(1);
+        let b_exp = later + chrono::Duration::seconds(300);
+        assert!(store.try_claim_lease(id, "B", later, b_exp).await.unwrap());
+        assert!(!store.try_claim_lease(id, "A", later, b_exp).await.unwrap());
+
+        // B releases → A can claim again.
+        store.release_lease(id, "B").await.unwrap();
+        assert!(store.try_claim_lease(id, "A", later, b_exp).await.unwrap());
     }
 }

@@ -40,4 +40,11 @@ pub trait RunReplicator: Send + Sync {
         key: &str,
         value: serde_json::Value,
     ) -> crate::Result<()>;
+
+    /// Whether this node is currently the cluster leader — a cheap LOCAL metric read, no consensus
+    /// round-trip. Default `true` (single-node / no replicator). Lets the driver stop a stale
+    /// ex-leader before it executes a side-effecting tool during a partition.
+    async fn is_leader(&self) -> bool {
+        true
+    }
 }

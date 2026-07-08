@@ -41,6 +41,10 @@ pub struct GatewayConfig {
     /// `X-Hub-Signature-256`). When set, unsigned/mis-signed webhooks are rejected.
     #[serde(default)]
     pub webhook_secret: Option<String>,
+    /// When true, reject non-Admin credentials that carry no tenant (a bare API key or a token with
+    /// no `tenant_id`). Off by default; enable for strict multi-tenant isolation.
+    #[serde(default)]
+    pub require_tenant: bool,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -80,6 +84,7 @@ impl Default for GatewayConfig {
             oidc: crate::auth::oidc::OidcConfig::default(),
             audit_db_path: "./data/audit.duckdb".into(),
             webhook_secret: None,
+            require_tenant: false,
         }
     }
 }
@@ -105,6 +110,12 @@ impl GatewayServer {
     ) -> Result<Self> {
         let listen_addr = config.listen.clone();
 
+        // Fleet-shared cluster secret — authenticates the internal shard-forward rate-limit marker.
+        let cluster_secret = match coordinator.as_ref() {
+            Some(coord) => coord.read().await.secret(),
+            None => None,
+        };
+
         // Build REST router with engine state and optional auth
         let auth_state = if config.auth_enabled {
             let state = if config.oidc.enabled {
@@ -121,8 +132,11 @@ impl GatewayServer {
                     config.rate_limit_per_key,
                 )
             };
-            // Make the audit log durable (file-backed) for compliance.
-            let state = state.with_audit_path(&config.audit_db_path);
+            // Make the audit log durable (file-backed) for compliance; apply the tenant policy.
+            let state = state
+                .with_audit_path(&config.audit_db_path)
+                .with_require_tenant(config.require_tenant)
+                .with_shard_forward_secret(cluster_secret.clone());
             // Reject a weak JWT secret (HS256 needs ≥32 bytes of entropy).
             if let Some(secret) = &config.jwt_secret {
                 if secret.len() < 32 {
@@ -170,6 +184,7 @@ impl GatewayServer {
                     my_shard: c.shard_index(),
                     base_urls: std::sync::Arc::new(c.shard_base_urls()),
                     http: reqwest::Client::new(),
+                    forward_secret: cluster_secret.clone().map(std::sync::Arc::new),
                 })
             }
             None => None,
@@ -180,6 +195,9 @@ impl GatewayServer {
         let grpc_shard = shard_state.clone();
         let pg_auth = auth_state.clone();
         let pg_shard = shard_state.clone();
+        // Auth for the cluster admin routes (they are mounted after the global layers below, so
+        // they need auth applied explicitly rather than inheriting it).
+        let raft_auth = auth_state.clone();
 
         let mut app = crate::rest::router_with_engine_and_auth(
             engine.clone(),
@@ -205,8 +223,19 @@ impl GatewayServer {
         if let Some(ref coord) = coordinator {
             let coord_read = coord.read().await;
             if let Some(raft_instance) = coord_read.raft() {
-                let raft_router =
+                let mut raft_router =
                     crate::cluster::raft_routes::raft_router(Arc::new(raft_instance.clone()));
+                // These routes change Raft cluster membership — they must NEVER be reachable
+                // unauthenticated. Because the router is merged after the global layers, apply auth
+                // here explicitly; `require_auth` gates `/cluster/*` on the Admin role (see
+                // auth::middleware). When auth is disabled they stay open (dev posture, same as the
+                // rest of the API) — bind :8432 to a trusted network in that case.
+                if let Some(state) = raft_auth {
+                    raft_router = raft_router.route_layer(axum::middleware::from_fn_with_state(
+                        state,
+                        crate::auth::middleware::require_auth,
+                    ));
+                }
                 app = app.merge(raft_router);
                 tracing::info!("Cluster admin endpoints mounted (/cluster/status, /cluster/*)");
             }

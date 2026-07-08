@@ -10,6 +10,11 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Least privilege: the GITHUB_TOKEN is read-only for every job by default; a job that needs more
+# opts in explicitly (see `audit`).
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Format
@@ -52,6 +57,9 @@ jobs:
   audit:
     name: Security audit (RUSTSEC advisories)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write # audit-check posts a check-run with the advisory results
     steps:
       - uses: actions/checkout@v4
       # Scans the dependency tree for known vulnerabilities (RUSTSEC database).

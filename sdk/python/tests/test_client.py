@@ -161,3 +161,30 @@ def test_ingest_and_query_core_paths():
         assert run(client.query("SELECT 1")) == [{"x": 1}]
     finally:
         run(client.close())
+
+
+def test_events_escapes_source_and_validates_order_limit():
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["sql"] = json.loads(req.content)["sql"]
+        return httpx.Response(200, json={"rows": []})
+
+    client = make_client(handler)
+    try:
+        run(
+            client.events(
+                source="x'; DROP TABLE episodic; --",
+                order="DESC; DROP TABLE episodic",
+                limit=5,
+            )
+        )
+    finally:
+        run(client.close())
+
+    sql = seen["sql"]
+    # The malicious quote is escaped (doubled), not breaking out of the string literal.
+    assert "source = 'x''; DROP TABLE episodic; --'" in sql
+    # order is whitelisted to ASC/DESC (the injected tail is dropped); limit is an int.
+    assert "ORDER BY ts DESC LIMIT 5" in sql
+    assert sql.count("DROP TABLE episodic") == 1  # only inside the escaped literal, not executable
