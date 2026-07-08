@@ -418,15 +418,13 @@ impl RaftSnapshotBuilder<TypeConfig> for MemStore {
             (inner.last_applied, inner.last_membership.clone())
         };
 
-        // Build a real snapshot from the engine state
+        // Build a real snapshot from the engine state. If it FAILS, return an error rather than
+        // emitting an empty blob with a real `last_log_id` — a follower installing that would
+        // fast-forward `last_applied` over state it never received (silent divergence).
         let data = if let Some(engine) = &self.engine {
-            match crate::replication::snapshot::SnapshotManager::build(engine).await {
-                Ok(snapshot_data) => snapshot_data,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to build snapshot, using empty");
-                    Vec::new()
-                }
-            }
+            crate::replication::snapshot::SnapshotManager::build(engine)
+                .await
+                .map_err(|e| StorageIOError::<NodeId>::write_snapshot(None, AnyError::new(&e)))?
         } else {
             Vec::new()
         };
@@ -625,14 +623,25 @@ impl openraft::RaftStorage<TypeConfig> for MemStore {
     ) -> Result<(), StorageError<NodeId>> {
         let data = snapshot.into_inner();
 
-        // Restore engine state from the snapshot data
+        // A snapshot that claims a real `last_log_id` but carries no data is broken: installing it
+        // would fast-forward `last_applied` over state we never received. Refuse it.
+        if data.is_empty() && meta.last_log_id.is_some() {
+            return Err(StorageIOError::<NodeId>::read_snapshot(
+                None,
+                AnyError::error("empty snapshot with a non-null last_log_id — refusing to install"),
+            )
+            .into());
+        }
+
+        // Restore engine state from the snapshot data. If the restore FAILS, do NOT advance
+        // `last_applied` (that would silently diverge) — surface the error so openraft retries.
         if !data.is_empty() {
             if let Some(engine) = &self.engine {
-                if let Err(e) =
-                    crate::replication::snapshot::SnapshotManager::restore(engine, &data).await
-                {
-                    tracing::error!(error = %e, "failed to restore snapshot to engine");
-                }
+                crate::replication::snapshot::SnapshotManager::restore(engine, &data)
+                    .await
+                    .map_err(|e| {
+                        StorageIOError::<NodeId>::read_snapshot(None, AnyError::new(&e))
+                    })?;
             }
         }
 
