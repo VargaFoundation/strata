@@ -161,6 +161,16 @@ prometheusRule:
   # Extra labels so your Prometheus Operator's ruleSelector picks it up, e.g. { release: kube-prometheus-stack }.
   labels: {}
 
+# -- NetworkPolicy: lock the PG wire (:5432), gRPC (:9432) and Raft (:9433) ports to intra-fleet
+# pod-to-pod traffic (never expose them publicly). The HTTP API (:8432) accepts ingress per
+# `httpFrom` (empty = from anywhere). Requires a CNI that enforces NetworkPolicy.
+networkPolicy:
+  enabled: false
+  # Ingress sources allowed to reach the HTTP API (:8432). Empty = allow from anywhere. Example:
+  # httpFrom:
+  #   - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+  httpFrom: []
+
 # -- Node affinity / tolerations
 nodeSelector: {}
 tolerations: []
