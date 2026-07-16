@@ -34,6 +34,53 @@ pub struct MemoryProvenance {
     pub history: Vec<Memory>,
 }
 
+/// A memory lifecycle change emitted on the CDC stream (see [`StrataEngine::memory_subscribe`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryChange {
+    pub id: uuid::Uuid,
+    pub tenant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// Lifecycle event: `"upserted"` (created or reinforced/merged, now active), `"superseded"`, or
+    /// `"expired"`.
+    pub event: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+/// A caller's verdict on a retrieved memory — the feedback loop that lets ranking learn without an
+/// LLM (see [`StrataEngine::memory_feedback_plan`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryFeedback {
+    /// The memory was useful → reinforce it (importance up).
+    Helpful,
+    /// The memory was factually wrong → retire it.
+    Wrong,
+    /// The memory is stale/no-longer-true → retire it.
+    Obsolete,
+}
+
+impl MemoryFeedback {
+    /// Parse a verdict string (case-insensitive).
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "helpful" | "useful" | "up" => Some(Self::Helpful),
+            "wrong" | "incorrect" | "down" => Some(Self::Wrong),
+            "obsolete" | "stale" | "outdated" => Some(Self::Obsolete),
+            _ => None,
+        }
+    }
+}
+
+/// The materialized effect of feedback, so cluster mode replicates a deterministic change.
+#[derive(Debug, Clone)]
+pub enum FeedbackAction {
+    /// Reinforce: (re)persist these rows with bumped importance.
+    Reinforce(Vec<MemoryRow>),
+    /// Retire: bi-temporally expire these memory ids.
+    Retire(Vec<uuid::Uuid>),
+}
+
 /// Top-level engine that owns all subsystems of the Strata context lake.
 pub struct StrataEngine {
     config: CoreConfig,
@@ -57,6 +104,9 @@ pub struct StrataEngine {
     runs: Arc<RunStore>,
     /// Unique id for THIS engine instance — the owner of agent-run driver leases (concurrency guard).
     driver_id: String,
+    /// Broadcast of memory lifecycle changes (created/superseded/expired) — the CDC stream that
+    /// lets clients build reactive UIs / integrations without polling.
+    memory_change_tx: tokio::sync::broadcast::Sender<MemoryChange>,
     /// Optional executor for external tools (e.g. downstream MCP servers), injected by the gateway.
     tool_executor: parking_lot::RwLock<Option<Arc<dyn ToolExecutor>>>,
     /// Optional replicator routing run-ledger writes through Raft (cluster mode), injected by the
@@ -358,6 +408,7 @@ impl StrataEngine {
             reranker,
             runs,
             driver_id: uuid::Uuid::new_v4().to_string(),
+            memory_change_tx: tokio::sync::broadcast::channel(1024).0,
             tool_executor: parking_lot::RwLock::new(None),
             run_replicator: parking_lot::RwLock::new(None),
         })
@@ -2029,6 +2080,20 @@ impl StrataEngine {
                 }
             }
 
+            // CDC: publish the lifecycle change (best-effort; no receivers = dropped).
+            let event = match row.memory.state {
+                MemoryState::Active => "upserted",
+                MemoryState::Superseded => "superseded",
+                MemoryState::Expired => "expired",
+            };
+            let _ = self.memory_change_tx.send(MemoryChange {
+                id: row.memory.id,
+                tenant_id: row.memory.scope.tenant_id.clone(),
+                user_id: row.memory.scope.user_id.clone(),
+                event,
+                subject: row.memory.subject.clone(),
+            });
+
             // Auto-populate graph edges from the memory's content: deterministic triple extraction
             // + uuidv5 edge ids derived from the memory id, so every replica produces the identical
             // graph during apply (no payload change needed); idempotent via add_edge ON CONFLICT.
@@ -2363,10 +2428,79 @@ impl StrataEngine {
     /// Raft apply to replicate consolidation's retirement of the folded originals.
     pub async fn memory_expire(&self, ids: &[uuid::Uuid]) -> Result<()> {
         for id in ids {
+            // Capture scope before expiring so the CDC event carries tenant/user/subject.
+            let meta = self.memory_store.get(*id).await.ok().flatten();
             let _ = self.memory_store.expire(*id).await;
             let _ = self.memory_index.delete(*id).await;
+            if let Some(m) = meta {
+                let _ = self.memory_change_tx.send(MemoryChange {
+                    id: *id,
+                    tenant_id: m.scope.tenant_id.clone(),
+                    user_id: m.scope.user_id.clone(),
+                    event: "expired",
+                    subject: m.subject.clone(),
+                });
+            }
         }
         Ok(())
+    }
+
+    /// Subscribe to the memory CDC stream (created/superseded/expired). Receives every memory
+    /// lifecycle change across scopes; consumers filter by tenant. A slow consumer that lags is
+    /// signalled via `RecvError::Lagged` (bounded 1024-event buffer).
+    pub fn memory_subscribe(&self) -> tokio::sync::broadcast::Receiver<MemoryChange> {
+        self.memory_change_tx.subscribe()
+    }
+
+    /// Plan a feedback action on a memory — the read side of the feedback loop, materialized so the
+    /// cluster leader can replicate a deterministic change (rows to upsert / ids to expire) through
+    /// Raft instead of re-deriving it per node. Scoped: `None` if the id isn't the tenant's.
+    ///
+    /// - `Helpful`  → reinforce (bump importance toward 1.0, preserving the vector).
+    /// - `Wrong`/`Obsolete` → retire (bi-temporal expire + drop the vector).
+    pub async fn memory_feedback_plan(
+        &self,
+        id: uuid::Uuid,
+        tenant: Option<&str>,
+        verdict: MemoryFeedback,
+    ) -> Result<Option<(Memory, FeedbackAction)>> {
+        let memory = match tenant {
+            Some(t) => self.memory_store.get_scoped(id, t).await?,
+            None => self.memory_store.get(id).await?,
+        };
+        let Some(mut memory) = memory else {
+            return Ok(None);
+        };
+        match verdict {
+            MemoryFeedback::Helpful => {
+                // Reinforce: importance drifts up (capped), version bumps. Keep the existing vector
+                // so re-indexing doesn't NULL it.
+                memory.importance = (memory.importance + 0.1).min(1.0);
+                memory.version += 1;
+                memory.updated_at = chrono::Utc::now();
+                let embedding = self.memory_store.get_embedding(memory.id).await?;
+                Ok(Some((
+                    memory.clone(),
+                    FeedbackAction::Reinforce(vec![MemoryRow { memory, embedding }]),
+                )))
+            }
+            MemoryFeedback::Wrong | MemoryFeedback::Obsolete => Ok(Some((
+                memory.clone(),
+                FeedbackAction::Retire(vec![memory.id]),
+            ))),
+        }
+    }
+
+    /// Apply a planned feedback action locally (single-node path; the cluster path replicates the
+    /// equivalent `MemoryUpsert`/`MemoryExpire` through Raft instead).
+    pub async fn memory_feedback_apply(&self, action: FeedbackAction) -> Result<()> {
+        match action {
+            FeedbackAction::Reinforce(rows) => {
+                self.memory_apply_rows(rows).await?;
+                Ok(())
+            }
+            FeedbackAction::Retire(ids) => self.memory_expire(&ids).await,
+        }
     }
 
     /// Get a memory by id, scoped to a tenant (None if owned by another tenant).
@@ -3736,6 +3870,83 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn memory_feedback_reinforces_and_retires() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let scope = MemoryScope::user("alice");
+        let added = engine
+            .memory_add(MemoryInput::new(scope.clone(), "likes espresso"))
+            .await
+            .unwrap();
+        let id = added.memory.id;
+        let base = added.memory.importance;
+
+        // Helpful → importance rises, memory stays active.
+        let (mem, action) = engine
+            .memory_feedback_plan(id, None, MemoryFeedback::Helpful)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mem.importance > base);
+        engine.memory_feedback_apply(action).await.unwrap();
+        let after = engine.memory_get(id).await.unwrap().unwrap();
+        assert!(after.importance > base);
+        assert_eq!(after.state, MemoryState::Active);
+        assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 1);
+
+        // Wrong → retired (no longer active).
+        let (_m, action) = engine
+            .memory_feedback_plan(id, None, MemoryFeedback::Wrong)
+            .await
+            .unwrap()
+            .unwrap();
+        engine.memory_feedback_apply(action).await.unwrap();
+        assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 0);
+
+        // Cross-tenant id is not found.
+        assert!(engine
+            .memory_feedback_plan(id, Some("other"), MemoryFeedback::Helpful)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_cdc_emits_lifecycle_events() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let mut rx = engine.memory_subscribe();
+        let scope = MemoryScope::user("alice");
+
+        // Insert → "upserted".
+        let added = engine
+            .memory_add(MemoryInput::new(scope.clone(), "on the pro plan").with_subject("plan"))
+            .await
+            .unwrap();
+        let c = rx.recv().await.unwrap();
+        assert_eq!(c.event, "upserted");
+        assert_eq!(c.subject.as_deref(), Some("plan"));
+
+        // Contradiction → old "superseded" + new "upserted".
+        engine
+            .memory_add(
+                MemoryInput::new(scope.clone(), "upgraded to enterprise").with_subject("plan"),
+            )
+            .await
+            .unwrap();
+        let mut events = vec![
+            rx.recv().await.unwrap().event,
+            rx.recv().await.unwrap().event,
+        ];
+        events.sort_unstable();
+        assert_eq!(events, vec!["superseded", "upserted"]);
+
+        // Expire → "expired".
+        engine.memory_expire(&[added.memory.id]).await.unwrap();
+        // (the first memory is already superseded; expiring emits an "expired" for it)
+        let c = rx.recv().await.unwrap();
+        assert_eq!(c.event, "expired");
     }
 
     #[tokio::test]

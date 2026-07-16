@@ -1616,6 +1616,90 @@ pub async fn memory_provenance(
     }
 }
 
+/// POST /api/v1/memories/{id}/feedback — close the RAG loop.
+///
+/// Body `{"verdict": "helpful" | "wrong" | "obsolete"}`. `helpful` reinforces the memory
+/// (importance up); `wrong`/`obsolete` retire it (bi-temporal expire + drop its vector). Lets
+/// ranking learn from usage without an LLM. Tenant-scoped; replicated in cluster mode.
+pub async fn memory_feedback(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    cluster: Option<
+        Extension<std::sync::Arc<tokio::sync::RwLock<strata_cluster::ClusterCoordinator>>>,
+    >,
+    Path(id): Path<String>,
+    Json(req): Json<MemoryFeedbackRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "memory_feedback").increment(1);
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                format!("'{id}' is not a valid memory id"),
+            )
+        }
+    };
+    let verdict = match strata_core::MemoryFeedback::from_str_loose(&req.verdict) {
+        Some(v) => v,
+        None => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_VERDICT",
+                "verdict must be one of: helpful, wrong, obsolete".into(),
+            )
+        }
+    };
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+
+    let (memory, action) = match engine
+        .memory_feedback_plan(uuid, tenant.as_deref(), verdict)
+        .await
+    {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                format!("memory '{id}' not found"),
+            )
+        }
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MEMORY_ERROR",
+                e.to_string(),
+            )
+        }
+    };
+
+    // Cluster mode: replicate the materialized change through the Raft log so followers converge.
+    if let Some(Extension(coord)) = cluster {
+        let ar = match &action {
+            strata_core::FeedbackAction::Reinforce(rows) => {
+                strata_cluster::raft::types::AppRequest::MemoryUpsert { rows: rows.clone() }
+            }
+            strata_core::FeedbackAction::Retire(ids) => {
+                strata_cluster::raft::types::AppRequest::MemoryExpire { ids: ids.clone() }
+            }
+        };
+        return match coord.read().await.client_write(ar).await {
+            Ok(_) => api_ok(serde_json::json!({ "verdict": req.verdict, "memory": memory })),
+            Err(e) => cluster_write_error(e),
+        };
+    }
+
+    match engine.memory_feedback_apply(action).await {
+        Ok(()) => api_ok(serde_json::json!({ "verdict": req.verdict, "memory": memory })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "MEMORY_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
 /// Forget low-value memories via time-decay of importance (admin).
 ///
 /// POST /api/v1/admin/memory/decay
@@ -2385,6 +2469,53 @@ pub async fn schema_agents(
             "SCHEMA_ERROR",
             e.to_string(),
         ),
+    }
+}
+
+/// GET /api/v1/memories/watch → upgrades to WebSocket.
+/// Streams a JSON message for each memory lifecycle change (upserted/superseded/expired) in the
+/// caller's tenant — the memory CDC stream, for reactive UIs / integrations without polling.
+pub async fn memory_watch(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    ws.on_upgrade(move |socket| handle_memory_ws(socket, engine, tenant))
+}
+
+async fn handle_memory_ws(
+    mut socket: WebSocket,
+    engine: Arc<StrataEngine>,
+    tenant: Option<String>,
+) {
+    let mut rx = engine.memory_subscribe();
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(change) => {
+                        // Tenant isolation: only forward this tenant's changes (all, when unscoped).
+                        if tenant.as_deref().is_none_or(|t| t == change.tenant_id) {
+                            let msg = serde_json::to_string(&change).unwrap_or_default();
+                            if socket.send(Message::Text(msg.into())).await.is_err() {
+                                break; // client disconnected
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(lagged = n, "memory watcher lagged");
+                    }
+                    Err(_) => break, // channel closed
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
     }
 }
 

@@ -49,11 +49,14 @@ LLM proxy) into calls on `strata_core::StrataEngine`. Also handles authenticatio
 | DELETE | `/api/v1/admin/tenants/{tenant_id}` | GDPR erasure (all stores) | Yes* (admin) | **Working** |
 | DELETE | `/api/v1/admin/users/{user_id}` | GDPR erasure by user (memories + vectors, tenant from token) | Yes* (admin) | **Working** |
 | GET | `/api/v1/memories/{id}/provenance` | memory → source events + supersession chain | Yes* | **Working** |
+| POST | `/api/v1/memories/{id}/feedback` | feedback loop (helpful/wrong/obsolete) | Yes* | **Working** |
+| GET | `/api/v1/memories/watch` | WebSocket memory CDC stream (upserted/superseded/expired) | Yes* | **Working** |
 | GET | `/api/v1/admin/audit` | query audit log | Yes* | **Working** |
 | POST | `/mcp` | MCP JSON-RPC (Streamable HTTP; session id) | No* | **Working** |
 | GET | `/mcp` | MCP server→client SSE stream | No* | **Working** |
 | POST | `/v1/chat/completions` | LLM proxy with auto-RAG + cache + SSE streaming | No* | **Working** |
 | POST | `/v1/embeddings` | OpenAI-compatible embeddings (configured provider) | No* | **Working** |
+| POST | `/v1/messages` | native Anthropic Messages API + auto-RAG (passthrough) | No* | **Working** |
 | GET | `/cluster/status` | Raft cluster metrics | No | **Working** |
 | POST | `/raft/append` | Raft AppendEntries RPC | No | **Working** |
 | POST | `/raft/vote` | Raft RequestVote RPC | No | **Working** |

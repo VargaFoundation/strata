@@ -169,6 +169,12 @@ pub struct MemoryLinkRequest {
     pub supersede: bool,
 }
 
+/// Feedback on a retrieved memory (feedback loop): `helpful` | `wrong` | `obsolete`.
+#[derive(Debug, Deserialize)]
+pub struct MemoryFeedbackRequest {
+    pub verdict: String,
+}
+
 /// Create an agent/workflow run.
 #[derive(Debug, Deserialize)]
 pub struct CreateRunRequest {

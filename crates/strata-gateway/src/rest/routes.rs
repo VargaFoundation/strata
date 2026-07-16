@@ -162,6 +162,14 @@ pub fn router_with_engine_and_auth(
             axum::routing::get(handlers::memory_provenance),
         )
         .route(
+            "/memories/{id}/feedback",
+            axum::routing::post(handlers::memory_feedback),
+        )
+        .route(
+            "/memories/watch",
+            axum::routing::get(handlers::memory_watch),
+        )
+        .route(
             "/admin/memory/decay",
             axum::routing::post(handlers::memory_decay),
         )
@@ -308,6 +316,10 @@ pub fn router_with_engine_and_auth(
         .route(
             "/v1/embeddings",
             axum::routing::post(crate::llm_proxy::router::embeddings),
+        )
+        .route(
+            "/v1/messages",
+            axum::routing::post(crate::llm_proxy::router::messages),
         )
         .with_state(engine)
         // Response-cache mode for the proxy (exact-match by default; similarity is opt-in).
