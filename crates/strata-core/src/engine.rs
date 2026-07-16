@@ -2490,6 +2490,78 @@ impl StrataEngine {
         Ok(scored)
     }
 
+    // ── Cross-scope sharing (grants) ─────────────────────────────────
+
+    /// Grant `grantee` read access to `grantor`'s memories within `tenant` (idempotent).
+    pub async fn grant_share(
+        &self,
+        tenant: &str,
+        grantee: &str,
+        grantor: &str,
+    ) -> Result<uuid::Uuid> {
+        self.memory_store.add_grant(tenant, grantee, grantor).await
+    }
+
+    /// List the grants a `grantee` holds within `tenant` (whose memories they may read).
+    pub async fn list_grants(
+        &self,
+        tenant: &str,
+        grantee: &str,
+    ) -> Result<Vec<crate::memory::cognition::Grant>> {
+        self.memory_store.list_grants(tenant, grantee).await
+    }
+
+    /// Revoke a grant by id within `tenant`. Returns whether a row was removed.
+    pub async fn revoke_grant(&self, tenant: &str, id: uuid::Uuid) -> Result<bool> {
+        self.memory_store.revoke_grant(tenant, id).await
+    }
+
+    /// Search the caller's own memories **plus** any memories shared with them via a grant — the
+    /// team/shared-memory read path. Runs the full hybrid search per scope (own + each grantor
+    /// within the SAME tenant) and merges by best score. Grants never cross tenants, so this can
+    /// only ever widen access within one tenant. Falls back to a plain [`Self::memory_search`] for
+    /// a scope with no `user_id` (grants are user-to-user).
+    pub async fn memory_search_shared(
+        &self,
+        query: &str,
+        scope: &MemoryScope,
+        k: usize,
+    ) -> Result<Vec<MemoryHit>> {
+        let mut hits = self.memory_search(query, scope, k).await?;
+        if let Some(grantee) = scope.user_id.clone() {
+            let tenant = if scope.tenant_id.is_empty() {
+                "default"
+            } else {
+                scope.tenant_id.as_str()
+            };
+            for g in self.memory_store.list_grants(tenant, &grantee).await? {
+                let grantor_scope = MemoryScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: Some(g.grantor_user_id),
+                    agent_id: None,
+                    session_id: None,
+                };
+                hits.extend(self.memory_search(query, &grantor_scope, k).await?);
+            }
+            // Dedupe by memory id (keep the best score), then sort desc and take top-k.
+            let mut best: std::collections::HashMap<uuid::Uuid, MemoryHit> =
+                std::collections::HashMap::new();
+            for h in hits {
+                best.entry(h.memory.id)
+                    .and_modify(|e| {
+                        if h.score > e.score {
+                            e.score = h.score;
+                        }
+                    })
+                    .or_insert(h);
+            }
+            hits = best.into_values().collect();
+            hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+            hits.truncate(k);
+        }
+        Ok(hits)
+    }
+
     /// Get a memory by id.
     pub async fn memory_get(&self, id: uuid::Uuid) -> Result<Option<Memory>> {
         self.memory_store.get(id).await
@@ -4181,6 +4253,88 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn cross_scope_grants_widen_read_within_tenant_only() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let acme_bob = MemoryScope {
+            tenant_id: "acme".into(),
+            user_id: Some("bob".into()),
+            agent_id: None,
+            session_id: None,
+        };
+        let acme_alice = MemoryScope {
+            tenant_id: "acme".into(),
+            user_id: Some("alice".into()),
+            agent_id: None,
+            session_id: None,
+        };
+        let other_carol = MemoryScope {
+            tenant_id: "other".into(),
+            user_id: Some("carol".into()),
+            agent_id: None,
+            session_id: None,
+        };
+        engine
+            .memory_add(MemoryInput::new(acme_bob.clone(), "bob likes sushi"))
+            .await
+            .unwrap();
+        engine
+            .memory_add(MemoryInput::new(other_carol.clone(), "carol likes tacos"))
+            .await
+            .unwrap();
+
+        // No grant → alice's shared search sees nothing of bob's (baseline isolation holds).
+        assert!(engine
+            .memory_search_shared("sushi", &acme_alice, 5)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Grant bob→alice within acme → alice's shared search now includes bob's memory.
+        engine.grant_share("acme", "alice", "bob").await.unwrap();
+        let shared = engine
+            .memory_search_shared("sushi", &acme_alice, 5)
+            .await
+            .unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].memory.content, "bob likes sushi");
+        // Plain (non-shared) search still returns nothing for alice — grants are opt-in.
+        assert!(engine
+            .memory_search("sushi", &acme_alice, 5)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A grant cannot cross tenants: even with a grant naming carol, acme-scoped shared search
+        // resolves the grantor within acme (acme, carol) and never reaches carol's 'other'-tenant
+        // memory. (Without an embedding provider, retrieval falls back to recency and may surface
+        // other *acme* memories, so we assert on carol's specific content, not emptiness.)
+        engine.grant_share("acme", "alice", "carol").await.unwrap();
+        let still = engine
+            .memory_search_shared("tacos", &acme_alice, 5)
+            .await
+            .unwrap();
+        assert!(
+            still
+                .iter()
+                .all(|h| h.memory.content != "carol likes tacos"),
+            "cross-tenant memory must never surface via a grant"
+        );
+
+        // Revoke → back to isolated.
+        let grants = engine.list_grants("acme", "alice").await.unwrap();
+        let bob_grant = grants.iter().find(|g| g.grantor_user_id == "bob").unwrap();
+        assert!(engine
+            .revoke_grant("acme", uuid::Uuid::parse_str(&bob_grant.id).unwrap())
+            .await
+            .unwrap());
+        assert!(engine
+            .memory_search_shared("sushi", &acme_alice, 5)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

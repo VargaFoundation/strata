@@ -1477,11 +1477,91 @@ pub async fn memory_search(
         req.agent_id.as_deref(),
         req.session_id.as_deref(),
     );
-    match engine.memory_search(&req.query, &scope, req.k).await {
+    let result = if req.shared {
+        engine.memory_search_shared(&req.query, &scope, req.k).await
+    } else {
+        engine.memory_search(&req.query, &scope, req.k).await
+    };
+    match result {
         Ok(hits) => api_ok(serde_json::json!({ "results": hits, "count": hits.len() })),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "MEMORY_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// POST /api/v1/memories/grants — grant a user read access to another user's memories (tenant from
+/// the token). GET (?grantee=U) lists a user's grants; DELETE /grants/{id} revokes one.
+pub async fn grant_create(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    Json(req): Json<MemoryGrantRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "grant_create").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    match engine
+        .grant_share(&tenant, &req.grantee_user_id, &req.grantor_user_id)
+        .await
+    {
+        Ok(id) => api_ok(serde_json::json!({ "id": id.to_string(), "status": "granted" })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GRANT_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+pub async fn grant_list(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Query(params): axum::extract::Query<GrantListParams>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "grant_list").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    match engine.list_grants(&tenant, &params.grantee).await {
+        Ok(grants) => api_ok(serde_json::json!({ "grants": grants, "count": grants.len() })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GRANT_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+pub async fn grant_revoke(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    Path(id): Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "grant_revoke").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                "grant id must be a UUID".into(),
+            )
+        }
+    };
+    match engine.revoke_grant(&tenant, uuid).await {
+        Ok(removed) => api_ok(serde_json::json!({ "id": id, "revoked": removed })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GRANT_ERROR",
             e.to_string(),
         ),
     }

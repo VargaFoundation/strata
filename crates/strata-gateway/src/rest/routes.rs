@@ -197,6 +197,14 @@ pub fn router_with_engine_and_auth(
             "/semantic/search",
             axum::routing::post(handlers::semantic_modal_search),
         )
+        .route(
+            "/memories/grants",
+            axum::routing::post(handlers::grant_create).get(handlers::grant_list),
+        )
+        .route(
+            "/memories/grants/{id}",
+            axum::routing::delete(handlers::grant_revoke),
+        )
         .route("/memories/link", axum::routing::post(handlers::memory_link))
         .route(
             "/memories/graph",

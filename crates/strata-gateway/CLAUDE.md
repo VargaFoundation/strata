@@ -52,6 +52,8 @@ LLM proxy) into calls on `strata_core::StrataEngine`. Also handles authenticatio
 | GET | `/api/v1/memories/{id}/provenance` | memory → source events + supersession chain | Yes* | **Working** |
 | POST | `/api/v1/memories/{id}/feedback` | feedback loop (helpful/wrong/obsolete) | Yes* | **Working** |
 | GET | `/api/v1/memories/watch` | WebSocket memory CDC stream (upserted/superseded/expired) | Yes* | **Working** |
+| POST/GET | `/api/v1/memories/grants` | cross-scope sharing: grant/list read access (grantee→grantor, tenant-strict) | Yes* | **Working** |
+| DELETE | `/api/v1/memories/grants/{id}` | revoke a grant | Yes* | **Working** |
 | GET | `/api/v1/memories/contradictions` | HITL review queue (subjects with >1 active memory) | Yes* | **Working** |
 | POST | `/api/v1/memories/contradictions/resolve` | resolve a contradiction (keep one, supersede rest) | Yes* | **Working** |
 | GET | `/api/v1/admin/audit` | query audit log | Yes* | **Working** |

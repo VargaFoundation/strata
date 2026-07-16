@@ -377,6 +377,15 @@ pub struct MemoryHit {
     pub score: f32,
 }
 
+/// A cross-scope read grant: within a tenant, `grantee_user_id` may also read
+/// `grantor_user_id`'s memories.
+#[derive(Debug, Clone, Serialize)]
+pub struct Grant {
+    pub id: String,
+    pub grantee_user_id: String,
+    pub grantor_user_id: String,
+}
+
 /// What the cognition pipeline did with an added memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -735,6 +744,20 @@ impl MemoryStore {
                           ALTER TABLE memory_edges ADD COLUMN IF NOT EXISTS invalidated_by VARCHAR;
                           UPDATE memory_edges SET valid_from = created_at WHERE valid_from IS NULL;
                           CREATE INDEX IF NOT EXISTS idx_edges_state ON memory_edges(tenant_id, state, src);",
+                },
+                super::migrations::Migration {
+                    version: 4,
+                    // Cross-scope sharing: within a tenant, `grantee_user_id` may additionally read
+                    // `grantor_user_id`'s memories. Always tenant-scoped — grants never cross tenants.
+                    sql: "CREATE TABLE IF NOT EXISTS memory_grants (
+                            id               VARCHAR PRIMARY KEY,
+                            tenant_id        VARCHAR NOT NULL DEFAULT 'default',
+                            grantee_user_id  VARCHAR NOT NULL,
+                            grantor_user_id  VARCHAR NOT NULL,
+                            access           VARCHAR NOT NULL DEFAULT 'read',
+                            created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+                          );
+                          CREATE INDEX IF NOT EXISTS idx_grants_grantee ON memory_grants(tenant_id, grantee_user_id);",
                 },
             ],
         );
@@ -1139,6 +1162,73 @@ impl MemoryStore {
         )
         .map_err(|e| crate::Error::State(format!("delete memories by user: {e}")))?;
         Ok(ids)
+    }
+
+    // ── Cross-scope sharing (grants) ─────────────────────────────────
+
+    /// Grant `grantee` read access to `grantor`'s memories within `tenant` (idempotent). Returns the
+    /// grant id (existing id if the grant already exists). Tenant-scoped — never crosses tenants.
+    pub async fn add_grant(
+        &self,
+        tenant: &str,
+        grantee: &str,
+        grantor: &str,
+    ) -> crate::Result<Uuid> {
+        let db = self.write_db.lock();
+        // Dedupe: reuse an existing (tenant, grantee, grantor, read) grant.
+        let existing: Option<String> = db
+            .query_row(
+                "SELECT id FROM memory_grants WHERE tenant_id = ? AND grantee_user_id = ? \
+                 AND grantor_user_id = ? AND access = 'read'",
+                duckdb::params![tenant, grantee, grantor],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(id) = existing.and_then(|s| Uuid::parse_str(&s).ok()) {
+            return Ok(id);
+        }
+        let id = Uuid::new_v4();
+        db.execute(
+            "INSERT INTO memory_grants (id, tenant_id, grantee_user_id, grantor_user_id, access) \
+             VALUES (?, ?, ?, ?, 'read')",
+            duckdb::params![id.to_string(), tenant, grantee, grantor],
+        )
+        .map_err(|e| crate::Error::State(format!("add grant: {e}")))?;
+        Ok(id)
+    }
+
+    /// The users whose memories `grantee` may read within `tenant` (the grantors).
+    pub async fn list_grants(&self, tenant: &str, grantee: &str) -> crate::Result<Vec<Grant>> {
+        let db = self.read_conn();
+        let mut stmt = db
+            .prepare(
+                "SELECT id, grantee_user_id, grantor_user_id FROM memory_grants \
+                 WHERE tenant_id = ? AND grantee_user_id = ? ORDER BY created_at ASC",
+            )
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map(duckdb::params![tenant, grantee], |r| {
+                Ok(Grant {
+                    id: r.get::<_, String>(0)?,
+                    grantee_user_id: r.get::<_, String>(1)?,
+                    grantor_user_id: r.get::<_, String>(2)?,
+                })
+            })
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Revoke a grant by id, scoped to `tenant` (a cross-tenant id revokes nothing). Returns whether
+    /// a row was removed.
+    pub async fn revoke_grant(&self, tenant: &str, id: Uuid) -> crate::Result<bool> {
+        let db = self.write_db.lock();
+        let n = db
+            .execute(
+                "DELETE FROM memory_grants WHERE id = ? AND tenant_id = ?",
+                duckdb::params![id.to_string(), tenant],
+            )
+            .map_err(|e| crate::Error::State(format!("revoke grant: {e}")))?;
+        Ok(n > 0)
     }
 
     /// Evict the lowest-importance active memories in a scope beyond `cap` (count-based forgetting /

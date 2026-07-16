@@ -16,7 +16,7 @@ release notes. **API stability (SemVer with a deprecation policy) begins at `1.0
 - **Memory substrate** — bi-temporal memories, contradiction resolution, dedup, hybrid
   retrieval (BM25 + vector), decay, knowledge graph.
 - **Cognition APIs** — provenance, feedback loop, CDC stream, HITL contradiction review,
-  session distillation, semantic-cluster consolidation.
+  session distillation, semantic-cluster consolidation, cross-scope sharing (tenant-strict grants).
 - **Protocols** — PostgreSQL wire (+TLS), REST, gRPC, MCP (incl. graph tools),
   LLM proxy: OpenAI `/v1/chat/completions` + `/v1/embeddings`, Anthropic `/v1/messages`.
 - **Runtime** — durable agent runs, HITL approvals, DAG workflows, triggers, dispatcher.
@@ -29,7 +29,8 @@ release notes. **API stability (SemVer with a deprecation policy) begins at `1.0
 - **Embedded admin console** — memory browser, bi-temporal timeline, graph view,
   contradiction queue, key management.
 - **Encryption at rest** — per-tenant envelope keys (KMS/age) for the on-disk stores.
-- **Cross-scope sharing / ReBAC** — grants or a pluggable authz backend (e.g. SpiceDB).
+- **ReBAC authz backend** — a pluggable policy backend (e.g. SpiceDB) on top of the grants
+  primitive, for richer team/role-based sharing.
 - **Published benchmarks** — reproducible LoCoMo baseline with the exact recipe.
 
 ## Later / exploring

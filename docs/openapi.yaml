@@ -211,6 +211,20 @@ paths:
       summary: Resolve a contradiction — keep one memory, supersede the rest for its subject
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [subject, keep_id], properties: { subject: { type: string }, keep_id: { type: string }, user_id: { type: string }, agent_id: { type: string }, session_id: { type: string } } } } } }
       responses: { '200': { description: '{ kept, superseded }' } }
+  /api/v1/memories/grants:
+    post:
+      summary: "Cross-scope sharing: grant a user read access to another user's memories (tenant-strict)"
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [grantee_user_id, grantor_user_id], properties: { grantee_user_id: { type: string }, grantor_user_id: { type: string } } } } } }
+      responses: { '200': { description: '{ id, status: granted }' } }
+    get:
+      summary: List the grants a user holds (whose memories they may read)
+      parameters: [ { name: grantee, in: query, required: true, schema: { type: string } } ]
+      responses: { '200': { description: '{ grants: [...], count }' } }
+  /api/v1/memories/grants/{id}:
+    delete:
+      summary: Revoke a grant
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: '{ id, revoked }' } }
   /api/v1/memories/link:
     post:
       summary: Add a knowledge-graph edge (src → relation → dst); supersede=true for functional relations

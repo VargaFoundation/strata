@@ -319,6 +319,24 @@ pub struct MemorySearchRequest {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Also include memories shared with this user via a grant (cross-scope read). Default false.
+    #[serde(default)]
+    pub shared: bool,
+}
+
+/// Grant a user read access to another user's memories (within the token's tenant).
+#[derive(Debug, Deserialize)]
+pub struct MemoryGrantRequest {
+    /// The user who will be able to read.
+    pub grantee_user_id: String,
+    /// The user whose memories become readable.
+    pub grantor_user_id: String,
+}
+
+/// Query params for listing a user's grants.
+#[derive(Debug, Deserialize)]
+pub struct GrantListParams {
+    pub grantee: String,
 }
 
 /// Query parameters for listing memories in a scope (GET /api/v1/memories).
