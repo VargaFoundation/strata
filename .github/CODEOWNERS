@@ -1,0 +1,15 @@
+# Code owners — required reviewers by area. See
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Replace @VargaFoundation/maintainers with the actual team/handles once configured.
+
+# Default owner for everything.
+*                       @VargaFoundation/maintainers
+
+# Security-critical boundaries — extra scrutiny.
+/crates/strata-gateway/src/auth/          @VargaFoundation/maintainers
+/crates/strata-core/src/memory/episodic.rs @VargaFoundation/maintainers
+/crates/strata-cluster/                    @VargaFoundation/maintainers
+/.github/workflows/                        @VargaFoundation/maintainers
+/SECURITY.md                               @VargaFoundation/maintainers
+/docs/threat-model.md                      @VargaFoundation/maintainers

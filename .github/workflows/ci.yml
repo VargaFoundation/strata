@@ -81,6 +81,37 @@ jobs:
       - run: go vet ./...
         working-directory: sdk/go
 
+  python-sdk:
+    name: Python SDK (build + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install + test
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade pip build
+          pip install -e ".[dev]"
+          python -m build      # sdist + wheel must build
+          python -m pytest -q  # unit tests (offline; no server required)
+
+  typescript-sdk:
+    name: TypeScript SDK (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install + build
+        working-directory: sdk/typescript
+        run: |
+          npm ci || npm install
+          npm run build
+          npm test --if-present
+
   operator:
     name: Operator (fmt + clippy + build)
     runs-on: ubuntu-latest

@@ -149,3 +149,17 @@ Key principles:
 - **Core has no protocol knowledge**: `strata-core` knows nothing about HTTP, gRPC, or MCP
 - **Single binary**: everything compiles into one executable
 - **Convention over configuration**: sensible defaults, minimal required config
+
+## Developer Certificate of Origin (DCO)
+
+Contributions are accepted under the [DCO](https://developercertificate.org/): by
+signing off, you certify that you wrote the change (or have the right to submit it) under
+the project's Apache-2.0 license. Sign off every commit with `-s`:
+
+```bash
+git commit -s -m "your message"
+```
+
+This appends a `Signed-off-by: Your Name <you@example.com>` trailer. PRs whose commits
+are not signed off will be asked to amend. This keeps the provenance of external
+contributions unambiguous — important for an association-backed project.
