@@ -2967,6 +2967,94 @@ impl StrataEngine {
         Ok(Some((input, expired)))
     }
 
+    /// Consolidate **semantically-similar** active memories in a scope into abstractions — the
+    /// "fold near-duplicate clusters" half of consolidation (the importance-tail variant is
+    /// [`Self::memory_consolidate`]). Greedily clusters active memories whose cosine similarity is
+    /// ≥ `threshold`, folds each cluster (size ≥ 2) into one summary memory citing its sources, and
+    /// expires the originals (bi-temporal — history kept). Applies locally; the plan variant
+    /// [`Self::memory_consolidate_similar_plan`] is for cluster replication. Returns clusters folded.
+    pub async fn memory_consolidate_similar(
+        &self,
+        scope: &MemoryScope,
+        threshold: f32,
+    ) -> Result<u64> {
+        let plans = self
+            .memory_consolidate_similar_plan(scope, threshold)
+            .await?;
+        let n = plans.len() as u64;
+        for (input, expired) in plans {
+            self.memory_add(input).await?;
+            self.memory_expire(&expired).await?;
+        }
+        Ok(n)
+    }
+
+    /// Plan semantic-cluster consolidation without writing: one `(summary input, originals to
+    /// expire)` per cluster. Empty when nothing clusters. Requires an embedding provider (memories
+    /// without a vector are left untouched).
+    pub async fn memory_consolidate_similar_plan(
+        &self,
+        scope: &MemoryScope,
+        threshold: f32,
+    ) -> Result<Vec<(MemoryInput, Vec<uuid::Uuid>)>> {
+        let actives = self
+            .memory_store
+            .list_active(scope, self.config.query.max_rows)
+            .await?;
+        // Pair each memory with its vector; memories without one can't be clustered.
+        let mut with_vec: Vec<(Memory, Vec<f32>)> = Vec::new();
+        for m in actives {
+            if let Some(v) = self.memory_store.get_embedding(m.id).await? {
+                with_vec.push((m, v));
+            }
+        }
+
+        let mut grouped: std::collections::HashSet<uuid::Uuid> = std::collections::HashSet::new();
+        let mut plans = Vec::new();
+        let k = self.config.memory.cognition.retrieval_scan_cap.max(8);
+        for (m, v) in &with_vec {
+            if grouped.contains(&m.id) {
+                continue;
+            }
+            let hits = self.memory_index_search(v, scope, k).await?;
+            let cluster: Vec<Memory> = hits
+                .into_iter()
+                .filter(|h| h.score >= threshold && !grouped.contains(&h.memory.id))
+                .map(|h| h.memory)
+                .collect();
+            if cluster.len() < 2 {
+                grouped.insert(m.id);
+                continue;
+            }
+            for c in &cluster {
+                grouped.insert(c.id);
+            }
+            let summary = self.summarize_memories(&cluster).await;
+            let source_ids: Vec<String> = cluster.iter().map(|m| m.id.to_string()).collect();
+            // The abstraction inherits the strongest importance in the cluster + provenance.
+            let importance = cluster.iter().map(|m| m.importance).fold(0.0_f32, f32::max);
+            let mut source_events: Vec<uuid::Uuid> = Vec::new();
+            for c in &cluster {
+                for e in &c.source_event_ids {
+                    if !source_events.contains(e) {
+                        source_events.push(*e);
+                    }
+                }
+            }
+            let mut input = MemoryInput::new(scope.clone(), summary);
+            input.importance = Some(importance);
+            input.source_event_ids = source_events;
+            input.metadata = serde_json::json!({
+                "consolidated": true,
+                "consolidation": "semantic",
+                "source_memory_ids": source_ids,
+            });
+            let expired: Vec<uuid::Uuid> = cluster.iter().map(|m| m.id).collect();
+            plans.push((input, expired));
+        }
+        Ok(plans)
+    }
+
     /// Summarize a set of memories (opt-in LLM, else a deterministic bullet list).
     async fn summarize_memories(&self, mems: &[Memory]) -> String {
         let joined = mems
@@ -4060,6 +4148,52 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_consolidation_clusters_similar_memories() {
+        let mut cfg = inmem_config();
+        cfg.embedding.dimension = 8;
+        let mut engine = StrataEngine::new(cfg).await.unwrap();
+        engine.set_embedding_for_test(Arc::new(ConstEmbedding { dim: 8 }));
+        let scope = MemoryScope::user("alice");
+
+        // Insert 3 active memories with identical vectors DIRECTLY (bypassing memory_add's dedup),
+        // so the scope holds a cluster of near-duplicates to consolidate.
+        let mut cvec = vec![0.0_f32; 8];
+        cvec[0] = 1.0;
+        for content in [
+            "the sky is orange",
+            "sky looked orange",
+            "orange sky at dusk",
+        ] {
+            let m = Memory::new(scope.clone(), content);
+            engine
+                .memory_apply_rows(vec![MemoryRow {
+                    memory: m,
+                    embedding: Some(cvec.clone()),
+                }])
+                .await
+                .unwrap();
+        }
+        assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 3);
+
+        // Plan: the 3 near-duplicates form one cluster to fold.
+        let plans = engine
+            .memory_consolidate_similar_plan(&scope, 0.9)
+            .await
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+        let (input, expired) = &plans[0];
+        assert_eq!(expired.len(), 3);
+        assert_eq!(input.metadata["consolidation"], "semantic");
+        assert_eq!(
+            input.metadata["source_memory_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
         );
     }
 

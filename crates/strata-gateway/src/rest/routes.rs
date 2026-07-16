@@ -186,6 +186,10 @@ pub fn router_with_engine_and_auth(
             axum::routing::post(handlers::memory_consolidate),
         )
         .route(
+            "/admin/memory/consolidate-similar",
+            axum::routing::post(handlers::memory_consolidate_similar),
+        )
+        .route(
             "/semantic/upsert",
             axum::routing::post(handlers::semantic_upsert),
         )

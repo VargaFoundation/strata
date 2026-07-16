@@ -1927,6 +1927,93 @@ pub async fn memory_consolidate(
     }
 }
 
+/// POST /api/v1/admin/memory/consolidate-similar — fold semantically-similar memory clusters into
+/// abstractions (the "near-duplicate cluster" consolidation). Cluster-replicated.
+pub async fn memory_consolidate_similar(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    cluster: Option<
+        Extension<std::sync::Arc<tokio::sync::RwLock<strata_cluster::ClusterCoordinator>>>,
+    >,
+    Json(req): Json<MemoryConsolidateSimilarRequest>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "memory_consolidate_similar")
+        .increment(1);
+    let scope = scope_from(
+        &auth,
+        req.tenant_id.as_deref(),
+        req.user_id.as_deref(),
+        req.agent_id.as_deref(),
+        req.session_id.as_deref(),
+    );
+    let threshold = req.threshold.unwrap_or(0.92);
+
+    let plans = match engine
+        .memory_consolidate_similar_plan(&scope, threshold)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MEMORY_ERROR",
+                e.to_string(),
+            )
+        }
+    };
+    let clusters = plans.len();
+
+    // Cluster mode: for each fold, replicate the summary (MemoryUpsert) + the originals (MemoryExpire).
+    if let Some(Extension(coord)) = cluster {
+        let coord = coord.read().await;
+        for (input, expired) in plans {
+            let (_result, rows) = match engine.memory_plan(input).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "MEMORY_ERROR",
+                        e.to_string(),
+                    )
+                }
+            };
+            if let Err(e) = coord
+                .client_write(strata_cluster::raft::types::AppRequest::MemoryUpsert { rows })
+                .await
+            {
+                return cluster_write_error(e);
+            }
+            if let Err(e) = coord
+                .client_write(strata_cluster::raft::types::AppRequest::MemoryExpire {
+                    ids: expired,
+                })
+                .await
+            {
+                return cluster_write_error(e);
+            }
+        }
+        return api_ok(serde_json::json!({ "clusters_folded": clusters }));
+    }
+
+    for (input, expired) in plans {
+        if let Err(e) = engine.memory_add(input).await {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MEMORY_ERROR",
+                e.to_string(),
+            );
+        }
+        if let Err(e) = engine.memory_expire(&expired).await {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MEMORY_ERROR",
+                e.to_string(),
+            );
+        }
+    }
+    api_ok(serde_json::json!({ "clusters_folded": clusters }))
+}
+
 /// Upsert a pre-computed multi-modal embedding (text/image/audio/…).
 pub async fn semantic_upsert(
     State(engine): State<Arc<StrataEngine>>,

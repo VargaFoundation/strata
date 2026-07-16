@@ -128,6 +128,22 @@ pub struct MemoryConsolidateRequest {
     pub session_id: Option<String>,
 }
 
+/// Consolidate semantically-similar memories in a scope into abstractions.
+#[derive(Debug, Deserialize)]
+pub struct MemoryConsolidateSimilarRequest {
+    /// Cosine similarity at/above which memories cluster. Defaults to 0.92.
+    #[serde(default)]
+    pub threshold: Option<f32>,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
 /// Move a tenant's full data from the current shard to `target_shard`.
 #[derive(Debug, Deserialize)]
 pub struct RebalanceRequest {

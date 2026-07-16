@@ -2,6 +2,7 @@ pub mod admin;
 pub mod backup;
 pub mod doctor;
 pub mod export;
+pub mod import;
 pub mod ingest;
 pub mod query;
 pub mod restore;
@@ -35,6 +36,18 @@ pub enum Command {
         /// Entity ID to export
         #[arg(long)]
         entity: String,
+    },
+    /// Import an external knowledge store into memory (Obsidian vault → memories + graph edges)
+    Import {
+        /// Source format
+        #[arg(long, default_value = "obsidian")]
+        from: String,
+        /// Path to the vault / source directory
+        #[arg(long)]
+        path: String,
+        /// Scope imported memories to this user id
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Lint a strata.toml (+ STRATA_* env) for misconfigurations — no server needed
     Doctor {
@@ -150,6 +163,9 @@ pub async fn execute(cmd: Command, url: &str) -> anyhow::Result<()> {
         Command::Query { sql } => query::run(url, &sql).await,
         Command::Ingest { source, file } => ingest::run(url, &source, &file).await,
         Command::Export { entity } => export::run(url, &entity).await,
+        Command::Import { from, path, user } => {
+            import::run(url, &from, &path, user.as_deref()).await
+        }
         Command::Shell => shell::run(url).await,
         Command::Schema => schema::run(url).await,
         Command::Search { text, k } => search::run(url, &text, k).await,
