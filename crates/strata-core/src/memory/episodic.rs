@@ -1,6 +1,7 @@
 //! Episodic memory store — append-only event storage backed by DuckDB.
 
 use chrono::{DateTime, Utc};
+use dashmap::DashSet;
 use duckdb::Connection;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,11 @@ pub struct EpisodicStore {
     read_pool: Vec<Mutex<Connection>>,
     /// Round-robin counter for read pool.
     read_next: AtomicUsize,
+    /// Tenants whose per-tenant filtered views have already been created in the (shared) catalog.
+    /// The views are static (`WHERE tenant_id = '<t>'`), so once created they are reused for the
+    /// process's lifetime — this lets the tenant read path skip the write lock + catalog churn on
+    /// every query after the first for a given tenant.
+    tenant_views_created: DashSet<String>,
 }
 
 impl std::fmt::Debug for EpisodicStore {
@@ -126,6 +132,7 @@ impl EpisodicStore {
             write_db: Arc::new(Mutex::new(write_conn)),
             read_pool,
             read_next: AtomicUsize::new(0),
+            tenant_views_created: DashSet::new(),
         })
     }
 
@@ -148,6 +155,41 @@ impl EpisodicStore {
             .map_err(|e| crate::Error::Query(e.to_string()))?;
         let rows = stmt
             .query_map(duckdb::params![tenant], Self::parse_event)
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Fetch specific events by id, scoped to a tenant (a cross-tenant id simply isn't returned).
+    /// Used by the provenance API to resolve a memory's `source_event_ids` back to real events.
+    pub async fn events_by_ids(
+        &self,
+        ids: &[Uuid],
+        tenant: Option<&str>,
+    ) -> crate::Result<Vec<Event>> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let db = self.read_conn();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut sql = format!(
+            "SELECT {} FROM episodic WHERE id IN ({placeholders})",
+            Self::SELECT_COLS
+        );
+        // Bind ids first, then the optional tenant filter.
+        let mut params: Vec<Box<dyn duckdb::ToSql>> = ids
+            .iter()
+            .map(|id| Box::new(id.to_string()) as Box<dyn duckdb::ToSql>)
+            .collect();
+        if let Some(t) = tenant {
+            sql.push_str(" AND tenant_id = ?");
+            params.push(Box::new(t.to_string()));
+        }
+        let mut stmt = db
+            .prepare(&sql)
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let param_refs: Vec<&dyn duckdb::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt
+            .query_map(param_refs.as_slice(), Self::parse_event)
             .map_err(|e| crate::Error::Query(e.to_string()))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -722,22 +764,33 @@ impl EpisodicStore {
         tenant: &str,
         max_rows: usize,
     ) -> crate::Result<Vec<serde_json::Value>> {
-        let ep_view = Self::tenant_view_name(tenant);
-        let sess_view = Self::tenant_session_view_name(tenant);
-        // Ensure the per-tenant filtered views exist (idempotent; catalog is shared with readers).
-        // BOTH `episodic` AND `sessions` are tenant-owned, so both get a filtered view — the scoping
-        // is an allowlist of tenant tables, not just `episodic` (a bare `SELECT * FROM sessions`
-        // used to leak every tenant's sessions).
-        {
-            let db = self.write_db.lock();
-            let escaped = tenant.replace('\'', "''");
-            db.execute_batch(&format!(
-                "CREATE OR REPLACE VIEW {ep_view} AS SELECT * FROM episodic WHERE tenant_id = '{escaped}';
-                 CREATE OR REPLACE VIEW {sess_view} AS SELECT * FROM sessions WHERE tenant_id = '{escaped}'"
-            ))
-            .map_err(|e| crate::Error::Query(format!("create tenant view: {e}")))?;
-        }
+        // Rewrite BEFORE touching the catalog: a query that references a table it must not (an
+        // internal per-tenant view) is rejected without creating any views.
         let rewritten = Self::scope_sql_to_view(sql, tenant)?;
+
+        // Ensure the per-tenant filtered views exist. They are static (`WHERE tenant_id = '<t>'`)
+        // and the catalog is shared with the read connections, so we create them ONCE per tenant
+        // and cache that fact — every subsequent read for the tenant skips the write lock and the
+        // `CREATE OR REPLACE VIEW` catalog churn entirely, going straight to a read connection.
+        // BOTH `episodic` AND `sessions` are tenant-owned, so both get a filtered view (a bare
+        // `SELECT * FROM sessions` must not leak every tenant's sessions).
+        if !self.tenant_views_created.contains(tenant) {
+            let ep_view = Self::tenant_view_name(tenant);
+            let sess_view = Self::tenant_session_view_name(tenant);
+            {
+                let db = self.write_db.lock();
+                let escaped = tenant.replace('\'', "''");
+                db.execute_batch(&format!(
+                    "CREATE OR REPLACE VIEW {ep_view} AS SELECT * FROM episodic WHERE tenant_id = '{escaped}';
+                     CREATE OR REPLACE VIEW {sess_view} AS SELECT * FROM sessions WHERE tenant_id = '{escaped}'"
+                ))
+                .map_err(|e| crate::Error::Query(format!("create tenant view: {e}")))?;
+            }
+            // Idempotent `CREATE OR REPLACE` makes a concurrent double-create harmless, so no lock
+            // is needed around the check-then-create.
+            self.tenant_views_created.insert(tenant.to_string());
+        }
+
         self.query_sql_limited(&rewritten, max_rows)
     }
 
@@ -1390,6 +1443,43 @@ mod tests {
             .query_sql_for_tenant("SELECT source FROM episodic", "x' OR '1'='1", 100)
             .unwrap();
         assert_eq!(inj.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn tenant_views_are_created_once_and_reused() {
+        let store = EpisodicStore::new();
+        store.append(&[make_event("appA", "e")]).await.unwrap();
+        {
+            let db = store.write_conn();
+            db.execute(
+                "UPDATE episodic SET tenant_id = 'tenant-a' WHERE source = 'appA'",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert!(!store.tenant_views_created.contains("tenant-a"));
+        // First query creates + caches the tenant's views.
+        let r1 = store
+            .query_sql_for_tenant("SELECT source FROM episodic", "tenant-a", 100)
+            .unwrap();
+        assert_eq!(r1.len(), 1);
+        assert!(store.tenant_views_created.contains("tenant-a"));
+
+        // Repeated queries still isolate correctly (the cached view is reused, no write lock).
+        for _ in 0..3 {
+            let r = store
+                .query_sql_for_tenant("SELECT source FROM episodic", "tenant-a", 100)
+                .unwrap();
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0]["source"], "appA");
+        }
+        // A different tenant sees nothing and gets its own cached view.
+        let rb = store
+            .query_sql_for_tenant("SELECT source FROM episodic", "tenant-b", 100)
+            .unwrap();
+        assert_eq!(rb.len(), 0);
+        assert!(store.tenant_views_created.contains("tenant-b"));
     }
 
     #[tokio::test]

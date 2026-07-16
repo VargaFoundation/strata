@@ -40,8 +40,13 @@ config:
     grpcListen: "0.0.0.0:9432"
     mcpEnabled: true
     llmProxyEnabled: false
-    authEnabled: false
+    # Secure by default: with authEnabled=false the pods bind 0.0.0.0 and the server REFUSES to
+    # start unless allowInsecure=true. Set authEnabled=true and provide apiKeys (recommended:
+    # hashed entries "sha256:<64-hex-of-secret>@tenant:role" — generate with
+    # `KEY=$(openssl rand -hex 32); echo -n "$KEY" | sha256sum`), or accept the risk explicitly.
+    authEnabled: true
     apiKeys: []
+    allowInsecure: false
   cluster:
     enabled: true
     # nodeId is auto-assigned from StatefulSet ordinal

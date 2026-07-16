@@ -28,6 +28,8 @@ prost.workspace = true
 prost-types.workspace = true
 
 pgwire.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
 
 jsonwebtoken.workspace = true
 hmac.workspace = true
@@ -60,3 +62,4 @@ tokio = { workspace = true, features = ["test-util"] }
 toml.workspace = true
 tower = { workspace = true, features = ["util"] }
 tokio-postgres = "0.7"
+tempfile.workspace = true

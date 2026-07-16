@@ -16,6 +16,13 @@ services:
     envVars:
       - key: STRATA_GATEWAY__LISTEN
         value: 0.0.0.0:8432
+      # Render is a PUBLIC endpoint — authentication is mandatory. Render generates the key;
+      # read it in the dashboard (Environment → STRATA_GATEWAY__API_KEYS) and send it as
+      # `Authorization: Bearer <key>`.
+      - key: STRATA_GATEWAY__AUTH_ENABLED
+        value: "true"
+      - key: STRATA_GATEWAY__API_KEYS
+        generateValue: true
       - key: STRATA_STORAGE__DATA_DIR
         value: /data
     disk:

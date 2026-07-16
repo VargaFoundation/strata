@@ -1,9 +1,20 @@
-//! Semantic response cache — caches LLM responses keyed by prompt similarity.
+//! Semantic response cache — caches LLM responses keyed by prompt (+ scope).
 //!
-//! Uses an in-memory USearch vector index for approximate matching.
-//! When a query comes in, it is embedded and compared against cached query vectors.
-//! If a cached entry has similarity above the threshold, the cached response is returned.
-//! Falls back to exact-match (normalized key) when no embedding provider is available.
+//! Two lookup modes:
+//! - **Exact match** (default): normalized prompt text, namespaced by the caller's scope.
+//! - **Vector similarity** (opt-in, `gateway.llm_cache_similarity`): the query is embedded and
+//!   compared against cached query vectors; a hit still requires the entry's scope to match.
+//!   Similarity caching of factual answers is inherently risky ("balance of cust_42" vs
+//!   "balance of cust_43" can exceed the threshold) — hence opt-in.
+//!
+//! The **scope** is an opaque namespace string provided by the caller. The LLM proxy derives it
+//! from `(tenant, user, fingerprint-of-injected-RAG-context)`, so a cached answer can only ever
+//! be replayed to the same tenant AND user AND for the same retrieved context — a response
+//! augmented with user A's memories is never served to user B.
+//!
+//! Cluster note: this cache is in-memory and **per node**. Nodes may briefly serve answers built
+//! from different memory states; entries expire by TTL. Disable caching (or accept the staleness
+//! window) if node-coherent responses matter to you.
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -16,10 +27,10 @@ struct CachedResponse {
     created_at: Instant,
     /// USearch key for this entry's vector.
     vector_key: Option<u64>,
-    /// Tenant this response was produced for (`None` = no tenant / auth disabled). The vector
-    /// index is shared across tenants, so a similarity hit MUST be re-checked against this to avoid
-    /// serving one tenant's (RAG-augmented) answer to another.
-    tenant: Option<String>,
+    /// Scope this response was produced under (`None` = unscoped / auth disabled). The vector
+    /// index is shared across scopes, so a similarity hit MUST be re-checked against this to
+    /// avoid serving one scope's (RAG-augmented) answer to another.
+    scope: Option<String>,
 }
 
 /// Cache for LLM responses with both exact-match and vector similarity lookup.
@@ -74,10 +85,10 @@ impl SemanticCache {
         }
     }
 
-    /// Look up a cached response by exact prompt match.
+    /// Look up a cached response by exact prompt match within `scope`.
     /// Returns None on cache miss or expired entry.
-    pub async fn get(&self, query: &str) -> Option<String> {
-        let key = normalize_key(query);
+    pub async fn get(&self, query: &str, scope: Option<&str>) -> Option<String> {
+        let key = cache_key(scope, query);
 
         if let Some(entry) = self.entries.get(&key) {
             if entry.created_at.elapsed() < self.ttl {
@@ -96,13 +107,13 @@ impl SemanticCache {
         None
     }
 
-    /// Look up a cached response by vector similarity, scoped to `tenant`.
+    /// Look up a cached response by vector similarity within `scope`.
     ///
     /// Searches the vector index for the nearest cached queries and returns the first whose
-    /// similarity exceeds the threshold **and** whose tenant matches the caller. Because the vector
-    /// index is shared across tenants, the tenant re-check is what prevents a cross-tenant leak: a
-    /// nearest neighbour belonging to another tenant is skipped rather than served.
-    pub async fn get_by_vector(&self, embedding: &[f32], tenant: Option<&str>) -> Option<String> {
+    /// similarity exceeds the threshold **and** whose scope matches the caller. Because the vector
+    /// index is shared across scopes, the scope re-check is what prevents a cross-scope leak: a
+    /// nearest neighbour belonging to another tenant/user/context is skipped rather than served.
+    pub async fn get_by_vector(&self, embedding: &[f32], scope: Option<&str>) -> Option<String> {
         if embedding.is_empty() {
             return None;
         }
@@ -128,7 +139,7 @@ impl SemanticCache {
             let prompt = prompt_key.value().clone();
             drop(prompt_key);
             if let Some(entry) = self.entries.get(&prompt) {
-                if entry.created_at.elapsed() < self.ttl && entry.tenant.as_deref() == tenant {
+                if entry.created_at.elapsed() < self.ttl && entry.scope.as_deref() == scope {
                     return Some(entry.response.clone());
                 }
             }
@@ -137,27 +148,27 @@ impl SemanticCache {
         None
     }
 
-    /// Store a response in the cache with an optional embedding vector.
-    pub async fn put(&self, query: &str, response: &str) {
-        self.put_with_vector(query, response, None, None).await;
+    /// Store a response in the cache (no vector) within `scope`.
+    pub async fn put(&self, query: &str, response: &str, scope: Option<&str>) {
+        self.put_with_vector(query, response, None, scope).await;
     }
 
-    /// Store a response (with its embedding vector) scoped to `tenant`. The entries-map key is
-    /// namespaced by tenant so two tenants asking the same question don't collide, and the tenant
+    /// Store a response (with its embedding vector) within `scope`. The entries-map key is
+    /// namespaced by scope so two scopes asking the same question don't collide, and the scope
     /// is recorded on the entry so the shared vector index can be re-checked on lookup.
     pub async fn put_with_vector(
         &self,
         query: &str,
         response: &str,
         embedding: Option<&[f32]>,
-        tenant: Option<&str>,
+        scope: Option<&str>,
     ) {
         // Evict oldest entries if at capacity
         if self.entries.len() >= self.max_entries {
             self.evict_oldest();
         }
 
-        let key = cache_key(tenant, query);
+        let key = cache_key(scope, query);
         let vector_key = if let Some(emb) = embedding {
             let vk = self.next_key.fetch_add(1, Ordering::Relaxed);
             let index = self.index.lock();
@@ -177,7 +188,7 @@ impl SemanticCache {
                 response: response.to_string(),
                 created_at: Instant::now(),
                 vector_key,
-                tenant: tenant.map(|t| t.to_string()),
+                scope: scope.map(|s| s.to_string()),
             },
         );
     }
@@ -222,12 +233,12 @@ fn normalize_key(query: &str) -> String {
         .join(" ")
 }
 
-/// Namespace a cache key by tenant so one tenant's cached response is never keyed identically to
-/// another's. `None` (no tenant / auth disabled) uses the bare normalized prompt. Uses the ASCII
+/// Namespace a cache key by scope so one scope's cached response is never keyed identically to
+/// another's. `None` (unscoped / auth disabled) uses the bare normalized prompt. Uses the ASCII
 /// unit-separator, which cannot appear in a normalized (whitespace-collapsed) prompt.
-fn cache_key(tenant: Option<&str>, query: &str) -> String {
-    match tenant {
-        Some(t) => format!("{}\u{1f}{}", t, normalize_key(query)),
+fn cache_key(scope: Option<&str>, query: &str) -> String {
+    match scope {
+        Some(s) => format!("{}\u{1f}{}", s, normalize_key(query)),
         None => normalize_key(query),
     }
 }
@@ -239,61 +250,61 @@ mod tests {
     #[tokio::test]
     async fn cache_miss() {
         let cache = SemanticCache::new();
-        assert!(cache.get("hello").await.is_none());
+        assert!(cache.get("hello", None).await.is_none());
     }
 
     #[tokio::test]
     async fn cache_hit() {
         let cache = SemanticCache::new();
-        cache.put("hello", "world").await;
-        assert_eq!(cache.get("hello").await.unwrap(), "world");
+        cache.put("hello", "world", None).await;
+        assert_eq!(cache.get("hello", None).await.unwrap(), "world");
     }
 
     #[tokio::test]
     async fn cache_normalized_key() {
         let cache = SemanticCache::new();
-        cache.put("Hello  World", "response").await;
+        cache.put("Hello  World", "response", None).await;
         // Different whitespace/case should match
-        assert_eq!(cache.get("hello world").await.unwrap(), "response");
+        assert_eq!(cache.get("hello world", None).await.unwrap(), "response");
     }
 
     #[tokio::test]
     async fn cache_expiry() {
         let cache = SemanticCache::with_ttl(Duration::from_millis(50));
-        cache.put("key", "value").await;
-        assert!(cache.get("key").await.is_some());
+        cache.put("key", "value", None).await;
+        assert!(cache.get("key", None).await.is_some());
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(cache.get("key").await.is_none());
+        assert!(cache.get("key", None).await.is_none());
     }
 
     #[tokio::test]
     async fn cache_overwrite() {
         let cache = SemanticCache::new();
-        cache.put("key", "v1").await;
-        cache.put("key", "v2").await;
-        assert_eq!(cache.get("key").await.unwrap(), "v2");
+        cache.put("key", "v1", None).await;
+        cache.put("key", "v2", None).await;
+        assert_eq!(cache.get("key", None).await.unwrap(), "v2");
     }
 
     #[tokio::test]
     async fn cache_len() {
         let cache = SemanticCache::new();
         assert!(cache.is_empty());
-        cache.put("a", "1").await;
-        cache.put("b", "2").await;
+        cache.put("a", "1", None).await;
+        cache.put("b", "2", None).await;
         assert_eq!(cache.len(), 2);
     }
 
     #[tokio::test]
     async fn evict_expired() {
         let cache = SemanticCache::with_ttl(Duration::from_millis(50));
-        cache.put("old", "stale").await;
+        cache.put("old", "stale", None).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        cache.put("new", "fresh").await;
+        cache.put("new", "fresh", None).await;
 
         cache.evict_expired();
         assert_eq!(cache.len(), 1);
-        assert!(cache.get("new").await.is_some());
+        assert!(cache.get("new", None).await.is_some());
     }
 
     #[tokio::test]
@@ -311,7 +322,10 @@ mod tests {
             .put_with_vector("test query", "test response", Some(&emb), None)
             .await;
         // Exact match should still work
-        assert_eq!(cache.get("test query").await.unwrap(), "test response");
+        assert_eq!(
+            cache.get("test query", None).await.unwrap(),
+            "test response"
+        );
     }
 
     #[tokio::test]
@@ -368,5 +382,41 @@ mod tests {
         assert_eq!(normalize_key("Hello  World"), "hello world");
         assert_eq!(normalize_key("  a  b  c  "), "a b c");
         assert_eq!(normalize_key("ABC"), "abc");
+    }
+
+    #[tokio::test]
+    async fn cache_is_user_isolated_within_a_tenant() {
+        // Regression: a RAG-augmented answer produced for user A must never be replayed to
+        // user B of the SAME tenant. The proxy encodes (tenant, user, context) in the scope.
+        let cache = SemanticCache::with_config(Duration::from_secs(3600), 1000, 0.90);
+        let emb = vec![0.5_f32; 768];
+        let scope_a = "acme\u{1f}user-a\u{1f}ctx123";
+        let scope_b = "acme\u{1f}user-b\u{1f}ctx456";
+        cache
+            .put_with_vector(
+                "what is my balance?",
+                "A's balance is 42",
+                Some(&emb),
+                Some(scope_a),
+            )
+            .await;
+        // Same user + context → hit (exact and vector).
+        assert!(cache
+            .get("what is my balance?", Some(scope_a))
+            .await
+            .is_some());
+        assert!(cache.get_by_vector(&emb, Some(scope_a)).await.is_some());
+        // Same tenant, different user → MUST miss on both paths.
+        assert!(cache
+            .get("what is my balance?", Some(scope_b))
+            .await
+            .is_none());
+        assert!(cache.get_by_vector(&emb, Some(scope_b)).await.is_none());
+        // Same user but the retrieved context changed → miss (stale-context guard).
+        let scope_a_new_ctx = "acme\u{1f}user-a\u{1f}ctx999";
+        assert!(cache
+            .get("what is my balance?", Some(scope_a_new_ctx))
+            .await
+            .is_none());
     }
 }

@@ -540,13 +540,15 @@ async fn mcp_tools_list_has_all_tools() {
     let tools = json["result"]["tools"].as_array().unwrap();
     assert_eq!(
         tools.len(),
-        15,
-        "expected 15 tools (6 core + 3 session + 6 memory)"
+        17,
+        "expected 17 tools (6 core + 3 session + 6 memory + 2 graph)"
     );
 
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"add_memory"));
     assert!(names.contains(&"search_memory"));
+    assert!(names.contains(&"link_memory"));
+    assert!(names.contains(&"graph_neighbors"));
 
     for tool in tools {
         assert!(

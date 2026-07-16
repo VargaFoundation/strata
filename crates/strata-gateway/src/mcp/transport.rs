@@ -592,6 +592,93 @@ async fn call_tool(
                 .map_err(|e| e.to_string())
         }
 
+        "link_memory" => {
+            let src = args
+                .get("src")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'src' parameter")?;
+            let relation = args
+                .get("relation")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'relation' parameter")?;
+            let dst = args
+                .get("dst")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'dst' parameter")?;
+            let supersede = args
+                .get("supersede")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let t = tenant.unwrap_or("default");
+            // Cluster mode: mint the edge id on the leader and replicate it (and the functional
+            // supersede) through the Raft log, mirroring the REST handler so followers converge.
+            if let Some(coord) = &cluster {
+                let at = chrono::Utc::now();
+                let id = uuid::Uuid::new_v4();
+                if supersede {
+                    mcp_cluster_write(
+                        coord,
+                        AppRequest::GraphSupersede {
+                            tenant: Some(t.to_string()),
+                            src: src.to_string(),
+                            relation: relation.to_string(),
+                            at,
+                            by: Some(id),
+                        },
+                    )
+                    .await?;
+                }
+                let edge = strata_core::memory::cognition::Edge {
+                    id,
+                    src: src.to_string(),
+                    relation: relation.to_string(),
+                    dst: dst.to_string(),
+                    weight: 1.0,
+                    source_memory_id: None,
+                    valid_from: Some(at),
+                    ..Default::default()
+                };
+                mcp_cluster_write(
+                    coord,
+                    AppRequest::GraphAddEdge {
+                        tenant: Some(t.to_string()),
+                        edge,
+                    },
+                )
+                .await?;
+                return Ok(serde_json::json!({ "status": "ok" }));
+            }
+            let result = if supersede {
+                engine
+                    .memory_link_functional(t, src, relation, dst, None)
+                    .await
+            } else {
+                engine.memory_link(t, src, relation, dst, None).await
+            };
+            result
+                .map(|()| serde_json::json!({ "status": "ok" }))
+                .map_err(|e| e.to_string())
+        }
+
+        "graph_neighbors" => {
+            let entity = args
+                .get("entity")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'entity' parameter")?;
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1);
+            let t = tenant.unwrap_or("default");
+            let edges = if depth > 1 {
+                engine
+                    .memory_subgraph(t, entity, depth as usize, limit)
+                    .await
+            } else {
+                engine.memory_neighbors(t, entity, limit).await
+            }
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "entity": entity, "edges": edges, "count": edges.len() }))
+        }
+
         _ => Err(format!("unknown tool: {name}")),
     }
 }

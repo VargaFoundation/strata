@@ -233,7 +233,6 @@ Strata loads configuration from three sources (in order of precedence):
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
 | `memory.episodic.db_path` | `STRATA_MEMORY__EPISODIC__DB_PATH` | `:memory:` | DuckDB path (`:memory:` or file path) |
-| `memory.episodic.wal_dir` | `STRATA_MEMORY__EPISODIC__WAL_DIR` | `./data/wal` | WAL directory |
 | `memory.episodic.default_retention_days` | `STRATA_MEMORY__EPISODIC__DEFAULT_RETENTION_DAYS` | `365` | Default event retention |
 | `memory.semantic.index_dir` | `STRATA_MEMORY__SEMANTIC__INDEX_DIR` | `./data/vectors` | Vector index directory |
 | `memory.semantic.default_dimension` | `STRATA_MEMORY__SEMANTIC__DEFAULT_DIMENSION` | `768` | Default vector dimensions |
@@ -269,15 +268,29 @@ Strata loads configuration from three sources (in order of precedence):
 
 ## Production Checklist
 
+Security controls are summarized here; see [security.md](security.md) and
+[threat-model.md](threat-model.md) for the full model.
+
+**Security**
+- [ ] **Auth**: `gateway.auth_enabled = true` with real credentials (or OIDC); `jwt_secret` ≥32 bytes.
+      (Strata refuses to start unauthenticated on a non-loopback bind unless `allow_insecure=true`.)
+- [ ] **Hashed keys**: provide `api_keys` pre-hashed as `sha256:<hex>@tenant:role` (no plaintext at rest).
+- [ ] **TLS**: front REST/gRPC with a TLS-terminating proxy/Ingress. **PG wire (:5432) has no TLS** —
+      keep it on loopback / a private subnet (its password is the API key).
+- [ ] **Cluster secret**: set `STRATA_CLUSTER__SECRET` on every node (multi-node).
+- [ ] **Webhooks**: per-source `webhook_secrets` + `webhook_require_signature = true` (fail-closed).
+- [ ] **Tool gateway**: leave `tool_gateway_allow_private_networks = false` unless downstream MCP
+      servers live on a trusted private network.
+- [ ] **Network**: NetworkPolicy so `:5432`/`:9432`/`:9433` are not publicly reachable.
+
+**Reliability & ops**
 - [ ] **Persistence**: Set `memory.episodic.db_path` to a file path (not `:memory:`)
-- [ ] **Storage**: Configure persistent volumes for `/data`
+- [ ] **Storage**: Configure persistent volumes for `/data` (encrypted volumes for data-at-rest)
 - [ ] **Embedding**: Set up Ollama or configure OpenAI API key
-- [ ] **Auth**: Enable authentication (`gateway.auth_enabled = true`) and set `gateway.api_keys`
-- [ ] **TLS**: Place Strata behind a TLS-terminating reverse proxy or Ingress
 - [ ] **Monitoring**: Enable ServiceMonitor or scrape `/metrics` with Prometheus
 - [ ] **Cluster**: Enable `cluster.enabled = true` with 3+ replicas for HA
 - [ ] **PDB**: Ensure PodDisruptionBudget is enabled for rolling updates
-- [ ] **Backups**: Schedule regular backups of `/data` volume
+- [ ] **Backups**: Schedule regular backups of `/data`; run a **restore drill** (manifest verification)
 - [ ] **Retention**: Configure `memory.episodic.default_retention_days`
 - [ ] **Resources**: Allocate sufficient memory for vector indices (~4 bytes × dimensions × vectors)
 - [ ] **Logging**: Set `RUST_LOG=info,strata=debug` for production logging

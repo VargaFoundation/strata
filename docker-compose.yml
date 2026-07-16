@@ -7,6 +7,14 @@ services:
       - "5432:5432"
       - "8432:8432"
     environment:
+      # Containers must bind all interfaces for port mapping to work…
+      STRATA_GATEWAY__LISTEN: 0.0.0.0:8432
+      STRATA_GATEWAY__PG_LISTEN: 0.0.0.0:5432
+      STRATA_GATEWAY__GRPC_LISTEN: 0.0.0.0:9432
+      # …so authentication is mandatory (the server refuses to start otherwise).
+      # Generate a key first:  export STRATA_API_KEY=$(openssl rand -hex 32)
+      STRATA_GATEWAY__AUTH_ENABLED: "true"
+      STRATA_GATEWAY__API_KEYS: "${STRATA_API_KEY:?STRATA_API_KEY is required - generate one with openssl rand -hex 32}"
       STRATA_STORAGE__DATA_DIR: /data
       STRATA_STORAGE__ENGINE: s3
       STRATA_STORAGE__S3__ENDPOINT: http://minio:9000

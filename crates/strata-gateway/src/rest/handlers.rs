@@ -30,9 +30,55 @@ fn api_ok(body: serde_json::Value) -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// Configured HMAC secret for verifying incoming webhook signatures (layered as an Extension).
-#[derive(Clone)]
-pub struct WebhookSecret(pub Option<String>);
+/// Configured webhook signature verification (layered as an Extension).
+///
+/// Holds a per-source secret map plus an optional global default, and a fail-closed toggle.
+/// The signature *scheme* is chosen per vendor (GitHub, Slack, Sentry, PagerDuty) — see
+/// [`verify_vendor_signature`].
+#[derive(Clone, Default)]
+pub struct WebhookVerifier {
+    /// `source` → secret (e.g. `"github"`, `"slack"`).
+    per_source: std::collections::HashMap<String, String>,
+    /// Fallback secret applied to any source without a specific entry.
+    default: Option<String>,
+    /// When true, a webhook to a source with NO configured secret is rejected (fail-closed).
+    /// When false (default), such a source is accepted unverified (legacy/dev behavior).
+    require: bool,
+}
+
+impl WebhookVerifier {
+    /// Build from config: a global default secret, `source=secret` per-source entries, and the
+    /// fail-closed toggle.
+    pub fn from_config(
+        default: Option<String>,
+        per_source_entries: &[String],
+        require: bool,
+    ) -> Self {
+        let mut per_source = std::collections::HashMap::new();
+        for entry in per_source_entries {
+            // `source=secret` — the source (a vendor slug) never contains '='.
+            if let Some((src, secret)) = entry.split_once('=') {
+                let src = src.trim();
+                if !src.is_empty() && !secret.is_empty() {
+                    per_source.insert(src.to_string(), secret.to_string());
+                }
+            }
+        }
+        Self {
+            per_source,
+            default,
+            require,
+        }
+    }
+
+    /// The secret to use for `source` (specific entry wins over the global default).
+    fn secret_for(&self, source: &str) -> Option<&str> {
+        self.per_source
+            .get(source)
+            .map(|s| s.as_str())
+            .or(self.default.as_deref())
+    }
+}
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
     if s.len() % 2 != 0 {
@@ -44,22 +90,104 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
         .collect()
 }
 
-/// Verify a GitHub-style `sha256=<hex>` HMAC-SHA256 signature over the raw body (constant-time).
-fn verify_webhook_signature(secret: &str, signature_header: Option<&str>, body: &[u8]) -> bool {
+/// Compute HMAC-SHA256(secret, msg), or `None` if the key is unusable. Used by tests to construct
+/// signatures; the verify path uses [`verify_hex_hmac`] (constant-time) directly.
+#[cfg(test)]
+fn hmac_sha256(secret: &str, msg: &[u8]) -> Option<Vec<u8>> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let Some(sig) = signature_header else {
-        return false;
-    };
-    let hex = sig.strip_prefix("sha256=").unwrap_or(sig);
-    let Ok(expected) = hex_decode(hex) else {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(msg);
+    Some(mac.finalize().into_bytes().to_vec())
+}
+
+/// Constant-time comparison of an expected HMAC against a hex-encoded signature.
+fn verify_hex_hmac(secret: &str, msg: &[u8], sig_hex: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let Ok(expected) = hex_decode(sig_hex.trim()) else {
         return false;
     };
     let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
         return false;
     };
-    mac.update(body);
+    mac.update(msg);
     mac.verify_slice(&expected).is_ok()
+}
+
+/// Verify a GitHub-style `sha256=<hex>` HMAC-SHA256 signature over the raw body (constant-time).
+fn verify_webhook_signature(secret: &str, signature_header: Option<&str>, body: &[u8]) -> bool {
+    let Some(sig) = signature_header else {
+        return false;
+    };
+    let hex = sig.strip_prefix("sha256=").unwrap_or(sig);
+    verify_hex_hmac(secret, body, hex)
+}
+
+/// Verify a Slack request signature: `v0=HMAC-SHA256(secret, "v0:{ts}:{body}")`, with the
+/// timestamp taken from `X-Slack-Request-Timestamp`. Also rejects stale timestamps (±5 min) to
+/// blunt replay. `now` is injected for testability.
+fn verify_slack_signature(
+    secret: &str,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    now: i64,
+) -> bool {
+    let Some(ts) = headers
+        .get("x-slack-request-timestamp")
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(ts_num) = ts.parse::<i64>() else {
+        return false;
+    };
+    if (now - ts_num).abs() > 300 {
+        return false; // stale → likely a replay
+    }
+    let Some(sig) = headers
+        .get("x-slack-signature")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("v0="))
+    else {
+        return false;
+    };
+    let mut basestring = format!("v0:{ts}:").into_bytes();
+    basestring.extend_from_slice(body);
+    verify_hex_hmac(secret, &basestring, sig)
+}
+
+/// Verify a signature for `source` using that vendor's scheme. Unknown sources fall back to the
+/// GitHub-style scheme (`X-Hub-Signature-256` / `X-Signature-256`).
+fn verify_vendor_signature(
+    source: &str,
+    secret: &str,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    now: i64,
+) -> bool {
+    let hdr = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    match source {
+        "slack" => verify_slack_signature(secret, headers, body, now),
+        // Sentry: raw hex HMAC-SHA256 over the body, no prefix.
+        "sentry" => hdr("sentry-hook-signature")
+            .map(|s| verify_hex_hmac(secret, body, s))
+            .unwrap_or(false),
+        // PagerDuty: `X-PagerDuty-Signature: v1=<hex>[,v1=<hex>...]` — accept if any matches.
+        "pagerduty" => hdr("x-pagerduty-signature")
+            .map(|h| {
+                h.split(',')
+                    .filter_map(|p| p.trim().strip_prefix("v1="))
+                    .any(|sig| verify_hex_hmac(secret, body, sig))
+            })
+            .unwrap_or(false),
+        // GitHub and any other vendor: `sha256=<hex>` over the raw body.
+        _ => verify_webhook_signature(
+            secret,
+            hdr("x-hub-signature-256").or_else(|| hdr("x-signature-256")),
+            body,
+        ),
+    }
 }
 
 /// Map a cluster (Raft) write error to an HTTP response. A leadership change is **retryable**
@@ -324,30 +452,51 @@ pub async fn ingest(
 
 /// Webhook ingestion — normalizes vendor payloads into Strata events (tenant-scoped).
 ///
-/// When `webhook_secret` is configured, the raw body must carry a valid GitHub-style
-/// `X-Hub-Signature-256: sha256=<hmac>` (HMAC-SHA256 over the body), else the request is rejected.
+/// Signature verification is per vendor (see [`verify_vendor_signature`]): GitHub
+/// `X-Hub-Signature-256`, Slack `v0=` signing (with replay window), Sentry
+/// `Sentry-Hook-Signature`, PagerDuty `X-PagerDuty-Signature`. The secret is resolved per source
+/// (specific entry → global default). When a source has no secret configured, the request is
+/// accepted only if fail-closed mode is off; otherwise it is rejected.
 pub async fn webhook(
     State(engine): State<Arc<StrataEngine>>,
     auth: Option<Extension<crate::auth::middleware::AuthContext>>,
-    webhook_secret: Option<Extension<WebhookSecret>>,
+    verifier: Option<Extension<WebhookVerifier>>,
     Path(source): Path<String>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "webhook").increment(1);
 
-    // Verify the HMAC signature over the RAW body if a secret is configured.
-    if let Some(Extension(WebhookSecret(Some(secret)))) = &webhook_secret {
-        let sig = headers
-            .get("x-hub-signature-256")
-            .or_else(|| headers.get("x-signature-256"))
-            .and_then(|v| v.to_str().ok());
-        if !verify_webhook_signature(secret, sig, &body) {
-            return api_error(
-                StatusCode::UNAUTHORIZED,
-                "INVALID_SIGNATURE",
-                "webhook signature verification failed".into(),
-            );
+    // Verify the vendor signature over the RAW body against the source's configured secret.
+    if let Some(Extension(v)) = &verifier {
+        match v.secret_for(&source) {
+            Some(secret) => {
+                let now = chrono::Utc::now().timestamp();
+                if !verify_vendor_signature(&source, secret, &headers, &body, now) {
+                    metrics::counter!("strata_webhook_rejected_total", "reason" => "bad_signature")
+                        .increment(1);
+                    return api_error(
+                        StatusCode::UNAUTHORIZED,
+                        "INVALID_SIGNATURE",
+                        "webhook signature verification failed".into(),
+                    );
+                }
+            }
+            None if v.require => {
+                // Fail-closed: an unsigned source must not be able to forge events (which would
+                // feed episodic → memory distillation → auto-RAG: a poisoning vector).
+                metrics::counter!("strata_webhook_rejected_total", "reason" => "no_secret")
+                    .increment(1);
+                return api_error(
+                    StatusCode::UNAUTHORIZED,
+                    "SIGNATURE_REQUIRED",
+                    format!(
+                        "no webhook secret configured for source '{source}' and signatures are \
+                         required; configure gateway.webhook_secrets = [\"{source}=<secret>\"]"
+                    ),
+                );
+            }
+            None => {}
         }
     }
 
@@ -648,6 +797,31 @@ pub async fn delete_tenant(
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DELETE_TENANT_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// GDPR erasure at the person level: delete a user's memories (and vectors) within the
+/// authenticated tenant. Admin. The tenant comes from the caller's token — an admin can only
+/// erase users of their own tenant (multi-tenant deployments), never another's.
+///
+/// DELETE /api/v1/admin/users/{user_id}
+pub async fn delete_user(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    Path(user_id): Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "delete_user").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    match engine.delete_user(&tenant, &user_id).await {
+        Ok(summary) => api_ok(summary),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DELETE_USER_ERROR",
             e.to_string(),
         ),
     }
@@ -1400,6 +1574,48 @@ pub async fn memory_history(
     }
 }
 
+/// GET /api/v1/memories/{id}/provenance — "why do you believe this?".
+///
+/// Returns the memory, the episodic events it was distilled from, and its bi-temporal
+/// supersession chain — the audit trail behind a distilled fact. Tenant-scoped (404 on mismatch).
+pub async fn memory_provenance(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    Path(id): Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "memory_provenance").increment(1);
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_ID",
+                format!("'{id}' is not a valid memory id"),
+            )
+        }
+    };
+    let tenant = auth.as_ref().and_then(|Extension(c)| c.tenant_id.clone());
+    match engine.memory_provenance(uuid, tenant.as_deref()).await {
+        Ok(Some(prov)) => api_ok(serde_json::json!({
+            "memory": prov.memory,
+            "source_events": prov.source_events,
+            "source_event_count": prov.source_events.len(),
+            "history": prov.history,
+            "history_count": prov.history.len(),
+        })),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            format!("memory '{id}' not found"),
+        ),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "MEMORY_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
 /// Forget low-value memories via time-decay of importance (admin).
 ///
 /// POST /api/v1/admin/memory/decay
@@ -1891,10 +2107,10 @@ pub async fn register_tool(
 ) -> Response {
     metrics::counter!("strata_rest_requests_total", "endpoint" => "register_tool").increment(1);
     match gateway {
-        Some(Extension(gw)) => {
-            gw.register(req.name.clone(), req.url);
-            api_ok(serde_json::json!({ "status": "registered", "name": req.name }))
-        }
+        Some(Extension(gw)) => match gw.register(req.name.clone(), req.url) {
+            Ok(()) => api_ok(serde_json::json!({ "status": "registered", "name": req.name })),
+            Err(e) => api_error(StatusCode::BAD_REQUEST, "INVALID_TOOL_URL", e),
+        },
         None => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "NO_TOOL_GATEWAY",
@@ -2243,5 +2459,88 @@ mod tests {
             !verify_webhook_signature(secret, Some("garbage"), body),
             "malformed sig rejected"
         );
+    }
+
+    #[test]
+    fn slack_signature_scheme_and_replay_window() {
+        let secret = "slack-signing-secret";
+        let body = br#"{"event":"x"}"#;
+        let ts = 1_700_000_000_i64;
+        let basestring = format!("v0:{ts}:{}", String::from_utf8_lossy(body));
+        let sig = format!(
+            "v0={}",
+            hex_encode(&hmac_sha256(secret, basestring.as_bytes()).unwrap())
+        );
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-slack-request-timestamp", ts.to_string().parse().unwrap());
+        headers.insert("x-slack-signature", sig.parse().unwrap());
+
+        // Valid within the ±5-min window.
+        assert!(verify_slack_signature(secret, &headers, body, ts + 10));
+        // Same signature but a stale timestamp → rejected (replay guard).
+        assert!(!verify_slack_signature(secret, &headers, body, ts + 1_000));
+        // Wrong secret → rejected.
+        assert!(!verify_slack_signature("nope", &headers, body, ts + 10));
+        // Tampered body → rejected.
+        assert!(!verify_slack_signature(secret, &headers, b"other", ts + 10));
+    }
+
+    #[test]
+    fn vendor_dispatch_picks_the_right_scheme() {
+        let secret = "s3cr3t";
+        let body = br#"{"a":1}"#;
+        let raw_hex = hex_encode(&hmac_sha256(secret, body).unwrap());
+
+        // Sentry: raw hex, no prefix, in Sentry-Hook-Signature.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("sentry-hook-signature", raw_hex.parse().unwrap());
+        assert!(verify_vendor_signature("sentry", secret, &h, body, 0));
+        assert!(!verify_vendor_signature("sentry", "wrong", &h, body, 0));
+
+        // PagerDuty: v1=<hex>, possibly multiple comma-separated.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            "x-pagerduty-signature",
+            format!("v1=deadbeef,v1={raw_hex}").parse().unwrap(),
+        );
+        assert!(verify_vendor_signature("pagerduty", secret, &h, body, 0));
+
+        // GitHub / unknown: sha256=<hex> in X-Hub-Signature-256.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            "x-hub-signature-256",
+            format!("sha256={raw_hex}").parse().unwrap(),
+        );
+        assert!(verify_vendor_signature("github", secret, &h, body, 0));
+        assert!(verify_vendor_signature(
+            "some-custom-source",
+            secret,
+            &h,
+            body,
+            0
+        ));
+    }
+
+    #[test]
+    fn verifier_resolves_per_source_then_default() {
+        let v = WebhookVerifier::from_config(
+            Some("global".into()),
+            &["github=gh-secret".into(), "slack=sk-secret".into()],
+            false,
+        );
+        assert_eq!(v.secret_for("github"), Some("gh-secret"));
+        assert_eq!(v.secret_for("slack"), Some("sk-secret"));
+        // Unlisted source falls back to the global default.
+        assert_eq!(v.secret_for("sentry"), Some("global"));
+    }
+
+    #[test]
+    fn verifier_fail_closed_has_no_default() {
+        let v = WebhookVerifier::from_config(None, &["github=gh".into()], true);
+        assert!(v.require);
+        assert_eq!(v.secret_for("github"), Some("gh"));
+        // No secret + require=true → the handler rejects (secret_for returns None here).
+        assert_eq!(v.secret_for("unknown"), None);
     }
 }

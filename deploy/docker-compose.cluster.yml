@@ -13,6 +13,10 @@ services:
     environment:
       STRATA_CLUSTER__ENABLED: "true"
       STRATA_CLUSTER__NODE_ID: "1"
+      # Local DEMO cluster: explicitly unauthenticated (containers must bind 0.0.0.0).
+      # Do NOT reuse this file for anything network-reachable — set
+      # STRATA_GATEWAY__AUTH_ENABLED=true + STRATA_GATEWAY__API_KEYS instead.
+      STRATA_GATEWAY__ALLOW_INSECURE: "true"
       STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
       # Full voter membership as id@addr, INCLUDING this node (lowest id bootstraps).
       STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
@@ -35,6 +39,10 @@ services:
     environment:
       STRATA_CLUSTER__ENABLED: "true"
       STRATA_CLUSTER__NODE_ID: "2"
+      # Local DEMO cluster: explicitly unauthenticated (containers must bind 0.0.0.0).
+      # Do NOT reuse this file for anything network-reachable — set
+      # STRATA_GATEWAY__AUTH_ENABLED=true + STRATA_GATEWAY__API_KEYS instead.
+      STRATA_GATEWAY__ALLOW_INSECURE: "true"
       STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
       STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
       STRATA_CLUSTER__DATA_DIR: "/data/raft"
@@ -56,6 +64,10 @@ services:
     environment:
       STRATA_CLUSTER__ENABLED: "true"
       STRATA_CLUSTER__NODE_ID: "3"
+      # Local DEMO cluster: explicitly unauthenticated (containers must bind 0.0.0.0).
+      # Do NOT reuse this file for anything network-reachable — set
+      # STRATA_GATEWAY__AUTH_ENABLED=true + STRATA_GATEWAY__API_KEYS instead.
+      STRATA_GATEWAY__ALLOW_INSECURE: "true"
       STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
       STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
       STRATA_CLUSTER__DATA_DIR: "/data/raft"

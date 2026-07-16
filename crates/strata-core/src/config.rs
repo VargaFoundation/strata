@@ -213,7 +213,6 @@ fn default_arm_weight() -> f32 {
 #[serde(default)]
 pub struct EpisodicConfig {
     pub db_path: String,
-    pub wal_dir: String,
     pub default_retention_days: u32,
     /// Number of read connections (concurrency for queries). Min 1.
     #[serde(default = "default_read_pool_size")]
@@ -240,7 +239,6 @@ impl Default for EpisodicConfig {
     fn default() -> Self {
         Self {
             db_path: "./data/episodic.duckdb".into(),
-            wal_dir: "./data/wal".into(),
             default_retention_days: 365,
             read_pool_size: default_read_pool_size(),
         }
@@ -508,7 +506,6 @@ mod tests {
     #[test]
     fn default_memory_config() {
         let config = MemoryConfig::default();
-        assert_eq!(config.episodic.wal_dir, "./data/wal");
         assert_eq!(config.episodic.default_retention_days, 365);
         assert_eq!(config.semantic.index_dir, "./data/vectors");
         assert_eq!(config.semantic.default_dimension, 768);

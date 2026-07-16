@@ -1,8 +1,11 @@
 # Security & Hardening
 
 This guide covers Strata's security model and the knobs to harden a deployment. Strata is built
-for authorized, self-hosted use; the defaults favor a quick local start, so **production deployments
-must enable the controls below.**
+for authorized, self-hosted use. It is **secure by default in the one way that matters most**: it
+**refuses to start unauthenticated on a non-loopback interface** (bind loopback, enable auth, or set
+`gateway.allow_insecure=true` to accept the risk explicitly). See [threat-model.md](threat-model.md)
+for the trust boundaries and the guarantees Strata does / does not make; **production deployments
+must still enable the controls below.**
 
 ## Threat model in one line
 
@@ -21,6 +24,11 @@ cluster's integrity, (3) secrets (JWT/API keys, provider keys).
   `"<key>@<tenant>"`, or `"<key>@<tenant>:<role>"`. The client always presents just the secret
   (the part before `@`); the tenant and role are bound to it server-side. Prefer JWT/OIDC for
   per-user tenancy; scoped API keys suit fixed service identities.
+- **API keys are hashed at rest.** Keys are held only as SHA-256 digests and compared in constant
+  time; a presented token never hits a timing-variable lookup. Provide keys pre-hashed as
+  `"sha256:<64-hex>@<tenant>:<role>"` so **no plaintext credential sits in your config/secrets**
+  (`KEY=$(openssl rand -hex 32); echo -n "$KEY" | sha256sum`). Plaintext entries still work (hashed
+  at load).
 - **Rate limiting** is a token bucket keyed per **(identity, tenant)** (`gateway.rate_limit_per_key`),
   so one noisy tenant on a shared key can't exhaust another's budget.
 - **Fail-closed:** with `auth_enabled = true` but no api_keys/jwt_secret/OIDC configured, the server
@@ -51,10 +59,69 @@ The **audit log** records each request's tenant and client IP (`X-Forwarded-For`
 
 ## Webhook ingestion
 
-Set `gateway.webhook_secret` to require a GitHub-style `X-Hub-Signature-256: sha256=<hmac>`
-(HMAC-SHA256 over the raw body, constant-time verified) on `POST /api/v1/webhook/{source}`.
-Unsigned/mis-signed webhooks are rejected (401). With no secret set, signatures are not checked —
-only do that on a trusted network.
+Webhook signatures are verified **per vendor**, over the raw body, constant-time:
+
+- **GitHub** (and unknown sources): `X-Hub-Signature-256: sha256=<hmac>`.
+- **Slack**: `X-Slack-Signature: v0=<hmac>` over `v0:{ts}:{body}`, with a ±5-minute replay window on
+  `X-Slack-Request-Timestamp`.
+- **Sentry**: `Sentry-Hook-Signature: <hmac>` (raw hex).
+- **PagerDuty**: `X-PagerDuty-Signature: v1=<hmac>[,…]` (any match passes).
+
+Configure secrets per source (`gateway.webhook_secrets = ["github=…","slack=…"]`) and/or a global
+`gateway.webhook_secret` fallback. Set `gateway.webhook_require_signature = true` to **fail closed** —
+reject any webhook to a source with no configured secret. This matters because webhook events flow
+into episodic memory → memory distillation → auto-RAG; an unauthenticated forger could otherwise
+**poison memory** (see [threat-model.md](threat-model.md#memory-poisoning)).
+
+## Prompt injection / auto-RAG
+
+The LLM proxy retrieves memories/events and injects them into the completion. Retrieved content
+originates from arbitrary prior ingestion and is therefore **untrusted**: it is injected into the
+**user turn** inside a delimited `<strata_retrieved_context>` block with a framing instruction to
+treat it as data — **never** into the system message, so an ingested "ignore previous instructions…"
+cannot gain instruction rank. The response cache is keyed by **(tenant, user, retrieved-context
+fingerprint)**, so a RAG-augmented answer is never replayed across users or after the underlying
+memories change; vector-similarity cache hits are opt-in (`gateway.llm_cache_similarity`).
+
+## Tool gateway (SSRF)
+
+Registering a downstream MCP server validates the URL shape; **each outbound tool call** then
+resolves the host and rejects blocked address ranges (SSRF guard) *before* connecting, and does not
+follow redirects. Loopback/private/CGNAT/ULA targets are blocked unless
+`gateway.tool_gateway_allow_private_networks = true`; **link-local (incl. the 169.254.169.254 cloud-
+metadata endpoint), unspecified and multicast are always blocked.**
+
+## Backup integrity
+
+`backup()` writes a `manifest.json` with per-artifact SHA-256 checksums, store counts, the Strata
+version and a capture timestamp; `restore_from_backup()` **verifies the checksums first** and
+refuses a corrupted/truncated backup. Note the four store exports are not wrapped in a single global
+write barrier, so a backup taken under concurrent writes may be fuzzy at the edges — for a strict
+point-in-time image, quiesce writes or snapshot the data volume (Raft restore replays the log to a
+consistent point regardless).
+
+## Supply chain
+
+Release images are **signed with cosign (keyless, GitHub OIDC)** and carry a **SLSA build-provenance
+attestation** plus an **SPDX SBOM** attestation (also attached to the GitHub Release). Verify before
+deploying:
+
+```bash
+# Signature — issuer is GitHub Actions, identity is this repo's release workflow.
+cosign verify ghcr.io/vargafoundation/strata:<tag> \
+  --certificate-identity-regexp 'https://github.com/VargaFoundation/strata/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# SBOM attestation.
+cosign verify-attestation --type spdxjson ghcr.io/vargafoundation/strata:<tag> \
+  --certificate-identity-regexp 'https://github.com/VargaFoundation/strata/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# Build provenance (SLSA).
+gh attestation verify oci://ghcr.io/vargafoundation/strata:<tag> --repo VargaFoundation/strata
+```
+
+CI also runs `cargo-audit` (RUSTSEC advisories) and `cargo-deny` (license/ban policy) on every build.
 
 ## Cluster (Raft) security
 
@@ -102,12 +169,17 @@ only do that on a trusted network.
 ## Deployment hardening checklist (Kubernetes)
 
 - [ ] `auth_enabled=true` with real credentials (or OIDC); strong `jwt_secret` (≥32 bytes).
+- [ ] API keys provided **pre-hashed** (`sha256:<hex>@tenant:role`) so no plaintext secret at rest.
 - [ ] `STRATA_CLUSTER__SECRET` set on every node (multi-node).
-- [ ] `webhook_secret` set if using webhooks.
+- [ ] Webhook secrets set per source (`webhook_secrets`) and `webhook_require_signature=true`.
+- [ ] `tool_gateway_allow_private_networks` left **false** unless downstream MCP servers are on a
+      trusted private network.
 - [ ] Secrets mounted via `_FILE` / k8s Secrets, not plaintext env.
 - [ ] `:5432` (PG wire) and `:9433` (Raft) NOT exposed publicly; NetworkPolicy restricting pod-to-pod
-      and ingress.
+      and ingress. (PG wire carries the API key as the password — **needs TLS or a private network**.)
 - [ ] Pod `securityContext`: `runAsNonRoot`, drop ALL capabilities, `readOnlyRootFilesystem` where
       possible; resource requests/limits set.
 - [ ] mTLS via mesh for inter-node + client traffic (or TLS-terminating ingress).
+- [ ] `allow_insecure` is **false** (default); the server refuses unauthenticated public binds.
 - [ ] Durable `audit_db_path` on a PVC; CI runs the RUSTSEC `cargo-audit` job.
+- [ ] Restore drills: confirm `restore_from_backup` passes manifest verification on your backups.

@@ -53,16 +53,23 @@ PostgreSQL wire-compatible. MCP-native. Self-hosted. Raft-clustered for HA.
 
 **1. Start Strata** (10 seconds)
 ```bash
+# Strata is secure by default: exposing it on the network requires an API key.
+export STRATA_API_KEY=$(openssl rand -hex 32)
+
 docker run -d --name strata \
   -p 5432:5432 -p 8432:8432 \
   -v strata-data:/data \
+  -e STRATA_GATEWAY__AUTH_ENABLED=true \
+  -e STRATA_GATEWAY__API_KEYS="$STRATA_API_KEY" \
   ghcr.io/vargafoundation/strata:latest
+
+AUTH="Authorization: Bearer $STRATA_API_KEY"
 ```
 
 **2. Ingest events** (30 seconds)
 ```bash
 curl -X POST localhost:8432/api/v1/ingest \
-  -H 'Content-Type: application/json' \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{
     "source": "support-bot",
     "events": [
@@ -74,7 +81,8 @@ curl -X POST localhost:8432/api/v1/ingest \
 
 **3. Query with SQL** (30 seconds)
 ```bash
-psql -h localhost -p 5432 -c \
+# The PG password is your API key.
+PGPASSWORD="$STRATA_API_KEY" psql -h localhost -p 5432 -U strata -c \
   "SELECT source, event_type, payload->>'customer_id' as customer, ts
    FROM episodic ORDER BY ts DESC LIMIT 10;"
 ```
@@ -82,7 +90,7 @@ psql -h localhost -p 5432 -c \
 **4. Search by meaning** (30 seconds)
 ```bash
 curl -X POST localhost:8432/api/v1/embed-and-search \
-  -H 'Content-Type: application/json' \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"text": "angry customer billing issue", "k": 3}'
 ```
 
@@ -90,33 +98,37 @@ curl -X POST localhost:8432/api/v1/embed-and-search \
 ```bash
 # Set state
 curl -X PUT localhost:8432/api/v1/state/support-bot/context \
-  -H 'Content-Type: application/json' \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"topic": "billing", "active_tickets": 2, "priority": "high"}'
 
 # Read state
-curl localhost:8432/api/v1/state/support-bot/context
+curl -H "$AUTH" localhost:8432/api/v1/state/support-bot/context
 ```
 
 **6. Remember & recall facts** (the cognition layer)
 ```bash
 # Remember a fact about a user (deduped; contradictions supersede the old fact)
 curl -X POST localhost:8432/api/v1/memories \
-  -H 'Content-Type: application/json' \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"user_id": "cust_42", "subject": "plan", "content": "On the Pro plan"}'
 
 # Later, a contradicting fact — the old one is superseded, not overwritten
 curl -X POST localhost:8432/api/v1/memories \
-  -H 'Content-Type: application/json' \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"user_id": "cust_42", "subject": "plan", "content": "Upgraded to Enterprise"}'
 
 # Hybrid search over that user's memories
 curl -X POST localhost:8432/api/v1/memories/search \
-  -H 'Content-Type: application/json' \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"user_id": "cust_42", "query": "what plan are they on?"}'
 
 # Full bi-temporal history of a memory (every superseded version)
-curl localhost:8432/api/v1/memories/<id>/history
+curl -H "$AUTH" localhost:8432/api/v1/memories/<id>/history
 ```
+
+Running purely on your own machine? Bind loopback instead of exposing ports and skip auth:
+Strata refuses to start unauthenticated on a non-loopback interface unless you explicitly set
+`STRATA_GATEWAY__ALLOW_INSECURE=true` (trusted, isolated networks only).
 
 All three memory types plus the cognition layer, running and queryable in under 3 minutes.
 
@@ -132,7 +144,7 @@ Strata replaces all of that:
 
 ```
 Before:  PostgreSQL + pgvector + Redis + embedding API + glue code
-After:   docker run ghcr.io/vargafoundation/strata
+After:   docker run ghcr.io/vargafoundation/strata   (one container, API key required)
 ```
 
 ### Comparison
@@ -226,7 +238,7 @@ context from Strata's memory stores:
 
 ```bash
 curl -X POST localhost:8432/v1/chat/completions \
-  -H 'Content-Type: application/json' \
+  -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{
     "model": "gpt-4",
     "messages": [{"role": "user", "content": "What happened with customer 42?"}]
@@ -237,7 +249,8 @@ Strata automatically:
 1. Embeds the user query
 2. Searches semantic memory for relevant knowledge
 3. Pulls recent episodic events
-4. Injects context into the system message
+4. Injects the context into the user turn as a delimited, explicitly-untrusted reference block
+   (never the system message — retrieved memories must not gain instruction rank)
 5. Forwards to your LLM provider (OpenAI, Anthropic, Ollama)
 
 ## Features
@@ -283,6 +296,7 @@ Strata automatically:
 ```bash
 git clone https://github.com/VargaFoundation/strata.git
 cd strata
+export STRATA_API_KEY=$(openssl rand -hex 32)   # compose refuses to start without one
 docker compose up -d
 ```
 

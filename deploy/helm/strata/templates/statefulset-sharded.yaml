@@ -64,6 +64,16 @@ spec:
               value: {{ $root.Values.config.memory.state.dbPath | quote }}
             - name: STRATA_GATEWAY__AUTH_ENABLED
               value: {{ $root.Values.config.gateway.authEnabled | quote }}
+            {{- if $root.Values.config.gateway.apiKeys }}
+            # Prefer sha256:<hex>@tenant:role entries so no plaintext secret sits in values/env.
+            - name: STRATA_GATEWAY__API_KEYS
+              value: {{ join "," $root.Values.config.gateway.apiKeys | quote }}
+            {{- end }}
+            {{- if $root.Values.config.gateway.allowInsecure }}
+            # Explicit opt-out of the secure-by-default guard (trusted/isolated networks only).
+            - name: STRATA_GATEWAY__ALLOW_INSECURE
+              value: "true"
+            {{- end }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:

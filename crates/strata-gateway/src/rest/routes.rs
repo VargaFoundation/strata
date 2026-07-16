@@ -132,6 +132,10 @@ pub fn router_with_engine_and_auth(
             "/admin/tenants/{tenant_id}",
             axum::routing::delete(handlers::delete_tenant),
         )
+        .route(
+            "/admin/users/{user_id}",
+            axum::routing::delete(handlers::delete_user),
+        )
         .route("/admin/audit", axum::routing::get(handlers::audit_query))
         .route(
             "/state/{agent_id}/watch",
@@ -152,6 +156,10 @@ pub fn router_with_engine_and_auth(
         .route(
             "/memories/{id}/history",
             axum::routing::get(handlers::memory_history),
+        )
+        .route(
+            "/memories/{id}/provenance",
+            axum::routing::get(handlers::memory_provenance),
         )
         .route(
             "/admin/memory/decay",
@@ -226,14 +234,18 @@ pub fn router_with_engine_and_auth(
     // Keep a handle so MCP + LLM-proxy routes can be authenticated too.
     let protocol_auth = auth_state.clone();
 
-    // Expose the configured webhook HMAC secret to the webhook handler.
-    api_routes = api_routes.layer(axum::Extension(handlers::WebhookSecret(
+    // Expose the webhook signature verifier (per-source secrets + vendor schemes) to the handler.
+    api_routes = api_routes.layer(axum::Extension(handlers::WebhookVerifier::from_config(
         config.webhook_secret.clone(),
+        &config.webhook_secrets,
+        config.webhook_require_signature,
     )));
 
     // MCP tool-gateway: a governed registry of downstream MCP servers agents can call. Also injected
     // into the engine so the agent loop can invoke registered tools via `TOOL call`.
-    let tool_gateway = std::sync::Arc::new(crate::rest::tool_gateway::ToolGateway::new());
+    let tool_gateway = std::sync::Arc::new(crate::rest::tool_gateway::ToolGateway::new(
+        config.tool_gateway_allow_private_networks,
+    ));
     engine.set_tool_executor(tool_gateway.clone());
     api_routes = api_routes.layer(axum::Extension(tool_gateway));
 
@@ -293,7 +305,15 @@ pub fn router_with_engine_and_auth(
             "/v1/chat/completions",
             axum::routing::post(crate::llm_proxy::router::chat_completions),
         )
-        .with_state(engine);
+        .route(
+            "/v1/embeddings",
+            axum::routing::post(crate::llm_proxy::router::embeddings),
+        )
+        .with_state(engine)
+        // Response-cache mode for the proxy (exact-match by default; similarity is opt-in).
+        .layer(axum::Extension(
+            crate::llm_proxy::router::LlmCacheSimilarity(config.llm_cache_similarity),
+        ));
 
     // MCP write tools replicate through Raft in cluster mode (MCP isn't leader-forwarded, so the
     // handler checks leadership itself).

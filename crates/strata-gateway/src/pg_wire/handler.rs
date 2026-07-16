@@ -27,9 +27,53 @@ use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 
 use strata_core::StrataEngine;
+use tokio_rustls::TlsAcceptor;
 
 use crate::auth::middleware::AuthState;
 use crate::cluster::shard_route::{route_decision, ShardRoutingState, ShardTarget};
+
+/// TLS material for the PG wire listener (PEM cert chain + private key on disk).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PgTlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+/// Build a `tokio_rustls` acceptor from PEM cert + key files. Uses the ring crypto provider
+/// explicitly (rather than the ambient default) so the build is unambiguous regardless of which
+/// other rustls providers are linked in the binary.
+fn build_tls_acceptor(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<Arc<TlsAcceptor>, Box<dyn std::error::Error>> {
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use tokio_rustls::rustls::ServerConfig;
+
+    let cert_bytes =
+        std::fs::read(cert_path).map_err(|e| format!("PG TLS: reading cert '{cert_path}': {e}"))?;
+    let key_bytes =
+        std::fs::read(key_path).map_err(|e| format!("PG TLS: reading key '{key_path}': {e}"))?;
+
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_bytes[..])
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("PG TLS: parsing cert PEM: {e}"))?;
+    if certs.is_empty() {
+        return Err(format!("PG TLS: no certificates found in '{cert_path}'").into());
+    }
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_bytes[..])
+        .map_err(|e| format!("PG TLS: parsing key PEM: {e}"))?
+        .ok_or_else(|| format!("PG TLS: no private key found in '{key_path}'"))?;
+
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("PG TLS: protocol setup: {e}"))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("PG TLS: invalid cert/key pair: {e}"))?;
+
+    Ok(Arc::new(TlsAcceptor::from(Arc::new(config))))
+}
 
 /// Startup handler with optional password-as-token authentication.
 ///
@@ -444,13 +488,25 @@ pub async fn start_pg_wire(
     max_connections: usize,
     auth: Option<AuthState>,
     shard: Option<ShardRoutingState>,
+    tls: Option<PgTlsConfig>,
 ) -> Result<PgWireHandle, Box<dyn std::error::Error>> {
     let factory = Arc::new(PgWireFactory::new(engine, auth, shard));
+    // Optional TLS: when configured, the listener negotiates `SSLRequest` and upgrades the socket.
+    // The PG password (= API key/JWT) then never crosses the wire in cleartext.
+    let tls_acceptor = match tls {
+        Some(cfg) => Some(build_tls_acceptor(&cfg.cert_path, &cfg.key_path)?),
+        None => None,
+    };
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_connections));
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
-    tracing::info!(addr, max_connections, "PG wire server listening");
+    tracing::info!(
+        addr,
+        max_connections,
+        tls = tls_acceptor.is_some(),
+        "PG wire server listening"
+    );
 
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let active_conns = active_connections.clone();
@@ -474,9 +530,10 @@ pub async fn start_pg_wire(
                             };
                             let factory_ref = factory.clone();
                             let conns = active_conns.clone();
+                            let acceptor = tls_acceptor.clone();
                             conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             tokio::spawn(async move {
-                                let _ = pgwire::tokio::process_socket(socket, None, factory_ref).await;
+                                let _ = pgwire::tokio::process_socket(socket, acceptor, factory_ref).await;
                                 conns.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                 drop(permit);
                             });
@@ -579,7 +636,7 @@ mod tests {
         let port = free_port();
         let addr = format!("127.0.0.1:{port}");
         let auth = AuthState::new(vec![], Some(SECRET.into()), 0);
-        let _handle = start_pg_wire(&addr, engine().await, 16, Some(auth), None)
+        let _handle = start_pg_wire(&addr, engine().await, 16, Some(auth), None, None)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -610,5 +667,75 @@ mod tests {
                 .is_err(),
             "a non-token password must be rejected"
         );
+    }
+
+    // Self-signed test cert/key (RSA-2048, CN=strata-test) — TEST ONLY, never a real credential.
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIDDTCCAfWgAwIBAgIUcFB9FNK2t1ruf6ayc4LApbSRvm8wDQYJKoZIhvcNAQEL\n\
+BQAwFjEUMBIGA1UEAwwLc3RyYXRhLXRlc3QwHhcNMjYwNzE1MjMxNjQwWhcNMzYw\n\
+NzEyMjMxNjQwWjAWMRQwEgYDVQQDDAtzdHJhdGEtdGVzdDCCASIwDQYJKoZIhvcN\n\
+AQEBBQADggEPADCCAQoCggEBAPSA8Zho82YAEPRxvouYPO87Nf0sjLGU9vLP1xRK\n\
+9LAPt9YwXH5k+xUuctHFpRoU0ps//6J+9TEBxcBUDGzQ3s5tlx/5EPuc98OWe+5T\n\
+bg+O/qTYUqZAez8QSqWyTrlNUBateHbZRWIHU5ufydnecr3YZW9Nvv2E/iPBYJNc\n\
+dbBFjpN7Z0F7vqPZc+kf/z5npZxcnC87NdZ6j2tCvRc5JmMUxmk4sRL4FX4iJPjg\n\
+uKkyoj0JKthOi2L2QXvZnM+U0DFvZR29Bonb3n7IqVMgV/eblY1DV4ApV1JGeLWA\n\
+fsW5kBOZosdMuNYZ94sglbI8BscdVN4fdvN5JHma7zLxct0CAwEAAaNTMFEwHQYD\n\
+VR0OBBYEFEViAXHIUIxfAm0TuX812hT+rWbaMB8GA1UdIwQYMBaAFEViAXHIUIxf\n\
+Am0TuX812hT+rWbaMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEB\n\
+ACV4dE+dbHPMwlku8XwBxLMW5ziL4Xqm/NriL67sVQVVg05Ep7raYFJzW71tWfcs\n\
+MeIf4nVJ0EDPfBmRsfOy0l5hT5BVHOZJ3YJJYA0LoDjNGLAQTTIhyEvPg/2HdqPS\n\
+GpxchBFssgCmH8fKFit+Qlnyu5Q5iNXJXW0s9oJrlK94kuvnLV+epxUfnY16GE7g\n\
+JGZgKKY15Cqry7shzgV09xcaaBMX5NzEhlrTZ0n5kYX9CXr0mo67YhJxyo4x8x8I\n\
+S7Bk4/tq5uZqcIjaC9SduyzvF7ISm7O1lxQvfp9pjo5Aqjj8q+kIzeRylZsFIid2\n\
+UB2smy9Sl4xqIYNiJEsjATM=\n\
+-----END CERTIFICATE-----\n";
+
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQD0gPGYaPNmABD0\n\
+cb6LmDzvOzX9LIyxlPbyz9cUSvSwD7fWMFx+ZPsVLnLRxaUaFNKbP/+ifvUxAcXA\n\
+VAxs0N7ObZcf+RD7nPfDlnvuU24Pjv6k2FKmQHs/EEqlsk65TVAWrXh22UViB1Ob\n\
+n8nZ3nK92GVvTb79hP4jwWCTXHWwRY6Te2dBe76j2XPpH/8+Z6WcXJwvOzXWeo9r\n\
+Qr0XOSZjFMZpOLES+BV+IiT44LipMqI9CSrYToti9kF72ZzPlNAxb2UdvQaJ295+\n\
+yKlTIFf3m5WNQ1eAKVdSRni1gH7FuZATmaLHTLjWGfeLIJWyPAbHHVTeH3bzeSR5\n\
+mu8y8XLdAgMBAAECggEAAsRZd5XAeL1eyRVnHaH5wTn/UL/UpnHUIEf/3B1DtaEH\n\
+6JGgNQH5jBzRdH7zG7TJSV5+YHK6svTygvcF3k64JsfmDO4++0n5zSnXzzOnLDU8\n\
+ZoCC4ZobNZ8pPm93z/BdtqlR6AO/cu44S6uRl43v6HwZccVZzaQCqERDo9yeVwH8\n\
+2G00WjV/vGYqXbbAHchYYpJtuQInfVguUyFAhi8FXFChjFwsnApOV0aNDWdyZvQH\n\
+i3Of8YwcVvS2wTUp7aBQIoacinr8xelHas4S3WB9UdBdpCScjM4gs+DD0fms1/S0\n\
+EllWNEkSvd8Xq88Bs0fCNE/DutkQIiMCffGQs9jNNQKBgQD6vvrkWOhqCl2TvSwS\n\
+zRso3IZZAtVRcLH2mTHTy07e7CF6bBqeya41SbJxgfWtIpPijmEKSUZbaY9f+36v\n\
+IAIdXm/H9qstNiSSoOfBlmOP3PNpB5dxrwyIEgnUviT1bx4ya4SrDaVWOxH8YHzt\n\
+oBLvlTB7kpO9xRUQQHZj98bC5wKBgQD5oHq4RFObvUzmFMlL3sm5wfjoW7qERMLX\n\
+4Q3smQt1JBzhGshddX/SFRA0zZz9HuuqHaCgjo2TlwKm2Y1Gsl29dwqFa1iFXvk5\n\
+qKsO0N1ygzyN6gc+RCo1/n5TobMoIM1KbJJrBuA2rFjLG3KycSdQAjAG/bloOk6x\n\
+D5Z04g3nmwKBgCkw4mpMqLFyzniMpQbZptKJl5BbxMtCJhoKhIL0bRp10/IWfDEF\n\
+lJawap326XLtsTmQhiR4cRRnPORZnjAKpA5LCzXgMbKVqGBmCmxk1io1886XLqvA\n\
+Q+C+hdrq+YtQG7fQrdSjwzttLME24I7wsuukqHhEVfzguVsYG9rEQ2SVAoGBAKz6\n\
+vc+O2XkkdnNBmDQRECy+86LgXaFmnLZH6AQ6Eax8994tVwcccxS7L93HVbA5iwj5\n\
+OuPHpOfPTzEbtEB3PWobYZkOx+qz43RHIzJDHhFKS93zfE1zouSDlDqT5Lg78sZN\n\
+8jBkNV7tkyI7xQFOU/WnbmyJyb8mGH2t1Y7tTsFdAoGBAN8oDMDxA2fyTk91S4s2\n\
+xoFV5V2qU1kQvCDV0TUor8aZQmji1AvHwAII1Ltirsf5+Z6rr5jfx3hMKxDO1sP5\n\
+8+syB37Nszoc1Vbj1p/nbB4gXquT7KbFxrZ7m1sPnCNPb6mg2gX8ZXK02KB13ot5\n\
+jEeVrC/BdHMwDCBig3WODjgE\n\
+-----END PRIVATE KEY-----\n";
+
+    #[test]
+    fn tls_acceptor_builds_from_pem_and_rejects_bad_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&cert, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key, TEST_KEY_PEM).unwrap();
+
+        // A valid cert/key pair builds an acceptor.
+        assert!(build_tls_acceptor(cert.to_str().unwrap(), key.to_str().unwrap()).is_ok());
+
+        // A missing cert file errors (not panics).
+        assert!(build_tls_acceptor("/no/such/cert.pem", key.to_str().unwrap()).is_err());
+
+        // A file with no certificate in it errors.
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "not a pem").unwrap();
+        assert!(build_tls_acceptor(empty.to_str().unwrap(), key.to_str().unwrap()).is_err());
     }
 }

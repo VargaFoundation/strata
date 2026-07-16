@@ -16,6 +16,8 @@ async fn full_stack_lifecycle() {
     let engine = Arc::new(StrataEngine::new(CoreConfig::default()).await.unwrap());
     let config = GatewayConfig {
         listen: "127.0.0.1:0".into(),
+        pg_listen: "127.0.0.1:0".into(),
+        grpc_listen: "127.0.0.1:0".into(),
         ..Default::default()
     };
     let gateway = GatewayServer::start(engine.clone(), config, None, None)

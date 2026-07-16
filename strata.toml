@@ -14,7 +14,6 @@ secret_key = ""
 region = "us-east-1"
 
 [memory.episodic]
-wal_dir = "./data/wal"
 default_retention_days = 365
 
 [memory.semantic]
@@ -38,12 +37,29 @@ max_rows = 10000
 timeout_ms = 30000
 
 [gateway]
-listen = "0.0.0.0:8432"
-pg_listen = "0.0.0.0:5432"
-grpc_listen = "0.0.0.0:9432"
+# Local-dev posture: loopback binds + no auth. To expose Strata on a network you MUST either
+# enable authentication or explicitly opt out (see below) — the server refuses to start
+# unauthenticated on a non-loopback bind otherwise.
+listen = "127.0.0.1:8432"
+pg_listen = "127.0.0.1:5432"
+grpc_listen = "127.0.0.1:9432"
 mcp_enabled = true
 llm_proxy_enabled = false
 auth_enabled = false
+# TLS for the PG wire listener (encrypts the password = API key in transit). Set both paths:
+#   [gateway.pg_tls]
+#   cert_path = "/etc/strata/tls/pg.crt"
+#   key_path  = "/etc/strata/tls/pg.key"
+# Production posture — bind all interfaces and require keys:
+#   listen = "0.0.0.0:8432"
+#   auth_enabled = true
+#   api_keys = ["sha256:<64-hex-of-secret>@<tenant>:<role>"]   # or "<secret>@<tenant>:<role>"
+# Generate a key + its digest:  KEY=$(openssl rand -hex 32); echo -n "$KEY" | sha256sum
+# Explicit opt-out on a trusted, isolated network ONLY:
+#   allow_insecure = true
+# Webhook signature verification (per vendor: github/slack/sentry/pagerduty):
+#   webhook_secrets = ["github=<hmac>", "slack=<signing-secret>"]
+#   webhook_require_signature = true   # fail-closed: reject sources with no configured secret
 
 [cluster]
 enabled = false

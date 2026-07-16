@@ -1,6 +1,5 @@
 //! Authentication middleware — Tower layer for request authentication.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,6 +7,7 @@ use axum::extract::Request;
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use sha2::{Digest, Sha256};
 
 use super::audit::AuditLog;
 use super::jwt;
@@ -75,14 +75,41 @@ struct ApiKeyInfo {
     role: Role,
 }
 
+/// SHA-256 digest of an API key. Keys are hashed at config load and never held in plaintext
+/// afterwards; presented tokens are hashed and compared digest-to-digest in constant time.
+type KeyDigest = [u8; 32];
+
+fn digest_key(key: &str) -> KeyDigest {
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Decode a 64-char hex string into a 32-byte digest.
+fn hex_to_digest(s: &str) -> Option<KeyDigest> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Parse an API-key config entry, backward-compatibly:
 /// - `"<key>"`              → Writer, no tenant (legacy behavior, unchanged)
 /// - `"<key>@<tenant>"`     → Writer, scoped to `<tenant>`
 /// - `"<key>@<tenant>:<role>"` → `<role>`, scoped to `<tenant>`
-fn parse_api_key(entry: &str) -> (String, ApiKeyInfo) {
-    match entry.split_once('@') {
+///
+/// `<key>` is either the plaintext secret (hashed here, at load) or `sha256:<64-hex>` — the
+/// SHA-256 of the secret — so config files never store a credential at rest. Returns `None`
+/// for a `sha256:` entry with malformed hex: it must be skipped (fail-closed), never silently
+/// downgraded to a plaintext key.
+fn parse_api_key(entry: &str) -> Option<(KeyDigest, ApiKeyInfo)> {
+    let (secret, info) = match entry.split_once('@') {
         None => (
-            entry.to_string(),
+            entry,
             ApiKeyInfo {
                 tenant: None,
                 role: Role::Writer,
@@ -94,20 +121,27 @@ fn parse_api_key(entry: &str) -> (String, ApiKeyInfo) {
                 None => (rest, Role::Writer),
             };
             (
-                key.to_string(),
+                key,
                 ApiKeyInfo {
                     tenant: (!tenant.is_empty()).then(|| tenant.to_string()),
                     role,
                 },
             )
         }
-    }
+    };
+    let digest = match secret.strip_prefix("sha256:") {
+        Some(hex) => hex_to_digest(hex)?,
+        None => digest_key(secret),
+    };
+    Some((digest, info))
 }
 
 /// Shared authentication state for the middleware.
 #[derive(Clone)]
 pub struct AuthState {
-    keys: Arc<HashMap<String, ApiKeyInfo>>,
+    /// `(digest, grant)` pairs — a Vec (not a map) so lookups can scan every entry with a
+    /// constant-time comparison instead of a timing-dependent hash lookup on the secret.
+    keys: Arc<Vec<(KeyDigest, ApiKeyInfo)>>,
     jwt_secret: Option<Arc<String>>,
     oidc: Option<Arc<super::oidc::OidcValidator>>,
     rate_limiter: Option<Arc<RateLimiter>>,
@@ -160,8 +194,18 @@ impl AuthState {
                 None
             }
         };
+        let mut keys: Vec<(KeyDigest, ApiKeyInfo)> = Vec::with_capacity(api_keys.len());
+        for entry in &api_keys {
+            match parse_api_key(entry) {
+                Some(parsed) => keys.push(parsed),
+                // Fail closed: a malformed sha256: digest must not become a usable plaintext key.
+                None => tracing::warn!(
+                    "ignoring malformed `sha256:` API-key entry (bad hex digest) — it will NOT authenticate"
+                ),
+            }
+        }
         Self {
-            keys: Arc::new(api_keys.iter().map(|e| parse_api_key(e)).collect()),
+            keys: Arc::new(keys),
             jwt_secret: jwt_secret.map(Arc::new),
             oidc: None,
             rate_limiter,
@@ -196,8 +240,21 @@ impl AuthState {
         Some(ctx)
     }
 
+    /// Constant-time lookup: hash the presented token, then compare it against every stored
+    /// digest without early exit, so response timing reveals nothing about partial matches.
+    fn find_key(&self, token: &str) -> Option<&ApiKeyInfo> {
+        let digest = digest_key(token);
+        let mut found: Option<&ApiKeyInfo> = None;
+        for (stored, info) in self.keys.iter() {
+            if ct_eq(stored, &digest) && found.is_none() {
+                found = Some(info);
+            }
+        }
+        found
+    }
+
     fn validate_api_key(&self, key: &str) -> bool {
-        self.keys.contains_key(key)
+        self.find_key(key).is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -248,7 +305,7 @@ impl AuthState {
             }
         }
         // 3. API key — may carry a tenant + role (parsed from the key config; a bare key = Writer/none).
-        if let Some(info) = self.keys.get(token) {
+        if let Some(info) = self.find_key(token) {
             return self.enforce_tenant(AuthContext {
                 identity: "api-key-user".into(),
                 role: info.role.clone(),
@@ -734,5 +791,44 @@ mod tests {
     fn auth_state_empty() {
         let state = AuthState::new(vec![], None, 0);
         assert!(state.is_empty());
+    }
+
+    fn digest_hex(secret: &str) -> String {
+        digest_key(secret)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn hashed_key_entry_authenticates_the_plaintext_secret() {
+        // Config stores only the SHA-256 digest; the client still sends the secret.
+        let hex = digest_hex("topsecret");
+        let state = AuthState::new(vec![format!("sha256:{hex}@acme:reader")], None, 0);
+        let ctx = state.authenticate("topsecret").await.unwrap();
+        assert_eq!(ctx.role, Role::Reader);
+        assert_eq!(ctx.tenant_id.as_deref(), Some("acme"));
+        // The digest itself is not the credential.
+        assert!(state.authenticate(&hex).await.is_none());
+        assert!(state.authenticate(&format!("sha256:{hex}")).await.is_none());
+    }
+
+    #[test]
+    fn malformed_sha256_entry_fails_closed() {
+        // A bad digest must be dropped — not silently treated as a plaintext key.
+        let state = AuthState::new(vec!["sha256:not-valid-hex@acme".into()], None, 0);
+        assert!(!state.validate_api_key("sha256:not-valid-hex"));
+        assert!(!state.validate_api_key("not-valid-hex"));
+        assert!(state.is_empty(), "malformed entry must be skipped entirely");
+    }
+
+    #[test]
+    fn hex_to_digest_roundtrip_and_rejects() {
+        let d = digest_key("abc");
+        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex_to_digest(&hex), Some(d));
+        assert_eq!(hex_to_digest(&hex.to_uppercase()), Some(d));
+        assert!(hex_to_digest("zz").is_none());
+        assert!(hex_to_digest(&hex[..62]).is_none());
     }
 }

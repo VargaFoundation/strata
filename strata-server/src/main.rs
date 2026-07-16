@@ -2,6 +2,11 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+/// Use mimalloc as the global allocator. DuckDB allocates heavily and the musl allocator (Alpine
+/// runtime image) is notably slow under multi-threaded contention; mimalloc removes that penalty.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod banner;
 mod config;
 mod signals;

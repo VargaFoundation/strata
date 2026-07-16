@@ -19,14 +19,24 @@ pub struct GatewayConfig {
     pub mcp_enabled: bool,
     pub llm_proxy_enabled: bool,
     pub auth_enabled: bool,
+    /// Explicit opt-out of the secure-by-default startup guard: allow serving WITHOUT
+    /// authentication on non-loopback interfaces (trusted/isolated networks only).
+    /// Off by default — an unauthenticated Strata is an open read/write database.
+    #[serde(default)]
+    pub allow_insecure: bool,
     pub max_pg_connections: usize,
     /// API keys that are allowed to access the server (when auth_enabled = true).
+    /// Entry forms: `<secret>`, `<secret>@<tenant>`, `<secret>@<tenant>:<role>`; the secret part
+    /// may be `sha256:<64-hex>` (digest of the secret) so no plaintext credential sits at rest.
+    /// Accepts a TOML array or a comma-separated string (`STRATA_GATEWAY__API_KEYS="k1,k2"`).
+    #[serde(default, deserialize_with = "de_string_or_seq")]
     pub api_keys: Vec<String>,
     /// HMAC-SHA256 secret for JWT token validation.
     #[serde(default)]
     pub jwt_secret: Option<String>,
     /// Allowed CORS origins. Empty = permissive (dev only).
-    #[serde(default)]
+    /// Accepts a TOML array or a comma-separated string (env var form).
+    #[serde(default, deserialize_with = "de_string_or_seq")]
     pub cors_origins: Vec<String>,
     /// Maximum requests per second per API key (token bucket). 0 = unlimited.
     #[serde(default)]
@@ -37,14 +47,41 @@ pub struct GatewayConfig {
     /// Durable audit-log path (file-backed DuckDB). Empty/`:memory:` = in-memory (non-durable).
     #[serde(default)]
     pub audit_db_path: String,
-    /// HMAC-SHA256 secret for verifying incoming webhook signatures (GitHub-style
-    /// `X-Hub-Signature-256`). When set, unsigned/mis-signed webhooks are rejected.
+    /// Global fallback HMAC secret for verifying incoming webhook signatures, applied to any
+    /// source without a specific entry in `webhook_secrets`. When set, unsigned/mis-signed
+    /// webhooks for that source are rejected.
     #[serde(default)]
     pub webhook_secret: Option<String>,
+    /// Per-source webhook secrets as `source=secret` entries (e.g. `"github=...","slack=..."`).
+    /// The signature *scheme* is chosen per vendor. Accepts a TOML array or a comma-separated
+    /// string (env var form).
+    #[serde(default, deserialize_with = "de_string_or_seq")]
+    pub webhook_secrets: Vec<String>,
+    /// Fail-closed webhooks: reject any webhook to a source that has no configured secret. Off by
+    /// default (unsigned sources are accepted, for local dev); enable in production so a source
+    /// can't forge events into episodic memory.
+    #[serde(default)]
+    pub webhook_require_signature: bool,
     /// When true, reject non-Admin credentials that carry no tenant (a bare API key or a token with
     /// no `tenant_id`). Off by default; enable for strict multi-tenant isolation.
     #[serde(default)]
     pub require_tenant: bool,
+    /// LLM-proxy response cache: also serve vector-similarity matches (≥0.95), not just exact
+    /// ones. Off by default — similarity-matching factual answers can conflate near-identical
+    /// prompts ("balance of cust_42" vs "cust_43"). Hits are always scoped to
+    /// (tenant, user, retrieved-context) either way.
+    #[serde(default)]
+    pub llm_cache_similarity: bool,
+    /// MCP tool-gateway SSRF policy: allow outbound tool calls to loopback/private/CGNAT/ULA
+    /// addresses. Off by default (block them). Enable for local dev or a trusted internal
+    /// network where downstream MCP servers legitimately live on private IPs. The cloud-metadata
+    /// endpoint and other link-local addresses are blocked regardless.
+    #[serde(default)]
+    pub tool_gateway_allow_private_networks: bool,
+    /// Optional TLS for the PostgreSQL wire listener (:5432). When set, the PG password (= API
+    /// key/JWT) is encrypted in transit. Strongly recommended if :5432 is reachable off-localhost.
+    #[serde(default)]
+    pub pg_tls: Option<crate::pg_wire::handler::PgTlsConfig>,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -56,6 +93,7 @@ impl std::fmt::Debug for GatewayConfig {
             .field("mcp_enabled", &self.mcp_enabled)
             .field("llm_proxy_enabled", &self.llm_proxy_enabled)
             .field("auth_enabled", &self.auth_enabled)
+            .field("allow_insecure", &self.allow_insecure)
             .field("max_pg_connections", &self.max_pg_connections)
             .field("api_keys", &format!("[{} keys]", self.api_keys.len()))
             .field("jwt_secret", &self.jwt_secret.as_ref().map(|_| "***"))
@@ -76,6 +114,7 @@ impl Default for GatewayConfig {
             mcp_enabled: true,
             llm_proxy_enabled: false,
             auth_enabled: false,
+            allow_insecure: false,
             max_pg_connections: 256,
             api_keys: vec![],
             jwt_secret: None,
@@ -84,9 +123,62 @@ impl Default for GatewayConfig {
             oidc: crate::auth::oidc::OidcConfig::default(),
             audit_db_path: "./data/audit.duckdb".into(),
             webhook_secret: None,
+            webhook_secrets: vec![],
+            webhook_require_signature: false,
             require_tenant: false,
+            llm_cache_similarity: false,
+            tool_gateway_allow_private_networks: false,
+            pg_tls: None,
         }
     }
+}
+
+/// Whether a `host:port` bind address targets only the loopback interface. Anything that does
+/// not parse as a loopback socket address (wildcards, hostnames, malformed input) is treated as
+/// NON-loopback — the guard errs toward refusing exposure.
+fn is_loopback_bind(addr: &str) -> bool {
+    if let Ok(sa) = addr.parse::<std::net::SocketAddr>() {
+        return sa.ip().is_loopback();
+    }
+    match addr.rsplit_once(':') {
+        Some((host, _port)) => host == "localhost",
+        None => false,
+    }
+}
+
+/// Deserialize a string list from either a sequence (TOML array) or a comma-separated string
+/// (env var form) — the `config` crate cannot turn a plain env string into a `Vec` on its own.
+fn de_string_or_seq<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{SeqAccess, Visitor};
+    use std::fmt;
+
+    struct StringOrSeq;
+    impl<'de> Visitor<'de> for StringOrSeq {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a comma-separated string or a sequence of strings")
+        }
+        fn visit_str<E>(self, s: &str) -> std::result::Result<Self::Value, E> {
+            Ok(s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect())
+        }
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut out = Vec::new();
+            while let Some(x) = seq.next_element::<String>()? {
+                out.push(x);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_any(StringOrSeq)
 }
 
 /// The gateway server — owns all protocol listeners.
@@ -108,6 +200,39 @@ impl GatewayServer {
         prometheus: Option<PrometheusHandle>,
         coordinator: Option<Arc<tokio::sync::RwLock<ClusterCoordinator>>>,
     ) -> Result<Self> {
+        // ── Secure-by-default guard ──────────────────────────────────
+        // A memory engine holds personal data by construction; an unauthenticated server
+        // listening on a non-loopback interface is an open read/write database on the network.
+        // Refuse that posture unless it is explicitly requested.
+        if !config.auth_enabled {
+            let exposed: Vec<&str> = [&config.listen, &config.pg_listen, &config.grpc_listen]
+                .into_iter()
+                .map(String::as_str)
+                .filter(|a| !is_loopback_bind(a))
+                .collect();
+            if !exposed.is_empty() {
+                if config.allow_insecure {
+                    tracing::warn!(
+                        addrs = ?exposed,
+                        "INSECURE: serving WITHOUT authentication on non-loopback interfaces \
+                         (allow_insecure=true) — anyone who can reach these ports can read and \
+                         write all data"
+                    );
+                } else {
+                    return Err(crate::Error::Auth(format!(
+                        "refusing to start: auth_enabled=false while binding non-loopback \
+                         interfaces ({}). Fix one of: (1) enable auth — [gateway] \
+                         auth_enabled=true + api_keys (STRATA_GATEWAY__AUTH_ENABLED=true, \
+                         STRATA_GATEWAY__API_KEYS=\"<key>\"); (2) bind loopback only, e.g. \
+                         listen=\"127.0.0.1:8432\"; or (3) explicitly accept the risk on a \
+                         trusted network: allow_insecure=true \
+                         (STRATA_GATEWAY__ALLOW_INSECURE=true).",
+                        exposed.join(", ")
+                    )));
+                }
+            }
+        }
+
         let listen_addr = config.listen.clone();
 
         // Fleet-shared cluster secret — authenticates the internal shard-forward rate-limit marker.
@@ -273,6 +398,7 @@ impl GatewayServer {
             max_pg,
             pg_auth,
             pg_shard,
+            config.pg_tls.clone(),
         )
         .await
         {
@@ -350,6 +476,8 @@ mod tests {
         // Use port 0 so OS picks a free port
         let config = GatewayConfig {
             listen: "127.0.0.1:0".into(),
+            pg_listen: "127.0.0.1:0".into(),
+            grpc_listen: "127.0.0.1:0".into(),
             ..Default::default()
         };
         let gateway = GatewayServer::start(
@@ -361,6 +489,76 @@ mod tests {
         .await
         .unwrap();
         gateway.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_public_bind_refuses_to_start() {
+        let engine = Arc::new(
+            StrataEngine::new(strata_core::CoreConfig::default())
+                .await
+                .unwrap(),
+        );
+        // auth off + a wildcard bind = an open database on the network → must fail.
+        let config = GatewayConfig {
+            listen: "0.0.0.0:0".into(),
+            pg_listen: "127.0.0.1:0".into(),
+            grpc_listen: "127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        let result = GatewayServer::start(
+            engine,
+            config,
+            None,
+            None::<Arc<tokio::sync::RwLock<ClusterCoordinator>>>,
+        )
+        .await;
+        assert!(result.is_err(), "insecure public bind must be refused");
+    }
+
+    #[tokio::test]
+    async fn allow_insecure_overrides_the_public_bind_guard() {
+        let engine = Arc::new(
+            StrataEngine::new(strata_core::CoreConfig::default())
+                .await
+                .unwrap(),
+        );
+        let config = GatewayConfig {
+            listen: "0.0.0.0:0".into(),
+            pg_listen: "127.0.0.1:0".into(),
+            grpc_listen: "127.0.0.1:0".into(),
+            allow_insecure: true,
+            ..Default::default()
+        };
+        let gateway = GatewayServer::start(
+            engine,
+            config,
+            None,
+            None::<Arc<tokio::sync::RwLock<ClusterCoordinator>>>,
+        )
+        .await
+        .expect("explicit allow_insecure must start (with a loud warning)");
+        gateway.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn loopback_bind_detection() {
+        assert!(is_loopback_bind("127.0.0.1:8432"));
+        assert!(is_loopback_bind("127.1.2.3:1"));
+        assert!(is_loopback_bind("[::1]:9432"));
+        assert!(is_loopback_bind("localhost:5432"));
+        assert!(!is_loopback_bind("0.0.0.0:8432"));
+        assert!(!is_loopback_bind("[::]:8432"));
+        assert!(!is_loopback_bind("192.168.1.10:5432"));
+        assert!(!is_loopback_bind("example.com:80"));
+        assert!(!is_loopback_bind("garbage"));
+    }
+
+    #[test]
+    fn api_keys_deserialize_from_comma_string() {
+        // The env-var shape: STRATA_GATEWAY__API_KEYS="k1@acme,k2@beta:reader".
+        let config: GatewayConfig =
+            toml::from_str(r#"api_keys = "k1@acme, k2@beta:reader""#).unwrap();
+        assert_eq!(config.api_keys, vec!["k1@acme", "k2@beta:reader"]);
     }
 
     #[tokio::test]

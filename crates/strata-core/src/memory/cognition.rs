@@ -362,6 +362,12 @@ impl MemoryInput {
         self.subject = Some(subject.into());
         self
     }
+
+    /// Cite the episodic events this memory was distilled from (feeds the provenance API).
+    pub fn with_source_event_ids(mut self, ids: Vec<Uuid>) -> Self {
+        self.source_event_ids = ids;
+        self
+    }
 }
 
 /// A memory search hit with similarity score (0.0 when ranked by recency fallback).
@@ -1093,6 +1099,29 @@ impl MemoryStore {
             "DELETE FROM memory_edges WHERE tenant_id = ?",
             duckdb::params![tenant],
         );
+        Ok(ids)
+    }
+
+    /// Delete every memory belonging to `user_id` within `tenant` (GDPR erasure at the person
+    /// level). Returns the deleted ids so the caller can purge their vectors.
+    pub async fn delete_by_user(&self, tenant: &str, user_id: &str) -> crate::Result<Vec<Uuid>> {
+        let db = self.write_db.lock();
+        let ids: Vec<Uuid> = {
+            let mut stmt = db
+                .prepare("SELECT id FROM memories WHERE tenant_id = ? AND user_id = ?")
+                .map_err(|e| crate::Error::Query(e.to_string()))?;
+            let rows = stmt
+                .query_map(duckdb::params![tenant, user_id], |r| r.get::<_, String>(0))
+                .map_err(|e| crate::Error::Query(e.to_string()))?;
+            rows.filter_map(|r| r.ok())
+                .filter_map(|s| Uuid::parse_str(&s).ok())
+                .collect()
+        };
+        db.execute(
+            "DELETE FROM memories WHERE tenant_id = ? AND user_id = ?",
+            duckdb::params![tenant, user_id],
+        )
+        .map_err(|e| crate::Error::State(format!("delete memories by user: {e}")))?;
         Ok(ids)
     }
 

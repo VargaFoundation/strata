@@ -21,6 +21,19 @@ use crate::runtime::{
 };
 use crate::Result;
 
+/// Provenance for a memory — the evidence chain behind a distilled fact (see
+/// [`StrataEngine::memory_provenance`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemoryProvenance {
+    /// The memory being explained.
+    pub memory: Memory,
+    /// The episodic events it was distilled from (resolved from `source_event_ids`).
+    pub source_events: Vec<Event>,
+    /// The bi-temporal supersession chain (every version, oldest first) for a subject-keyed
+    /// memory; a single-element list otherwise.
+    pub history: Vec<Memory>,
+}
+
 /// Top-level engine that owns all subsystems of the Strata context lake.
 pub struct StrataEngine {
     config: CoreConfig,
@@ -1669,6 +1682,13 @@ impl StrataEngine {
 
     // ── Embed & Search ────────────────────────────────────────────────
 
+    /// Test-only: inject an embedding provider after construction so cognition paths that require
+    /// vectors (semantic dedup/merge) can be exercised without a live Ollama/OpenAI backend.
+    #[cfg(test)]
+    fn set_embedding_for_test(&mut self, provider: Arc<dyn EmbeddingProvider>) {
+        self.embedding = Some(provider);
+    }
+
     /// Embed a text string using the configured embedding provider.
     pub async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
         let provider = self
@@ -1681,6 +1701,22 @@ impl StrataEngine {
             .into_iter()
             .next()
             .ok_or_else(|| crate::Error::Embedding("embedding returned empty result".into()))
+    }
+
+    /// Embed a batch of texts with **no** task prefix — the symmetric behavior an OpenAI-compatible
+    /// `/v1/embeddings` caller expects (they manage any prefixing themselves). Returns one vector
+    /// per input, in order.
+    pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let provider = self
+            .embedding
+            .as_ref()
+            .ok_or_else(|| crate::Error::Embedding("no embedding provider configured".into()))?;
+        provider.embed(texts).await
+    }
+
+    /// The configured embedding model name (for the `/v1/embeddings` response `model` field).
+    pub fn embedding_model(&self) -> Option<String> {
+        self.embedding.as_ref().map(|p| p.model_name().to_string())
     }
 
     /// Embed a **document** to be indexed (write/ingest path) — applies the model's *document* task
@@ -1897,20 +1933,52 @@ impl StrataEngine {
             let hits = self.memory_index_search(emb, &input.scope, 1).await?;
             if let Some(top) = hits.first() {
                 if top.score >= cog.dedup_threshold {
-                    let mut m = top.memory.clone();
-                    m.content = input.content.clone();
-                    m.importance = importance.max(top.memory.importance);
-                    m.version += 1;
-                    m.updated_at = chrono::Utc::now();
+                    // Bi-temporal merge: rather than overwriting the old row's content in place
+                    // (which would erase the prior text with no trace), close the old row as
+                    // superseded at `valid_to` and insert a new one pointing back to it. This keeps
+                    // `memory_as_of(T)` and `/history` exact on the dedup path too — honoring the
+                    // "nothing is silently hard-deleted" guarantee on every write path, not just the
+                    // subject-contradiction one. The outcome stays `Merged` so callers can still
+                    // distinguish a near-duplicate consolidation from a true contradiction.
+                    let now = chrono::Utc::now();
+                    let mut old = top.memory.clone();
+                    old.state = MemoryState::Superseded;
+                    old.valid_to = Some(now);
+                    old.updated_at = now;
+
+                    let mut mem = Memory::new(input.scope.clone(), input.content.clone());
+                    mem.subject = top.memory.subject.clone();
+                    mem.importance = importance.max(top.memory.importance);
+                    mem.supersedes = Some(top.memory.id);
+                    mem.valid_from = now;
+                    // Provenance survives the merge: the old memory's source events still support
+                    // the consolidated fact, so carry them forward (deduped) with the new ones.
+                    let mut src = top.memory.source_event_ids.clone();
+                    for id in &input.source_event_ids {
+                        if !src.contains(id) {
+                            src.push(*id);
+                        }
+                    }
+                    mem.source_event_ids = src;
+                    mem.metadata = input.metadata.clone();
+                    if let Some(t) = &input.mem_type {
+                        mem.mem_type = t.clone();
+                    }
                     return Ok((
                         MemoryAdd {
-                            memory: m.clone(),
+                            memory: mem.clone(),
                             outcome: MemoryOutcome::Merged,
                         },
-                        vec![MemoryRow {
-                            memory: m,
-                            embedding: embedding.clone(),
-                        }],
+                        vec![
+                            MemoryRow {
+                                memory: old,
+                                embedding: None,
+                            },
+                            MemoryRow {
+                                memory: mem,
+                                embedding: embedding.clone(),
+                            },
+                        ],
                     ));
                 }
             }
@@ -2250,6 +2318,26 @@ impl StrataEngine {
         }))
     }
 
+    /// GDPR erasure at the **person** level: delete a user's memories (and their vectors) within a
+    /// tenant. The cognition layer is where user-scoped data lives (memories carry a first-class
+    /// `user_id`); episodic events and agent state are NOT user-scoped (no `user_id` column), so
+    /// they are out of scope here — the response states this explicitly so a data-controller isn't
+    /// misled into thinking event payloads were scrubbed. To erase everything for a tenant, use
+    /// [`Self::delete_tenant`].
+    pub async fn delete_user(&self, tenant: &str, user_id: &str) -> Result<serde_json::Value> {
+        let mem_ids = self.memory_store.delete_by_user(tenant, user_id).await?;
+        for id in &mem_ids {
+            let _ = self.memory_index.delete(*id).await;
+        }
+        Ok(serde_json::json!({
+            "tenant": tenant,
+            "user_id": user_id,
+            "memories_deleted": mem_ids.len(),
+            "note": "episodic events and agent state are not user-scoped (no user_id column); \
+                     erase user data carried in event payloads at the source, or use tenant erasure",
+        }))
+    }
+
     /// Full temporal history for a `(scope, subject)` — every version, oldest first.
     pub async fn memory_history(&self, scope: &MemoryScope, subject: &str) -> Result<Vec<Memory>> {
         self.memory_store.history(scope, subject).await
@@ -2284,6 +2372,47 @@ impl StrataEngine {
     /// Get a memory by id, scoped to a tenant (None if owned by another tenant).
     pub async fn memory_get_scoped(&self, id: uuid::Uuid, tenant: &str) -> Result<Option<Memory>> {
         self.memory_store.get_scoped(id, tenant).await
+    }
+
+    /// Provenance for a memory — "why do you believe this?".
+    ///
+    /// Assembles the answer from data already on the memory: (1) the memory itself, (2) the
+    /// **source episodic events** it was distilled from (`source_event_ids`, resolved to real
+    /// events, tenant-scoped), and (3) its **supersession chain** — the full bi-temporal history
+    /// for a subject-keyed memory (every version, oldest first), or the single row otherwise. Lets a
+    /// deployment audit exactly what evidence backs an agent's answer. `None` if the id isn't the
+    /// tenant's.
+    pub async fn memory_provenance(
+        &self,
+        id: uuid::Uuid,
+        tenant: Option<&str>,
+    ) -> Result<Option<MemoryProvenance>> {
+        let memory = match tenant {
+            Some(t) => self.memory_store.get_scoped(id, t).await?,
+            None => self.memory_store.get(id).await?,
+        };
+        let Some(memory) = memory else {
+            return Ok(None);
+        };
+
+        // 1. Resolve source events (tenant-scoped so a forged id can't pull another tenant's event).
+        let source_events = self
+            .episodic
+            .events_by_ids(&memory.source_event_ids, tenant)
+            .await
+            .unwrap_or_default();
+
+        // 2. Supersession chain: the full subject history when keyed, else just this row.
+        let history = match &memory.subject {
+            Some(subject) => self.memory_store.history(&memory.scope, subject).await?,
+            None => vec![memory.clone()],
+        };
+
+        Ok(Some(MemoryProvenance {
+            memory,
+            source_events,
+            history,
+        }))
     }
 
     /// Delete a memory by id, scoped to a tenant. Returns true iff a row was deleted.
@@ -3008,6 +3137,48 @@ impl StrataEngine {
             .await
             .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))??;
 
+        // Write a manifest: per-artifact SHA-256 checksums + store counts + a capture timestamp, so
+        // a restore can detect a corrupted/truncated backup before trusting it.
+        //
+        // Consistency note: the four exports above are NOT wrapped in a single global write barrier,
+        // so a backup taken while writes are in flight can be *fuzzy* at the edges (an event landing
+        // between the episodic and memories export). For Raft-replicated restore this is harmless
+        // (the log replays to a consistent point); for standalone disaster recovery, quiesce writes
+        // (or snapshot the data volume) if you need a strict point-in-time image. The manifest
+        // records what was captured and lets integrity be verified.
+        let manifest = BackupManifest {
+            format_version: BACKUP_FORMAT_VERSION,
+            strata_version: env!("CARGO_PKG_VERSION").to_string(),
+            created_at: chrono::Utc::now(),
+            counts: BackupCounts {
+                episodic_events: self.event_count().await.unwrap_or(0),
+                memories: self.memory_count().await.unwrap_or(0),
+                semantic_vectors: self.semantic_count() as u64,
+            },
+            artifacts: {
+                let dir = dir.to_path_buf();
+                tokio::task::spawn_blocking(move || {
+                    let mut out = Vec::new();
+                    for name in ["episodic_export", "memories_export", "vectors", "state.db"] {
+                        let p = dir.join(name);
+                        if p.exists() {
+                            out.push(BackupArtifact {
+                                path: name.to_string(),
+                                sha256: sha256_path(&p)?,
+                            });
+                        }
+                    }
+                    Ok::<_, crate::Error>(out)
+                })
+                .await
+                .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))??
+            },
+        };
+        let manifest_json = serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| crate::Error::Storage(format!("manifest encode: {e}")))?;
+        std::fs::write(dir.join("manifest.json"), manifest_json)
+            .map_err(|e| crate::Error::Storage(format!("manifest write: {e}")))?;
+
         tracing::info!(path = %dir.display(), "backup complete");
         Ok(())
     }
@@ -3017,6 +3188,50 @@ impl StrataEngine {
     /// Used by the Raft snapshot-install path and for disaster recovery. Episodic and memories
     /// are restored atomically (stage-then-swap); the memory vector index is rebuilt afterward.
     pub async fn restore_from_backup(&self, dir: &std::path::Path) -> Result<()> {
+        // Verify the manifest checksums first (when present) so we never restore a corrupted or
+        // truncated backup. Backups without a manifest (produced before this format) are still
+        // accepted for backward compatibility, with a warning.
+        let manifest_path = dir.join("manifest.json");
+        if manifest_path.exists() {
+            let raw = std::fs::read(&manifest_path)
+                .map_err(|e| crate::Error::Storage(format!("manifest read: {e}")))?;
+            let manifest: BackupManifest = serde_json::from_slice(&raw)
+                .map_err(|e| crate::Error::Storage(format!("manifest parse: {e}")))?;
+            if manifest.format_version > BACKUP_FORMAT_VERSION {
+                return Err(crate::Error::Storage(format!(
+                    "backup manifest format v{} is newer than this build supports (v{}); upgrade Strata",
+                    manifest.format_version, BACKUP_FORMAT_VERSION
+                )));
+            }
+            let dir_owned = dir.to_path_buf();
+            let artifacts = manifest.artifacts.clone();
+            tokio::task::spawn_blocking(move || {
+                for a in &artifacts {
+                    let p = dir_owned.join(&a.path);
+                    let actual = sha256_path(&p)?;
+                    if actual != a.sha256 {
+                        return Err(crate::Error::Storage(format!(
+                            "backup integrity check failed for '{}': manifest {} != actual {}",
+                            a.path, a.sha256, actual
+                        )));
+                    }
+                }
+                Ok::<_, crate::Error>(())
+            })
+            .await
+            .map_err(|e| crate::Error::Internal(anyhow::anyhow!("join: {e}")))??;
+            tracing::info!(
+                artifacts = manifest.artifacts.len(),
+                captured_at = %manifest.created_at,
+                "backup manifest verified"
+            );
+        } else {
+            tracing::warn!(
+                path = %dir.display(),
+                "backup has no manifest.json — restoring without integrity verification"
+            );
+        }
+
         let ep_export = dir.join("episodic_export");
         if ep_export.exists() {
             let episodic = self.episodic.clone();
@@ -3193,6 +3408,85 @@ impl StrataEngine {
     }
 }
 
+/// Backup manifest format version — bumped when the on-disk backup layout changes.
+const BACKUP_FORMAT_VERSION: u32 = 1;
+
+/// Integrity + provenance manifest written alongside a backup (`manifest.json`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupManifest {
+    /// On-disk backup format version.
+    pub format_version: u32,
+    /// Strata version that produced the backup.
+    pub strata_version: String,
+    /// When the backup was captured (UTC).
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Row/entry counts at capture time (for a sanity check on restore).
+    pub counts: BackupCounts,
+    /// Per-artifact SHA-256 checksums.
+    pub artifacts: Vec<BackupArtifact>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupCounts {
+    pub episodic_events: u64,
+    pub memories: u64,
+    pub semantic_vectors: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupArtifact {
+    /// Path relative to the backup directory (a file or a directory).
+    pub path: String,
+    /// Lowercase hex SHA-256. For a directory, a hash over its files (sorted, path + bytes).
+    pub sha256: String,
+}
+
+/// SHA-256 of a file, or a deterministic digest over a directory tree (files sorted by relative
+/// path; each contributes its path and bytes) — hex-encoded. Used for backup integrity.
+fn sha256_path(path: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    if path.is_dir() {
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        collect_files(path, &mut files)?;
+        files.sort();
+        for f in files {
+            let rel = f.strip_prefix(path).unwrap_or(&f);
+            hasher.update(rel.to_string_lossy().as_bytes());
+            hasher.update([0u8]);
+            let bytes = std::fs::read(&f).map_err(|e| {
+                crate::Error::Storage(format!("checksum read {}: {e}", f.display()))
+            })?;
+            hasher.update(&bytes);
+        }
+    } else {
+        let bytes = std::fs::read(path)
+            .map_err(|e| crate::Error::Storage(format!("checksum read {}: {e}", path.display())))?;
+        hasher.update(&bytes);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Recursively collect regular files under `dir` into `out`.
+fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    for entry in
+        std::fs::read_dir(dir).map_err(|e| crate::Error::Storage(format!("readdir: {e}")))?
+    {
+        let entry = entry.map_err(|e| crate::Error::Storage(format!("direntry: {e}")))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Separator that namespaces an `agent_id` by tenant for state isolation. A control char
 /// (unit separator) that is extremely unlikely to occur in a real agent id.
 pub(crate) const TENANT_AGENT_SEP: char = '\u{1f}';
@@ -3350,6 +3644,28 @@ mod tests {
         assert_eq!(results[0].entry.content, "Rust programming language");
     }
 
+    /// Deterministic in-process embedding provider for cognition tests. Every text embeds to the
+    /// same unit vector, so any two memories in a scope are exact near-duplicates (cosine = 1.0) —
+    /// which deterministically drives the semantic dedup/merge path without a network backend.
+    struct ConstEmbedding {
+        dim: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for ConstEmbedding {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            let mut v = vec![0.0_f32; self.dim];
+            v[0] = 1.0;
+            Ok(texts.iter().map(|_| v.clone()).collect())
+        }
+        fn dimension(&self) -> usize {
+            self.dim
+        }
+        fn model_name(&self) -> &str {
+            "const-test"
+        }
+    }
+
     /// Fully in-memory config so cognition tests don't touch `./data`.
     fn inmem_config() -> CoreConfig {
         let mut c = CoreConfig::default();
@@ -3420,6 +3736,38 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn delete_user_erases_only_that_users_memories() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let alice = MemoryScope {
+            tenant_id: "acme".into(),
+            user_id: Some("alice".into()),
+            agent_id: None,
+            session_id: None,
+        };
+        let bob = MemoryScope {
+            tenant_id: "acme".into(),
+            user_id: Some("bob".into()),
+            agent_id: None,
+            session_id: None,
+        };
+        engine
+            .memory_add(MemoryInput::new(alice.clone(), "alice likes tea"))
+            .await
+            .unwrap();
+        engine
+            .memory_add(MemoryInput::new(bob.clone(), "bob likes coffee"))
+            .await
+            .unwrap();
+
+        let summary = engine.delete_user("acme", "alice").await.unwrap();
+        assert_eq!(summary["memories_deleted"], 1);
+
+        // Alice erased, Bob (same tenant) untouched.
+        assert_eq!(engine.memory_all(&alice, 100).await.unwrap().len(), 0);
+        assert_eq!(engine.memory_all(&bob, 100).await.unwrap().len(), 1);
     }
 
     #[test]
@@ -3845,6 +4193,111 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(before.content, "favorite color is blue");
+    }
+
+    #[tokio::test]
+    async fn semantic_merge_preserves_history_bitemporally() {
+        // Regression: the semantic-dedup (subjectless) path must NOT overwrite the old memory's
+        // content in place. It should close the old row as superseded and insert a new one, so the
+        // prior text stays answerable — the same "nothing is silently hard-deleted" guarantee the
+        // subject-contradiction path already upholds.
+        let mut cfg = inmem_config();
+        cfg.embedding.dimension = 8;
+        let mut engine = StrataEngine::new(cfg).await.unwrap();
+        engine.set_embedding_for_test(Arc::new(ConstEmbedding { dim: 8 }));
+        let scope = MemoryScope::user("alice");
+
+        // First subjectless fact → a fresh insert.
+        let first = engine
+            .memory_add(MemoryInput::new(
+                scope.clone(),
+                "the sky looked orange at dusk",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.outcome, MemoryOutcome::Inserted);
+
+        // A near-duplicate (const embedding ⇒ cosine 1.0 ≥ dedup_threshold) → merged.
+        let second = engine
+            .memory_add(MemoryInput::new(
+                scope.clone(),
+                "the sky was a deep orange at sunset",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.outcome, MemoryOutcome::Merged);
+        // The merge is modeled as a supersession: the new row points back at the old.
+        assert_eq!(second.memory.supersedes, Some(first.memory.id));
+        assert_ne!(second.memory.id, first.memory.id);
+
+        // Only the new memory is active, carrying the new content.
+        let active = engine.memory_all(&scope, 10).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, "the sky was a deep orange at sunset");
+
+        // The OLD row is preserved (not overwritten): still retrievable, now superseded, with its
+        // original content and a closed validity window.
+        let old = engine.memory_get(first.memory.id).await.unwrap().unwrap();
+        assert_eq!(old.content, "the sky looked orange at dusk");
+        assert_eq!(old.state, MemoryState::Superseded);
+        assert!(
+            old.valid_to.is_some(),
+            "superseded row must have valid_to set"
+        );
+
+        // Both rows persist (old superseded + new active) — history is intact.
+        assert_eq!(engine.memory_count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn memory_provenance_resolves_sources_and_history() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let scope = MemoryScope::user("alice");
+
+        // An ingested event that will back a memory.
+        let ev = Event::new(
+            "crm",
+            "note",
+            serde_json::json!({"text": "moved to Enterprise"}),
+        );
+        let ev_id = ev.id;
+        engine.ingest(vec![ev]).await.unwrap();
+
+        // A subject-keyed memory citing that event, then a contradiction (supersession).
+        let first = engine
+            .memory_add(
+                MemoryInput::new(scope.clone(), "On the Pro plan")
+                    .with_subject("plan")
+                    .with_source_event_ids(vec![ev_id]),
+            )
+            .await
+            .unwrap();
+        let second = engine
+            .memory_add(
+                MemoryInput::new(scope.clone(), "Upgraded to Enterprise").with_subject("plan"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.outcome, MemoryOutcome::Superseded);
+
+        // Provenance of the FIRST (now superseded) memory: its source event resolves, and the
+        // history chain shows both versions.
+        let prov = engine
+            .memory_provenance(first.memory.id, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prov.source_events.len(), 1);
+        assert_eq!(prov.source_events[0].id, ev_id);
+        assert_eq!(prov.history.len(), 2);
+        assert_eq!(prov.history[0].content, "On the Pro plan");
+
+        // A cross-tenant id reads as not found.
+        assert!(engine
+            .memory_provenance(first.memory.id, Some("other-tenant"))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -4912,6 +5365,37 @@ mod tests {
         assert_eq!(
             dst.state_get("bot", "mood").await.unwrap().unwrap().value,
             serde_json::json!("happy")
+        );
+
+        // The backup carries a manifest with matching counts.
+        let manifest: BackupManifest =
+            serde_json::from_slice(&std::fs::read(backup_dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest.format_version, BACKUP_FORMAT_VERSION);
+        assert_eq!(manifest.counts.episodic_events, 1);
+        assert_eq!(manifest.counts.memories, 1);
+        assert!(!manifest.artifacts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_corrupted_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = dir.path().join("backup");
+
+        let src = StrataEngine::new(inmem_config()).await.unwrap();
+        src.ingest(vec![Event::new("src", "e", serde_json::json!({"x": 1}))])
+            .await
+            .unwrap();
+        src.backup(&backup_dir).await.unwrap();
+
+        // Tamper with the state backup after the manifest was written.
+        std::fs::write(backup_dir.join("state.db"), b"corrupted").unwrap();
+
+        let dst = StrataEngine::new(inmem_config()).await.unwrap();
+        let err = dst.restore_from_backup(&backup_dir).await.unwrap_err();
+        assert!(
+            err.to_string().contains("integrity check failed"),
+            "corrupted backup must be rejected, got: {err}"
         );
     }
 

@@ -44,6 +44,8 @@ protobuf-src = { version = "2" }
 
 # PostgreSQL wire protocol
 pgwire = { version = "0.28" }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-pemfile = { version = "2" }
 
 # Database / Storage
 duckdb = { version = "1", features = ["bundled"] }
@@ -99,6 +101,10 @@ sqlparser = { version = "0.53", features = ["visitor"] }
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 rustyline = { version = "15" }
+
+# Global allocator — mimalloc avoids the multi-threaded slowdown of the musl allocator on
+# allocation-heavy workloads (DuckDB), measurable on ingest/query p95.
+mimalloc = { version = "0.1", default-features = false }
 
 # Testing
 tempfile = { version = "3" }

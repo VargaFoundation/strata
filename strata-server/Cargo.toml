@@ -28,3 +28,4 @@ metrics-exporter-prometheus.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
+mimalloc.workspace = true

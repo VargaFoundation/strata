@@ -41,7 +41,9 @@ docker-compose.override.yml
 # Misc
 *.log
 
-# Runtime data stores (DuckDB / SQLite / USearch / Raft logs) — never commit
+# Runtime data stores (DuckDB / SQLite / USearch / Raft logs) — never commit.
+# Ignore the whole runtime data tree so test runs (which write ./data) don't leak artifacts.
+**/data/
 **/data/*.duckdb
 **/data/*.duckdb.wal
 **/data/*.db

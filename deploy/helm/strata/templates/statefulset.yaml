@@ -82,6 +82,16 @@ spec:
               value: {{ .Values.config.gateway.mcpEnabled | quote }}
             - name: STRATA_GATEWAY__AUTH_ENABLED
               value: {{ .Values.config.gateway.authEnabled | quote }}
+            {{- if .Values.config.gateway.apiKeys }}
+            # Prefer sha256:<hex>@tenant:role entries so no plaintext secret sits in values/env.
+            - name: STRATA_GATEWAY__API_KEYS
+              value: {{ join "," .Values.config.gateway.apiKeys | quote }}
+            {{- end }}
+            {{- if .Values.config.gateway.allowInsecure }}
+            # Explicit opt-out of the secure-by-default guard (trusted/isolated networks only).
+            - name: STRATA_GATEWAY__ALLOW_INSECURE
+              value: "true"
+            {{- end }}
             # Cluster — auto-assign node_id from StatefulSet ordinal
             - name: POD_NAME
               valueFrom:

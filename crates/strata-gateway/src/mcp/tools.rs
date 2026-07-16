@@ -250,6 +250,33 @@ pub fn list_tools() -> Vec<McpTool> {
                 "required": ["text"]
             }),
         },
+        McpTool {
+            name: "link_memory".into(),
+            description: "Add a knowledge-graph edge (subject → relation → object) to the bi-temporal memory graph, e.g. ('Alice','works_at','Acme'). With supersede=true it closes the prior active edge for the same (subject, relation) — the functional-relation update that keeps 'Alice lives in <one city>' single-valued while preserving history.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string", "description": "Subject entity"},
+                    "relation": {"type": "string", "description": "Relation/predicate (e.g. 'works_at')"},
+                    "dst": {"type": "string", "description": "Object entity"},
+                    "supersede": {"type": "boolean", "description": "Close the prior active (src, relation) edge first (functional relation). Default false."}
+                },
+                "required": ["src", "relation", "dst"]
+            }),
+        },
+        McpTool {
+            name: "graph_neighbors".into(),
+            description: "Query the memory knowledge graph: return the edges around an entity. depth=1 (default) is the 1-hop neighborhood; depth>1 expands the subgraph.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string", "description": "The entity to explore"},
+                    "depth": {"type": "integer", "description": "Hops to expand (default 1)"},
+                    "limit": {"type": "integer", "description": "Max edges to return (default 50)"}
+                },
+                "required": ["entity"]
+            }),
+        },
     ]
 }
 
@@ -269,7 +296,7 @@ mod tests {
     #[test]
     fn list_tools_returns_expected_count() {
         let tools = list_tools();
-        assert_eq!(tools.len(), 15); // 6 core + 3 session + 6 memory tools
+        assert_eq!(tools.len(), 17); // 6 core + 3 session + 6 memory + 2 graph tools
     }
 
     #[test]
@@ -281,6 +308,14 @@ mod tests {
         assert!(names.contains(&"get_memories"));
         assert!(names.contains(&"memory_history"));
         assert!(names.contains(&"delete_memory"));
+    }
+
+    #[test]
+    fn list_tools_contains_graph_operations() {
+        let tools = list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"link_memory"));
+        assert!(names.contains(&"graph_neighbors"));
     }
 
     #[test]
