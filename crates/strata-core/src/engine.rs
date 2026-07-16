@@ -1739,6 +1739,77 @@ impl StrataEngine {
             .await
     }
 
+    /// Distill a closed session's events into memory — the consolidation half of the cycle: a
+    /// session's episodic trace becomes durable semantic memory. Recalls the session's events,
+    /// builds a digest, and (with LLM extraction on) distills atomic facts / (off) stores one
+    /// memory, scoped to the session. Returns the created memories. Local write; the plan variant
+    /// [`Self::session_distill_plan`] is for cluster replication.
+    pub async fn session_distill(
+        &self,
+        session_id: &str,
+        scope: &MemoryScope,
+    ) -> Result<Vec<MemoryAdd>> {
+        let plans = self.session_distill_plan(session_id, scope).await?;
+        let mut out = Vec::with_capacity(plans.len());
+        for (result, rows) in plans {
+            self.memory_apply_rows(rows).await?;
+            out.push(result);
+        }
+        Ok(out)
+    }
+
+    /// Plan session distillation without writing: one `(MemoryAdd, rows)` per distilled fact, so the
+    /// cluster leader can replicate each through the Raft log (`MemoryUpsert`). Empty if the session
+    /// has no events.
+    pub async fn session_distill_plan(
+        &self,
+        session_id: &str,
+        scope: &MemoryScope,
+    ) -> Result<Vec<(MemoryAdd, Vec<MemoryRow>)>> {
+        let tenant = if scope.tenant_id.is_empty() {
+            "default"
+        } else {
+            scope.tenant_id.as_str()
+        };
+        let events = self
+            .episodic
+            .recall_session_for_tenant(session_id, tenant)
+            .await?;
+        if events.is_empty() {
+            return Ok(vec![]);
+        }
+        let digest = Self::session_digest(session_id, &events);
+        let facts = self.extract_facts(&digest).await;
+        // Scope the distilled memories to this session.
+        let mut session_scope = scope.clone();
+        session_scope.session_id = Some(session_id.to_string());
+
+        let mut out = Vec::with_capacity(facts.len());
+        for (subject, content) in facts {
+            let mut input = MemoryInput::new(session_scope.clone(), content);
+            input.subject = subject;
+            input.mem_type = Some("episodic".into());
+            out.push(self.memory_plan(input).await?);
+        }
+        Ok(out)
+    }
+
+    /// Build a compact, human-readable digest of a session's events for distillation.
+    fn session_digest(session_id: &str, events: &[serde_json::Value]) -> String {
+        let mut s = format!("Session {session_id} summary. Events:\n");
+        for ev in events.iter().take(200) {
+            let etype = ev
+                .get("event_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("event");
+            let source = ev.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let payload = ev.get("payload").map(|p| p.to_string()).unwrap_or_default();
+            let payload: String = payload.chars().take(300).collect();
+            s.push_str(&format!("- [{source}] {etype}: {payload}\n"));
+        }
+        s
+    }
+
     // ── Embed & Search ────────────────────────────────────────────────
 
     /// Test-only: inject an embedding provider after construction so cognition paths that require
@@ -2804,6 +2875,16 @@ impl StrataEngine {
             );
         }
         Ok(forgotten.len() as u64)
+    }
+
+    /// Read-only: the memory ids that decay would forget right now (no write). The cluster leader
+    /// replicates this set via `MemoryExpire` so every node forgets the same rows; single-node just
+    /// applies it with [`Self::memory_expire`].
+    pub async fn memory_decay_plan(&self) -> Result<Vec<uuid::Uuid>> {
+        let cog = &self.config.memory.cognition;
+        self.memory_store
+            .decay_candidates(cog.decay_half_life_days, cog.forget_threshold)
+            .await
     }
 
     /// System prompt for opt-in LLM fact extraction.
@@ -3980,6 +4061,55 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn session_distill_turns_events_into_memory() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        // Two session events (linked via the `_session_id` payload tag).
+        engine
+            .ingest(vec![
+                Event::new(
+                    "chat",
+                    "user.msg",
+                    serde_json::json!({"_session_id": "sess-1", "text": "I moved to Berlin"}),
+                ),
+                Event::new(
+                    "chat",
+                    "assistant.msg",
+                    serde_json::json!({"_session_id": "sess-1", "text": "Noted your move."}),
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let scope = MemoryScope::tenant("default");
+        let distilled = engine.session_distill("sess-1", &scope).await.unwrap();
+        // No LLM extraction configured → one distilled memory holding the digest.
+        assert_eq!(distilled.len(), 1);
+        let mem = &distilled[0].memory;
+        assert_eq!(mem.scope.session_id.as_deref(), Some("sess-1"));
+        assert!(mem.content.contains("user.msg"));
+        assert_eq!(mem.mem_type, "episodic");
+
+        // It is persisted and retrievable in the session scope.
+        let session_scope = MemoryScope {
+            tenant_id: "default".into(),
+            user_id: None,
+            agent_id: None,
+            session_id: Some("sess-1".into()),
+        };
+        assert_eq!(
+            engine.memory_all(&session_scope, 10).await.unwrap().len(),
+            1
+        );
+
+        // Distilling an empty session is a no-op.
+        assert!(engine
+            .session_distill("no-such-session", &scope)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -5682,6 +5812,20 @@ mod tests {
             .unwrap();
         // Nothing is old enough to forget yet.
         assert_eq!(engine.memory_enforce_decay().await.unwrap(), 0);
+        assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_decay_plan_is_read_only() {
+        let engine = StrataEngine::new(inmem_config()).await.unwrap();
+        let scope = MemoryScope::user("alice");
+        engine
+            .memory_add(MemoryInput::new(scope.clone(), "fresh fact"))
+            .await
+            .unwrap();
+        // Fresh memory → nothing to forget; and the plan must NOT mutate anything.
+        let plan = engine.memory_decay_plan().await.unwrap();
+        assert!(plan.is_empty());
         assert_eq!(engine.memory_all(&scope, 10).await.unwrap().len(), 1);
     }
 

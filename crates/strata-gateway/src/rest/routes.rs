@@ -208,6 +208,10 @@ pub fn router_with_engine_and_auth(
             axum::routing::get(handlers::session_recall),
         )
         .route(
+            "/sessions/{session_id}/distill",
+            axum::routing::post(handlers::session_distill),
+        )
+        .route(
             "/runs",
             axum::routing::post(handlers::run_create).get(handlers::run_list),
         )

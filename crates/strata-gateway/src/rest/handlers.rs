@@ -1294,6 +1294,80 @@ pub async fn session_recall(
     }
 }
 
+/// POST /api/v1/sessions/{id}/distill — consolidate a closed session's events into memory.
+///
+/// Recalls the session's episodic events and distills them into memory (LLM-extracted atomic facts
+/// when `extraction=llm`, else a single memory), scoped to the session. Cluster-replicated.
+pub async fn session_distill(
+    State(engine): State<Arc<StrataEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    cluster: Option<
+        Extension<std::sync::Arc<tokio::sync::RwLock<strata_cluster::ClusterCoordinator>>>,
+    >,
+    Path(session_id): Path<String>,
+) -> Response {
+    metrics::counter!("strata_rest_requests_total", "endpoint" => "session_distill").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    let scope = strata_core::memory::cognition::MemoryScope {
+        tenant_id: tenant,
+        user_id: None,
+        agent_id: None,
+        session_id: None,
+    };
+
+    let plans = match engine.session_distill_plan(&session_id, &scope).await {
+        Ok(p) => p,
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SESSION_ERROR",
+                e.to_string(),
+            )
+        }
+    };
+
+    // Cluster mode: replicate each distilled memory's rows through the Raft log.
+    if let Some(Extension(coord)) = cluster {
+        let coord = coord.read().await;
+        for (_result, rows) in &plans {
+            if let Err(e) = coord
+                .client_write(strata_cluster::raft::types::AppRequest::MemoryUpsert {
+                    rows: rows.clone(),
+                })
+                .await
+            {
+                return cluster_write_error(e);
+            }
+        }
+        let memories: Vec<_> = plans.into_iter().map(|(r, _)| r).collect();
+        return api_ok(serde_json::json!({
+            "session_id": session_id,
+            "distilled": memories.len(),
+            "memories": memories,
+        }));
+    }
+
+    let mut memories = Vec::with_capacity(plans.len());
+    for (result, rows) in plans {
+        if let Err(e) = engine.memory_apply_rows(rows).await {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MEMORY_ERROR",
+                e.to_string(),
+            );
+        }
+        memories.push(result);
+    }
+    api_ok(serde_json::json!({
+        "session_id": session_id,
+        "distilled": memories.len(),
+        "memories": memories,
+    }))
+}
+
 // ── Memory Cognition ────────────────────────────────────────────────
 
 /// Resolve a memory scope, preferring the authenticated tenant for isolation.

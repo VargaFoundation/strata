@@ -111,6 +111,53 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Background consolidation: on the leader, periodically forget decayed memories (the
+    // "sleep-time" forgetting job). Off unless `memory.cognition.decay_interval_secs > 0`. In
+    // cluster mode the forget-set is computed on the leader and replicated via `MemoryExpire`, so
+    // every node forgets the identical rows (no failover divergence); single-node applies locally.
+    {
+        let decay_interval = engine.config().memory.cognition.decay_interval_secs;
+        if decay_interval > 0 {
+            let engine = engine.clone();
+            let coord = cluster_handle.clone();
+            tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(decay_interval));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    let is_leader = match &coord {
+                        Some(c) => c.read().await.is_leader(),
+                        None => true,
+                    };
+                    if !is_leader {
+                        continue;
+                    }
+                    match &coord {
+                        // Cluster: compute the forget-set on the leader, replicate via Raft.
+                        Some(c) => match engine.memory_decay_plan().await {
+                            Ok(ids) if !ids.is_empty() => {
+                                let req =
+                                    strata_cluster::raft::types::AppRequest::MemoryExpire { ids };
+                                if let Err(e) = c.read().await.client_write(req).await {
+                                    tracing::warn!(error = %e, "decay replication failed");
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(error = %e, "decay plan failed"),
+                        },
+                        // Single node: apply locally.
+                        None => {
+                            if let Err(e) = engine.memory_enforce_decay().await {
+                                tracing::warn!(error = %e, "memory decay tick failed");
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     let gateway = strata_gateway::GatewayServer::start(
         engine.clone(),
         server_config.gateway.clone(),

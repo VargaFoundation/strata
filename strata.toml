@@ -24,6 +24,13 @@ metric = "cosine"              # "cosine" | "l2" | "ip"
 [memory.state]
 db_path = "./data/state.db"
 
+[memory.cognition]
+# db_path = "./data/memories.duckdb"
+# contradiction_review = false   # true → contradictions queue for human review instead of auto-superseding
+# decay_interval_secs = 0        # >0 → leader forgets decayed memories on this interval (0 = off)
+# NOTE: numeric knobs under [memory.*]/[embedding]/[query]/[storage] are best set here in TOML;
+# the STRATA_* env override for these specific (flattened) sections does not coerce numeric strings.
+
 [embedding]
 provider = "ollama"            # "ollama" | "openai"
 model = "nomic-embed-text"

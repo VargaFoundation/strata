@@ -173,6 +173,11 @@ pub struct CognitionConfig {
     /// auto-supersession, today's behavior).
     #[serde(default)]
     pub contradiction_review: bool,
+    /// Background consolidation: interval (seconds) at which the leader forgets decayed memories
+    /// (the "sleep-time" forgetting job). 0 = disabled (default). Replicated through Raft in
+    /// cluster mode so every node forgets the same rows.
+    #[serde(default)]
+    pub decay_interval_secs: u64,
 }
 
 impl Default for CognitionConfig {
@@ -197,6 +202,7 @@ impl Default for CognitionConfig {
             retrieval_vector_weight: default_arm_weight(),
             retrieval_lexical_weight: default_arm_weight(),
             contradiction_review: false,
+            decay_interval_secs: 0,
         }
     }
 }

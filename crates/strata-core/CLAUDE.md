@@ -83,7 +83,7 @@ isolation; `query_sql_for_tenant` rewrites `episodic` references to a per-tenant
 
 ## Testing
 
-- Unit tests: `cargo test -p strata-core` (138 tests, incl. cognition, hybrid search, tenant isolation, backup/restore)
+- Unit tests: `cargo test -p strata-core` (~211 tests, incl. cognition, hybrid search, tenant isolation, backup/restore, property/fuzz tests for the tenant SQL rewriter + webhook normalizers)
 - LocalStorage tests use `tempfile::TempDir` for isolation
 - EpisodicStore tests use both in-memory and file-backed DuckDB
 - SemanticStore tests use in-memory USearch with dimension=4 for speed, plus save/load persistence test

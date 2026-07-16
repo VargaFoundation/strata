@@ -259,15 +259,22 @@ Strata automatically:
   approvals, event triggers, and a governed MCP tool-gateway ([docs](docs/agentic-platform.md))
 - **PostgreSQL wire protocol** — psql, DBeaver, Metabase, Grafana
 - **Three unified memories** — episodic + semantic + state in one binary
-- **MCP server** — native Claude, Cursor, VS Code integration
-- **LLM proxy** — OpenAI-compatible `/v1/chat/completions` with auto-RAG
+- **MCP server** — native Claude, Cursor, VS Code integration (incl. knowledge-graph tools)
+- **Drop-in LLM proxy** — OpenAI `/v1/chat/completions` + `/v1/embeddings` and native Anthropic
+  `/v1/messages`, all with auto-RAG
 - **Auto-embedding** — Ollama or OpenAI, events embedded on ingest
 - **Text search** — `embed-and-search`: text in, results out, one call
-- **State watchers** — WebSocket real-time notifications
+- **Knowledge graph** — bi-temporal entity/relation edges with functional-relation supersession
+- **Provenance** — `memories/{id}/provenance`: source events + supersession chain behind any fact
+- **Feedback loop** — `helpful`/`wrong`/`obsolete` reinforces or retires memories (no LLM needed)
+- **Memory CDC** — WebSocket stream of memory lifecycle changes; plus state watchers
+- **HITL contradiction review** — opt-in queue for a human to resolve conflicting facts
+- **Session distillation** — consolidate a closed session's events into durable memory
 - **Event tracing** — parent_id, trace_id, tags for causal chains
-- **Auth & RBAC** — API keys, JWT, role-based access (admin/writer/reader/agent)
+- **Auth & RBAC** — API keys (hashed at rest), JWT, OIDC, role-based access
+- **Secure by default** — refuses to start unauthenticated on a public bind; `strata doctor` config lint
 - **Self-hosted** — data never leaves your servers
-- **GDPR-ready** — retention policies, backup/restore, data locality
+- **GDPR-ready** — retention, per-tenant + per-user erasure, backup/restore with integrity manifest
 - **Single binary** — Docker, Compose, Kubernetes
 - **Raft clustering** — 3-node HA, leader forwarding, follower reads
 - **Prometheus metrics** — `/metrics` for observability

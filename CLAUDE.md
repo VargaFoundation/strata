@@ -55,7 +55,7 @@ Gateway may depend on cluster for Raft RPC routing and leader forwarding.
 cargo fmt --all                                         # Format
 cargo fmt --all -- --check                              # Check format (CI)
 cargo clippy --workspace --all-targets -- -D warnings   # Lint
-cargo test --workspace                                  # All tests (~197 tests)
+cargo test --workspace                                  # All tests (~474 tests)
 cargo test -p strata-core                               # Single crate tests
 cargo build --release                                   # Release build
 cargo run --bin strata-server                           # Run server

@@ -187,6 +187,40 @@ paths:
       summary: Bi-temporal history for a memory's subject
       parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
       responses: { '200': { description: '{ history: [...], count: N }' } }
+  /api/v1/memories/{id}/provenance:
+    get:
+      summary: "Why do you believe this? — memory + source events + supersession chain"
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: '{ memory, source_events: [...], history: [...] }' } }
+  /api/v1/memories/{id}/feedback:
+    post:
+      summary: Feedback loop — reinforce (helpful) or retire (wrong/obsolete) a memory
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [verdict], properties: { verdict: { type: string, enum: [helpful, wrong, obsolete] } } } } } }
+      responses: { '200': { description: '{ verdict, memory }' } }
+  /api/v1/memories/watch:
+    get:
+      summary: WebSocket memory CDC stream (upserted/superseded/expired), tenant-scoped
+      responses: { '101': { description: WebSocket upgrade } }
+  /api/v1/memories/contradictions:
+    get:
+      summary: HITL review queue — subjects with more than one active memory
+      responses: { '200': { description: '{ contradictions: [{subject, memories}], count }' } }
+  /api/v1/memories/contradictions/resolve:
+    post:
+      summary: Resolve a contradiction — keep one memory, supersede the rest for its subject
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [subject, keep_id], properties: { subject: { type: string }, keep_id: { type: string }, user_id: { type: string }, agent_id: { type: string }, session_id: { type: string } } } } } }
+      responses: { '200': { description: '{ kept, superseded }' } }
+  /api/v1/memories/link:
+    post:
+      summary: Add a knowledge-graph edge (src → relation → dst); supersede=true for functional relations
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [src, relation, dst], properties: { src: { type: string }, relation: { type: string }, dst: { type: string }, supersede: { type: boolean } } } } } }
+      responses: { '200': { description: ok } }
+  /api/v1/memories/graph:
+    get:
+      summary: Query the memory knowledge graph around an entity (1-hop, or depth>1 subgraph)
+      parameters: [ { name: entity, in: query, required: true, schema: { type: string } }, { name: depth, in: query, schema: { type: integer } }, { name: limit, in: query, schema: { type: integer } } ]
+      responses: { '200': { description: '{ entity, edges: [...] }' } }
   /api/v1/sessions:
     post:
       summary: Start a conversation session
@@ -207,6 +241,11 @@ paths:
       summary: Recall a session's events
       parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
       responses: { '200': { description: '{ events: [...], count: N }' } }
+  /api/v1/sessions/{id}/distill:
+    post:
+      summary: Consolidate a closed session's events into memory (LLM-distilled or one memory)
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: '{ session_id, distilled: N, memories: [...] }' } }
   /api/v1/admin/backup:
     post:
       summary: Trigger a full backup (admin)
@@ -216,6 +255,11 @@ paths:
       summary: GDPR erasure — delete all data for a tenant across every store (admin)
       parameters: [ { name: tenant_id, in: path, required: true, schema: { type: string } } ]
       responses: { '200': { description: Per-store deletion summary } }
+  /api/v1/admin/users/{user_id}:
+    delete:
+      summary: GDPR erasure by user — delete a user's memories + vectors within the token's tenant (admin)
+      parameters: [ { name: user_id, in: path, required: true, schema: { type: string } } ]
+      responses: { '200': { description: '{ tenant, user_id, memories_deleted }' } }
   /mcp:
     post:
       summary: MCP JSON-RPC (Streamable HTTP); initialize returns Mcp-Session-Id
@@ -224,3 +268,12 @@ paths:
     post:
       summary: OpenAI-compatible chat completions with auto-RAG, streaming, tool-use
       responses: { '200': { description: Completion (or text/event-stream if stream=true) } }
+  /v1/embeddings:
+    post:
+      summary: OpenAI-compatible embeddings (drop-in), backed by the configured provider
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [input], properties: { input: { oneOf: [ { type: string }, { type: array, items: { type: string } } ] }, model: { type: string } } } } } }
+      responses: { '200': { description: '{ object: list, data: [{embedding: [...]}], model, usage }' } }
+  /v1/messages:
+    post:
+      summary: Native Anthropic Messages API with auto-RAG (passthrough); streaming supported
+      responses: { '200': { description: Anthropic message (or text/event-stream if stream=true) } }

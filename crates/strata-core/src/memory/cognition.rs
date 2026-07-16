@@ -1213,6 +1213,34 @@ impl MemoryStore {
     /// `forget_threshold`. Decay is `importance * 0.5^(age_days / half_life_days)`.
     /// Expired memories are retained (state='expired') for history/audit, not hard-deleted.
     /// Returns the ids that were forgotten (so the caller can drop their vectors).
+    /// Read-only: the ids that `decay` *would* expire, without writing. Lets the cluster leader
+    /// compute the forget-set and replicate it via `MemoryExpire` (so every node expires the same
+    /// rows) instead of applying decay only locally.
+    pub async fn decay_candidates(
+        &self,
+        half_life_days: f32,
+        forget_threshold: f32,
+    ) -> crate::Result<Vec<Uuid>> {
+        let half_life = (half_life_days as f64).max(0.001);
+        let threshold = forget_threshold as f64;
+        let now = Utc::now().to_rfc3339();
+        let db = self.write_db.lock();
+        let sql = "SELECT id FROM memories WHERE state = 'active' AND importance * \
+             power(0.5, date_diff('day', valid_from, ?::TIMESTAMPTZ)::DOUBLE / ?) < ?";
+        let mut stmt = db
+            .prepare(sql)
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map(duckdb::params![now, half_life, threshold], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .filter_map(|s| Uuid::parse_str(&s).ok())
+            .collect())
+    }
+
     pub async fn decay(
         &self,
         half_life_days: f32,
