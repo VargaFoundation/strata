@@ -73,6 +73,11 @@
     </div>
     <div id="mem-out"></div>
     <div class="card">
+      <h3>Detail — provenance &amp; bi-temporal history</h3>
+      <div class="desc">Click <b>why?</b> or <b>history</b> on a result, or 👍/👎 to give feedback.</div>
+      <pre id="mem-detail" class="muted">select a memory</pre>
+    </div>
+    <div class="card">
       <h3>Add memory</h3>
       <div class="row">
         <input id="ma-content" class="grow" placeholder="content (fact)" />
@@ -82,6 +87,37 @@
       </div>
       <pre id="ma-out" class="muted">—</pre>
     </div>
+  </section>
+
+  <section id="graph" class="panel">
+    <p class="muted">Explore the bi-temporal knowledge graph around an entity.</p>
+    <div class="row">
+      <input id="g-entity" class="grow" placeholder="entity (e.g. Alice)" />
+      <input id="g-depth" type="number" value="1" style="min-width:70px" title="hops" />
+      <button onclick="graphExplore()">Explore</button>
+    </div>
+    <div id="g-out"></div>
+    <div class="card">
+      <h3>Add edge</h3>
+      <div class="row">
+        <input id="ge-src" placeholder="src" />
+        <input id="ge-rel" placeholder="relation" />
+        <input id="ge-dst" placeholder="dst" />
+        <label class="muted"><input id="ge-sup" type="checkbox" style="min-width:auto" /> supersede</label>
+        <button onclick="graphLink()">Link</button>
+      </div>
+      <pre id="ge-out" class="muted">—</pre>
+    </div>
+  </section>
+
+  <section id="contradictions" class="panel">
+    <p class="muted">Human-in-the-loop review queue — subjects with more than one active memory
+      (requires <code>cognition.contradiction_review</code>). Keep one; the rest are superseded.</p>
+    <div class="row">
+      <input id="c-user" placeholder="user_id (optional)" />
+      <button onclick="loadContradictions()">Refresh queue</button>
+    </div>
+    <div id="c-out"></div>
   </section>
 
   <section id="runs" class="panel">
@@ -145,7 +181,7 @@ const pill = (s) => `<span class="pill ${esc(String(s || "").toLowerCase())}">${
 const errBox = (el, e) => (el.innerHTML = `<pre class="err">${esc(e.message || e)}</pre>`);
 
 // ---- tabs ----
-const TABS = [["overview","Overview"],["memory","Memory"],["runs","Agent runs"],["sql","SQL"],["sessions","Sessions"],["registry","Triggers/Tools"],["ops","Admin ops"]];
+const TABS = [["overview","Overview"],["memory","Memory"],["graph","Graph"],["contradictions","Contradictions"],["runs","Agent runs"],["sql","SQL"],["sessions","Sessions"],["registry","Triggers/Tools"],["ops","Admin ops"]];
 $("nav").innerHTML = TABS.map(([id,label],i)=>`<button data-tab="${id}" class="${i===0?"active":""}">${label}</button>`).join("");
 document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
   document.querySelectorAll("nav button").forEach((x) => x.classList.remove("active"));
@@ -195,9 +231,27 @@ async function memSearch() {
   const t = $("mem-tenant").value.trim(); if (t) body.tenant_id = t;
   const u = $("mem-user").value.trim(); if (u) body.user_id = u;
   try { const j = await api("POST", "/api/v1/memories/search", body);
-    $("mem-out").innerHTML = table((j.results || []).map((h) => ({ content: h.memory ? h.memory.content : h.content, subject: h.memory?.subject, score: (h.score||0).toFixed(3), id: h.memory?.id })));
+    const rows = (j.results || []);
+    if (!rows.length) { $("mem-out").innerHTML = '<p class="muted">no results</p>'; return; }
+    $("mem-out").innerHTML = "<table><thead><tr><th>content</th><th>subject</th><th>score</th><th>actions</th></tr></thead><tbody>" +
+      rows.map((h) => { const m = h.memory || h; const id = esc(m.id);
+        return `<tr><td>${esc(m.content)}</td><td>${esc(m.subject)}</td><td>${(h.score||0).toFixed(3)}</td>` +
+          `<td><a data-mem-why="${id}">why?</a> · <a data-mem-hist="${id}">history</a> · ` +
+          `<a data-mem-fb="${id}" data-verdict="helpful">👍</a> <a data-mem-fb="${id}" data-verdict="wrong">👎</a></td></tr>`;
+      }).join("") + "</tbody></table>";
   } catch (e) { errBox($("mem-out"), e); }
 }
+// Delegated memory actions (ids in data-* attrs, never interpolated into executable JS).
+$("mem-out").addEventListener("click", async (e) => {
+  const el = e.target.closest("a[data-mem-why],a[data-mem-hist],a[data-mem-fb]");
+  if (!el) return;
+  const d = $("mem-detail");
+  try {
+    if (el.dataset.memWhy) { d.textContent = "loading provenance…"; d.textContent = JSON.stringify(await api("GET", "/api/v1/memories/" + el.dataset.memWhy + "/provenance"), null, 2); }
+    else if (el.dataset.memHist) { d.textContent = "loading history…"; d.textContent = JSON.stringify(await api("GET", "/api/v1/memories/" + el.dataset.memHist + "/history"), null, 2); }
+    else if (el.dataset.memFb) { d.textContent = JSON.stringify(await api("POST", "/api/v1/memories/" + el.dataset.memFb + "/feedback", { verdict: el.dataset.verdict }), null, 2); memSearch(); }
+  } catch (err) { d.innerHTML = `<span class="err">${esc(err.message)}</span>`; }
+});
 async function memAdd() {
   const body = { content: $("ma-content").value };
   const u = $("ma-user").value.trim(); if (u) body.user_id = u;
@@ -205,6 +259,41 @@ async function memAdd() {
   try { $("ma-out").textContent = JSON.stringify(await api("POST", "/api/v1/memories", body), null, 2); }
   catch (e) { $("ma-out").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
+
+// ---- graph ----
+async function graphExplore() {
+  const entity = $("g-entity").value.trim(); if (!entity) return;
+  const depth = Number($("g-depth").value) || 1;
+  try { const j = await api("GET", `/api/v1/memories/graph?entity=${encodeURIComponent(entity)}&depth=${depth}&limit=200`);
+    $("g-out").innerHTML = table((j.edges || []).map((e) => ({ src: e.src, relation: e.relation, dst: e.dst, valid_from: e.valid_from, valid_to: e.valid_to || "" })));
+  } catch (e) { errBox($("g-out"), e); }
+}
+async function graphLink() {
+  const body = { src: $("ge-src").value, relation: $("ge-rel").value, dst: $("ge-dst").value, supersede: $("ge-sup").checked };
+  try { $("ge-out").textContent = JSON.stringify(await api("POST", "/api/v1/memories/link", body), null, 2); graphExplore(); }
+  catch (e) { $("ge-out").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+// ---- contradictions (HITL) ----
+async function loadContradictions() {
+  const u = $("c-user").value.trim();
+  try { const j = await api("GET", "/api/v1/memories/contradictions" + (u ? "?user_id=" + encodeURIComponent(u) : ""));
+    const groups = (j.contradictions || []);
+    if (!groups.length) { $("c-out").innerHTML = '<p class="muted">no contradictions — the queue is empty.</p>'; return; }
+    $("c-out").innerHTML = groups.map((g) => `<div class="card"><h3>subject: ${esc(g.subject)} <span class="muted">(${g.memories.length} active)</span></h3>` +
+      "<table><thead><tr><th>content</th><th>importance</th><th>keep this</th></tr></thead><tbody>" +
+      g.memories.map((m) => `<tr><td>${esc(m.content)}</td><td>${esc(m.importance)}</td>` +
+        `<td><button data-c-keep="${esc(m.id)}" data-c-subject="${esc(g.subject)}" data-c-user="${esc(u)}">keep</button></td></tr>`).join("") +
+      "</tbody></table></div>").join("");
+  } catch (e) { errBox($("c-out"), e); }
+}
+$("c-out").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-c-keep]"); if (!b) return;
+  const body = { subject: b.dataset.cSubject, keep_id: b.dataset.cKeep };
+  if (b.dataset.cUser) body.user_id = b.dataset.cUser;
+  try { await api("POST", "/api/v1/memories/contradictions/resolve", body); loadContradictions(); }
+  catch (err) { errBox($("c-out"), err); }
+});
 
 // ---- runs + HITL ----
 async function listRuns() {
@@ -269,9 +358,12 @@ const OPS = [
   { name: "Reindex vectors", method: "POST", path: "/api/v1/admin/reindex", desc: "Rebuild the vector index from persisted embeddings." },
   { name: "Memory decay", method: "POST", path: "/api/v1/admin/memory/decay", desc: "Forget low-value memories by time-decayed importance." },
   { name: "Memory consolidate", method: "POST", path: "/api/v1/admin/memory/consolidate", desc: "Fold a scope's low-importance tail into one summary memory.", body: { user_id: "alice", keep: 50 } },
+  { name: "Consolidate similar", method: "POST", path: "/api/v1/admin/memory/consolidate-similar", desc: "Fold semantically-similar memory clusters into abstractions.", body: { user_id: "alice", threshold: 0.92 } },
+  { name: "Distill session", method: "POST", path: "/api/v1/sessions/SESSION_ID/distill", desc: "Consolidate a closed session's events into memory (edit the id in the path)." },
   { name: "Rebalance shards", method: "POST", path: "/api/v1/admin/rebalance", desc: "Recompute shard placement (cluster/sharded only).", body: {} },
   { name: "Export tenant", method: "GET", path: "/api/v1/admin/tenants/default/export", desc: "Export a tenant's data (edit the tenant in the path)." },
   { name: "Delete tenant (GDPR)", method: "DELETE", path: "/api/v1/admin/tenants/default", desc: "Erase ALL data for a tenant across every store.", danger: true },
+  { name: "Delete user (GDPR)", method: "DELETE", path: "/api/v1/admin/users/alice", desc: "Erase a user's memories + vectors within the token's tenant (edit the user id).", danger: true },
   { name: "Audit log", method: "GET", path: "/api/v1/admin/audit?limit=50", desc: "Query the durable auth/audit log (requires auth enabled)." },
 ];
 $("ops-cards").innerHTML = OPS.map((op, i) => `
