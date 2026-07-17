@@ -53,6 +53,12 @@ jobs:
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
+      # Guard the optional feature-gated backends so they don't rot (they're not in the default
+      # build). Compile-check embeddings/rerank/OTLP; run the OTLP export test (mock collector).
+      - run: cargo test -p strata-server --features otlp telemetry
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
 
   audit:
     name: Security audit (RUSTSEC advisories)
