@@ -10,15 +10,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod banner;
 mod config;
 mod signals;
+mod telemetry;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,strata=debug".parse().unwrap()),
-        )
-        .init();
+    let telemetry = telemetry::init();
 
     // Install Prometheus metrics recorder
     let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
@@ -179,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     tracing::info!("Strata shutdown complete");
+    telemetry.shutdown();
     Ok(())
 }
 

@@ -315,3 +315,18 @@ curl http://localhost:8432/metrics
 
 For Docker, the built-in HEALTHCHECK uses `curl http://localhost:8432/health`.
 For Kubernetes, liveness and readiness probes are configured in the Helm chart.
+
+### Distributed tracing (OTLP)
+
+Metrics ship to Prometheus out of the box. For **traces**, build with the `otlp` feature and point
+Strata at an OTLP collector (Tempo, Jaeger, Grafana Agent, OpenTelemetry Collector). Spans export
+over OTLP/HTTP in parallel with the Prometheus exporter.
+
+```bash
+cargo build --release -p strata-server --features otlp
+# Full traces endpoint (OTLP/HTTP defaults to :4318):
+STRATA_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces strata-server
+```
+
+When the feature is absent or `STRATA_OTLP_ENDPOINT` is unset, only the fmt logger + Prometheus run
+(zero overhead). The service reports as `service.name=strata-server`.

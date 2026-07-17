@@ -17,6 +17,14 @@ path = "src/main.rs"
 #   cargo build -p strata-server --release --features embed-local
 embed-local = ["strata-core/embed-local"]
 rerank-local = ["strata-core/rerank-local"]
+# Export traces to an OTLP collector (Tempo/Grafana/Jaeger) alongside Prometheus metrics. Off by
+# default — pulls the opentelemetry SDK + exporter. Build: cargo build -p strata-server --features otlp
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 
 [dependencies]
 strata-core.workspace = true
@@ -33,6 +41,15 @@ tracing-subscriber.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
 anyhow.workspace = true
 clap.workspace = true
 mimalloc.workspace = true
+
+[dev-dependencies]
+# Used only by the `otlp`-gated telemetry test to stand up a mock OTLP collector.
+axum.workspace = true

@@ -79,6 +79,12 @@ tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = { version = "0.24" }
 metrics-exporter-prometheus = { version = "0.16" }
+# Optional OTLP trace export (feature `otlp`), via the HTTP/protobuf exporter so it doesn't couple to
+# the Raft tonic version. Off by default — the exporter + SDK are a non-trivial dep tree.
+opentelemetry = { version = "0.27" }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+tracing-opentelemetry = { version = "0.28" }
 
 # Auth
 jsonwebtoken = { version = "9" }
