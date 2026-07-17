@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cdc;
 pub mod cluster;
 pub mod error;
 pub mod grpc;

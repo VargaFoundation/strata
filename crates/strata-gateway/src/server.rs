@@ -82,6 +82,12 @@ pub struct GatewayConfig {
     /// key/JWT) is encrypted in transit. Strongly recommended if :5432 is reachable off-localhost.
     #[serde(default)]
     pub pg_tls: Option<crate::pg_wire::handler::PgTlsConfig>,
+    /// Outbound CDC sink: when set, each memory lifecycle change (upserted/superseded/expired) is
+    /// POSTed as JSON to this URL — the stream to mirror memory into a downstream system (search
+    /// index, data warehouse, event bus). Empty = disabled. Delivery is best-effort at-least-once
+    /// with bounded retry; the operator configures a trusted endpoint (no SSRF guard applies).
+    #[serde(default)]
+    pub cdc_sink_url: Option<String>,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -129,6 +135,7 @@ impl Default for GatewayConfig {
             llm_cache_similarity: false,
             tool_gateway_allow_private_networks: false,
             pg_tls: None,
+            cdc_sink_url: None,
         }
     }
 }
@@ -425,6 +432,11 @@ impl GatewayServer {
                 None
             }
         };
+
+        // Outbound CDC sink: mirror memory changes to a downstream system (leader-gated).
+        if let Some(sink_url) = config.cdc_sink_url.clone().filter(|u| !u.is_empty()) {
+            crate::cdc::spawn(engine.clone(), sink_url, coordinator.clone());
+        }
 
         Ok(Self {
             _engine: engine,

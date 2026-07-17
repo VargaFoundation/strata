@@ -68,6 +68,9 @@ auth_enabled = false
 # Webhook signature verification (per vendor: github/slack/sentry/pagerduty):
 #   webhook_secrets = ["github=<hmac>", "slack=<signing-secret>"]
 #   webhook_require_signature = true   # fail-closed: reject sources with no configured secret
+# Outbound CDC: mirror every memory change (upserted/superseded/expired) as JSON POST to a
+# downstream system (search index, warehouse, event bus). Leader-gated in cluster mode.
+#   cdc_sink_url = "https://collector.internal/strata-cdc"
 
 [cluster]
 enabled = false
