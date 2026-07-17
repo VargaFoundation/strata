@@ -10,6 +10,17 @@ regression baseline and a starting point, not as Strata's ceiling.
 
 ## Reproduce
 
+**Turnkey (no API key)** — the fastest path uses the logged-in `claude` CLI as answerer + judge,
+Ollama for embeddings, and downloads the dataset for you:
+
+```bash
+make bench-smoke   # validate the whole pipeline in minutes (1 conversation, 5 QA)
+make bench         # full 10-conversation overnight run → /tmp/strata-bench/results-<ts>.txt
+```
+
+See [ops/bench/README.md](../ops/bench/README.md) for knobs (`CONVS`, `EXTRACTION`, `EVAL_MODEL`, …)
+and the self-judge-bias caveat. The manual, provider-agnostic recipe below produces the same metrics:
+
 ```bash
 # 1. Convert the real dataset into the harness schema
 curl -sL https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json -o locomo10.json

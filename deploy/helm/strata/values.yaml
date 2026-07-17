@@ -97,6 +97,9 @@ autoscaling:
 # -- Persistent volume for data
 persistence:
   enabled: true
+  # Encryption at rest = use an ENCRYPTED StorageClass here (the on-disk stores are plaintext; volume
+  # encryption is the supported mechanism — see docs/security.md#encryption-at-rest). e.g. an
+  # ebs.csi.aws.com class with encrypted:"true" + kmsKeyId, or a GKE pd.csi CMEK class. "" = cluster default.
   storageClass: ""
   size: 10Gi
   accessModes:

@@ -73,9 +73,13 @@ Strata stores an AI agent's memory for one or many tenants:
   for inter-node confidentiality.
 - **Backups are not strictly point-in-time** across all four stores (no global write barrier). Fine
   for Raft restore (log replay); for standalone DR, quiesce writes or snapshot the volume.
-- **No encryption at rest** — DuckDB/SQLite/USearch files are plaintext on disk. Use encrypted
-  volumes / disk-level encryption for data-at-rest requirements.
-- **No cross-scope sharing / ACLs** — scoping is exact-match isolation `(tenant,user,agent,session)`.
+- **No application-level encryption at rest** — the on-disk stores are plaintext files; the supported
+  mechanism for data-at-rest confidentiality is **volume / disk encryption** (LUKS, encrypted EBS/PD
+  with KMS, an encrypted `StorageClass`), the right layer for a self-hosted binary. See
+  [security.md → Encryption at rest](security.md#encryption-at-rest) for the recipe.
+- **Cross-scope sharing is opt-in and tenant-strict** — default scoping is exact-match isolation
+  `(tenant,user,agent,session)`; a grant can additionally let one user read another user's memories
+  **within the same tenant** (never across tenants). No team/role ACLs yet.
   There is no "share this memory with a team" primitive yet.
 - **The semantic response cache is per-node** in a cluster — nodes may briefly serve answers built
   from slightly different memory states (bounded by TTL).

@@ -100,6 +100,33 @@ write barrier, so a backup taken under concurrent writes may be fuzzy at the edg
 point-in-time image, quiesce writes or snapshot the data volume (Raft restore replays the log to a
 consistent point regardless).
 
+## Encryption at rest
+
+Strata's on-disk stores (DuckDB for episodic + memories, SQLite for state, the USearch vector index)
+are **plaintext files**. The **supported, recommended mechanism for data-at-rest confidentiality is
+volume / disk encryption** — the correct layer for a self-hosted single binary. It is transparent to
+Strata, covers *all* four stores uniformly (including backups on the same volume), and needs no
+application changes. Application-level per-store encryption would be partial (DuckDB has no encryption
+in the bundled version; rusqlite is not SQLCipher; USearch is raw) — we deliberately do **not** ship a
+half-measure that would over-claim.
+
+Configure it at the storage layer that hosts `STRATA_STORAGE__DATA_DIR` (default `./data`):
+
+- **Bare metal / VM:** put the data dir on a **LUKS**-encrypted volume
+  (`cryptsetup luksFormat …` → `mkfs` → mount), key managed by your KMS / TPM / a passphrase unsealed
+  at boot.
+- **AWS:** an **encrypted EBS** volume (`Encrypted=true`, a CMK in **KMS**) for the data PVC/instance store.
+- **GCP:** a **CMEK**-encrypted Persistent Disk; **Azure:** disk encryption with a Key Vault key.
+- **Kubernetes:** a `StorageClass` whose provisioner encrypts (e.g. `ebs.csi.aws.com` with
+  `encrypted: "true"` + `kmsKeyId`, or `pd.csi.storage.gke.io` with a CMEK). Point the chart's PVC at
+  it via `persistence.storageClass`. Also set `securityContext.readOnlyRootFilesystem: true` so only
+  the encrypted data mount is writable.
+
+Secrets in transit (API keys over the network) are a separate concern — enable auth + TLS
+(REST/gRPC ingress, PG-wire TLS, Raft mTLS/mesh) as covered above. Per-tenant envelope encryption
+(app-level, KMS/age) is a possible future direction (see [ROADMAP](../ROADMAP.md)) but is out of scope
+today — volume encryption is the right answer for the self-hosted deployment model.
+
 ## Supply chain
 
 Release images are **signed with cosign (keyless, GitHub OIDC)** and carry a **SLSA build-provenance

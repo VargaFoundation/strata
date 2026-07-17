@@ -6,7 +6,7 @@ CAP_GB ?= 40
 export CAP_GB
 GUARD  := scripts/target-guard.sh
 
-.PHONY: build test check fmt clippy run guard disk clean clean-all release
+.PHONY: build test check fmt clippy run guard disk clean clean-all release bench bench-smoke cluster-up cluster-down cluster-failover
 
 ## Guarded common tasks (auto-clean target/ if it's over the cap, then run cargo).
 build: guard ; cargo build --workspace
@@ -17,6 +17,17 @@ run: guard ; cargo run --bin strata-server
 
 fmt:    ; cargo fmt --all
 clippy: guard ; cargo clippy --workspace --all-targets -- -D warnings
+
+## LoCoMo benchmark (needs a logged-in `claude` CLI + Ollama :11434 — see ops/bench/README.md).
+## `make bench-smoke` validates the whole pipeline in minutes (1 conversation, 5 QA); `make bench`
+## runs the full overnight eval. Results are teed under /tmp/strata-bench/.
+bench-smoke: guard ; CONVS=1 QA_LIMIT=5 EXTRACTION=none bash ops/bench/run-locomo-claude.sh
+bench:       guard ; bash ops/bench/run-locomo-claude.sh
+
+## Local N-node Raft cluster (real processes; needs `make release` first). See ops/cluster-local/.
+cluster-up:       ; bash ops/cluster-local/run-cluster.sh
+cluster-failover: ; bash ops/cluster-local/failover-test.sh
+cluster-down:     ; bash ops/cluster-local/stop-cluster.sh
 
 ## Disk hygiene.
 guard:     ; @bash $(GUARD)            # clean only if over the cap
