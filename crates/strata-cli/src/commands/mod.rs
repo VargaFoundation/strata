@@ -37,12 +37,12 @@ pub enum Command {
         #[arg(long)]
         entity: String,
     },
-    /// Import an external knowledge store into memory (Obsidian vault → memories + graph edges)
+    /// Import an external knowledge store into memory (Obsidian vault, or a Mem0/Zep JSON export)
     Import {
-        /// Source format
+        /// Source format: obsidian | mem0 | zep
         #[arg(long, default_value = "obsidian")]
         from: String,
-        /// Path to the vault / source directory
+        /// Path to the source: an Obsidian vault directory, or a Mem0/Zep JSON export file
         #[arg(long)]
         path: String,
         /// Scope imported memories to this user id

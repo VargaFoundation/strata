@@ -1,8 +1,14 @@
 //! `strata import` — bring external note/knowledge stores into Strata's memory.
 //!
-//! Obsidian: each Markdown note becomes a memory (subject = note title), YAML frontmatter is
-//! attached as metadata, and every `[[wikilink]]` becomes a knowledge-graph edge
-//! (`note --links_to--> target`). Runs over the REST API, so it works against any Strata server.
+//! - **Obsidian**: each Markdown note becomes a memory (subject = note title), YAML frontmatter is
+//!   attached as metadata, and every `[[wikilink]]` becomes a knowledge-graph edge
+//!   (`note --links_to--> target`).
+//! - **Mem0**: a `mem0` export (JSON) — a `get_all()` dump or a plain array of memory objects; each
+//!   `memory` text becomes a memory, carrying its `user_id`/`metadata`/`created_at`.
+//! - **Zep**: a `zep` export (JSON) — graph `facts` and/or session `messages`; each fact/message
+//!   becomes a memory.
+//!
+//! All variants run over the REST API, so they work against any Strata server.
 
 use crate::client::StrataClient;
 
@@ -14,11 +20,173 @@ struct Note {
     links: Vec<String>,
 }
 
+/// A memory record extracted from an external store, ready to POST to `/api/v1/memories`.
+struct MemRecord {
+    content: String,
+    subject: Option<String>,
+    user_id: Option<String>,
+    metadata: serde_json::Value,
+}
+
 pub async fn run(url: &str, from: &str, path: &str, user: Option<&str>) -> anyhow::Result<()> {
     match from {
         "obsidian" => import_obsidian(url, path, user).await,
-        other => anyhow::bail!("unknown import source '{other}' (supported: obsidian)"),
+        "mem0" => import_records(url, path, user, "mem0", parse_mem0).await,
+        "zep" => import_records(url, path, user, "zep", parse_zep).await,
+        other => {
+            anyhow::bail!("unknown import source '{other}' (supported: obsidian, mem0, zep)")
+        }
     }
+}
+
+/// Generic JSON-file importer: read `path`, run `parse` to extract records, POST each as a memory.
+/// The record's own `user_id` wins; otherwise the CLI `--user` fallback applies. `source` is stamped
+/// into each memory's metadata.
+async fn import_records(
+    url: &str,
+    path: &str,
+    user: Option<&str>,
+    source: &str,
+    parse: fn(&serde_json::Value) -> anyhow::Result<Vec<MemRecord>>,
+) -> anyhow::Result<()> {
+    let raw =
+        std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("cannot read '{path}': {e}"))?;
+    let doc: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("'{path}' is not valid JSON: {e}"))?;
+    let records = parse(&doc)?;
+    if records.is_empty() {
+        println!("No memories found in {path}.");
+        return Ok(());
+    }
+
+    let client = StrataClient::new(url);
+    let (mut imported, mut errors) = (0u32, 0u32);
+    for rec in &records {
+        let mut metadata = rec.metadata.clone();
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        if let serde_json::Value::Object(ref mut m) = metadata {
+            m.entry("source").or_insert(serde_json::json!(source));
+        }
+        let mut body = serde_json::json!({
+            "content": rec.content,
+            "metadata": metadata,
+        });
+        if let Some(s) = &rec.subject {
+            body["subject"] = serde_json::json!(s);
+        }
+        // Record's own user_id wins; else the CLI fallback.
+        if let Some(u) = rec.user_id.as_deref().or(user) {
+            body["user_id"] = serde_json::json!(u);
+        }
+        match client.post_json("/api/v1/memories", body).await {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                eprintln!("  memory failed: {e}");
+                errors += 1;
+            }
+        }
+    }
+    println!("Imported {imported} memory(ies) from {source}, {errors} error(s).");
+    Ok(())
+}
+
+/// Parse a Mem0 export. Accepts a top-level array, or an object wrapping the list under `results`,
+/// `memories`, or `data`. Each item's text comes from `memory` (Mem0's field) or `text`/`content`.
+fn parse_mem0(doc: &serde_json::Value) -> anyhow::Result<Vec<MemRecord>> {
+    let items = as_list(doc, &["results", "memories", "data"]).ok_or_else(|| {
+        anyhow::anyhow!("mem0 export: expected an array or a {{results:[…]}} object")
+    })?;
+    let mut out = Vec::new();
+    for item in items {
+        let Some(content) = str_field(item, &["memory", "text", "content"]) else {
+            continue; // skip entries with no text
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+        let mut metadata = item
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        // Preserve Mem0's timestamps in metadata (Strata assigns its own valid_from).
+        if let serde_json::Value::Object(ref mut m) = metadata {
+            for key in ["created_at", "updated_at", "hash", "categories"] {
+                if let Some(v) = item.get(key) {
+                    m.entry(key).or_insert(v.clone());
+                }
+            }
+        }
+        out.push(MemRecord {
+            content,
+            subject: None,
+            user_id: str_field(item, &["user_id"]),
+            metadata,
+        });
+    }
+    Ok(out)
+}
+
+/// Parse a Zep export. Accepts graph `facts` (each a string or `{fact|content}` object) and/or
+/// session `messages` (each `{role, content}`), at the top level or nested. Facts and messages both
+/// become memories; a message's `role` is kept in metadata.
+fn parse_zep(doc: &serde_json::Value) -> anyhow::Result<Vec<MemRecord>> {
+    let mut out = Vec::new();
+    let user = str_field(doc, &["user_id", "session_id"]);
+    if let Some(facts) = as_list(doc, &["facts"]) {
+        for f in facts {
+            let content = match f {
+                serde_json::Value::String(s) => Some(s.clone()),
+                _ => str_field(f, &["fact", "content"]),
+            };
+            if let Some(c) = content.filter(|c| !c.trim().is_empty()) {
+                out.push(MemRecord {
+                    content: c,
+                    subject: None,
+                    user_id: user.clone(),
+                    metadata: serde_json::json!({ "kind": "fact" }),
+                });
+            }
+        }
+    }
+    if let Some(messages) = as_list(doc, &["messages"]) {
+        for m in messages {
+            let Some(content) = str_field(m, &["content", "message"]) else {
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+            let role = str_field(m, &["role", "role_type"]).unwrap_or_else(|| "user".into());
+            out.push(MemRecord {
+                content,
+                subject: None,
+                user_id: user.clone(),
+                metadata: serde_json::json!({ "kind": "message", "role": role }),
+            });
+        }
+    }
+    if out.is_empty() {
+        anyhow::bail!("zep export: found neither `facts` nor `messages`");
+    }
+    Ok(out)
+}
+
+/// Return a JSON array from `doc` itself (if it is an array) or from the first present key in `keys`.
+fn as_list<'a>(doc: &'a serde_json::Value, keys: &[&str]) -> Option<&'a Vec<serde_json::Value>> {
+    if let Some(arr) = doc.as_array() {
+        return Some(arr);
+    }
+    keys.iter()
+        .find_map(|k| doc.get(*k).and_then(|v| v.as_array()))
+}
+
+/// First present, non-null string among `keys`.
+fn str_field(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|k| v.get(*k).and_then(|x| x.as_str()))
+        .map(|s| s.to_string())
 }
 
 async fn import_obsidian(url: &str, vault: &str, user: Option<&str>) -> anyhow::Result<()> {
@@ -223,5 +391,59 @@ mod tests {
     fn wikilinks_dedupe_and_strip() {
         let links = extract_wikilinks("[[A]] [[A]] [[B|x]] plain [[ C ]]");
         assert_eq!(links, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn mem0_parses_results_wrapper_and_bare_array() {
+        // get_all()-style {results:[…]}
+        let doc = serde_json::json!({
+            "results": [
+                {"memory": "likes tea", "user_id": "alice", "metadata": {"topic": "drink"},
+                 "created_at": "2026-01-01T00:00:00Z"},
+                {"memory": "  ", "user_id": "bob"},        // blank text → skipped
+                {"user_id": "carol"}                        // no text → skipped
+            ]
+        });
+        let recs = parse_mem0(&doc).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].content, "likes tea");
+        assert_eq!(recs[0].user_id.as_deref(), Some("alice"));
+        assert_eq!(recs[0].metadata["topic"], "drink");
+        assert_eq!(recs[0].metadata["created_at"], "2026-01-01T00:00:00Z");
+
+        // Bare array with alternate text key.
+        let bare = serde_json::json!([{"text": "prefers window seats", "user_id": "dave"}]);
+        let recs = parse_mem0(&bare).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].content, "prefers window seats");
+    }
+
+    #[test]
+    fn zep_parses_facts_and_messages() {
+        let doc = serde_json::json!({
+            "user_id": "u1",
+            "facts": [
+                "the sky is blue",
+                {"fact": "grass is green"},
+                {"fact": "   "}                              // blank → skipped
+            ],
+            "messages": [
+                {"role": "assistant", "content": "hello"},
+                {"role_type": "user", "message": "hi there"},
+                {"role": "user", "content": ""}              // blank → skipped
+            ]
+        });
+        let recs = parse_zep(&doc).unwrap();
+        // 2 facts + 2 messages
+        assert_eq!(recs.len(), 4);
+        assert!(recs.iter().all(|r| r.user_id.as_deref() == Some("u1")));
+        assert_eq!(recs[0].metadata["kind"], "fact");
+        assert_eq!(recs[2].metadata["kind"], "message");
+        assert_eq!(recs[2].metadata["role"], "assistant");
+    }
+
+    #[test]
+    fn zep_errors_when_empty() {
+        assert!(parse_zep(&serde_json::json!({"other": 1})).is_err());
     }
 }
