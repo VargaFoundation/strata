@@ -18,6 +18,25 @@ cargo build
 
 First build takes several minutes (DuckDB and USearch compile from source).
 
+### Disk usage / build artifacts
+
+Strata links heavy native dependencies (bundled DuckDB, ONNX Runtime via the optional embedding
+features, the AWS SDK, protobuf). `target/` grows fast, and across many builds + feature
+combinations + the separate `ops/operator` workspace it can accumulate to **hundreds of GB** and
+saturate a disk. Two guardrails keep this in check:
+
+- **Smaller builds (automatic):** the root `Cargo.toml` dev profile drops debug info from
+  *dependencies* (`[profile.dev.package."*"] debug = false`) and uses `split-debuginfo = "unpacked"`.
+  Your own crates keep `line-tables-only` so backtraces still show file:line. A clean full build is
+  a few GB and the server binary ~120 MB (vs ~1 GB unstripped).
+- **Auto-clean over a cap:** build through the `Makefile` — `make build` / `make test` / `make check`
+  run `scripts/target-guard.sh` first, which reclaims space (via `cargo sweep` if installed, else
+  `cargo clean`) whenever `target/` exceeds a cap (default 40 GB, override with `CAP_GB=…`).
+  - `make disk` reports current `target/` size (non-zero exit if over cap).
+  - `make clean` wipes both workspaces' `target/`; `make clean-all` also removes stray test `data/` dirs.
+  - Optional but recommended: `cargo install cargo-sweep` so the guard prunes only *stale* artifacts
+    instead of doing a full clean.
+
 ### Run Tests
 
 ```bash

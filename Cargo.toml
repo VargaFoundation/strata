@@ -117,9 +117,17 @@ proptest = { version = "1" }
 # workspace with heavy native deps (duckdb/protobuf-src/aws-sdk). Set to "full"
 # locally if you need step-through variable inspection in a debugger.
 debug = "line-tables-only"
+# Unpack split debug info into separate .dwo/.o files so incremental rebuilds don't rewrite
+# multi-hundred-MB binaries wholesale (and `strip`/clean reclaim them cleanly).
+split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]
 opt-level = 2
+# Dependencies (duckdb bundled, onnxruntime via fastembed, aws-sdk, protobuf) are the bulk of
+# target/. They almost never need debugging, so drop their debug info entirely — this is the single
+# biggest lever against target/ growth. Workspace crates keep line-tables-only (above) so your own
+# backtraces still show file:line.
+debug = false
 
 [profile.release]
 lto = "thin"
