@@ -1,0 +1,28 @@
+{{- if .Values.sharding.enabled }}
+{{- $root := . }}
+{{- range $shard := until (int .Values.sharding.shards) }}
+---
+# Per-shard headless service for intra-shard Raft peer discovery (one Raft group per shard).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ecphoria.fullname" $root }}-shard-{{ $shard }}-headless
+  labels:
+    {{- include "ecphoria.labels" $root | nindent 4 }}
+    ecphoria.io/shard: "{{ $shard }}"
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "ecphoria.selectorLabels" $root | nindent 4 }}
+    ecphoria.io/shard: "{{ $shard }}"
+  ports:
+    - name: raft
+      port: {{ $root.Values.service.raftPort }}
+      targetPort: raft
+    - name: http
+      port: {{ $root.Values.service.httpPort }}
+      targetPort: http
+{{- end }}
+{{- end }}

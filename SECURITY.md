@@ -2,14 +2,14 @@
 
 ## Supported versions
 
-Strata is pre-1.0 (`0.x`). Security fixes land on `main` and in the latest tagged
+Ecphoria is pre-1.0 (`0.x`). Security fixes land on `main` and in the latest tagged
 release. Until 1.0, only the most recent minor version receives fixes.
 
 ## Reporting a vulnerability
 
 **Please do not open a public issue for a security vulnerability.**
 
-Report privately via GitHub's [private vulnerability reporting](https://github.com/VargaFoundation/strata/security/advisories/new)
+Report privately via GitHub's [private vulnerability reporting](https://github.com/VargaFoundation/ecphoria/security/advisories/new)
 (Security → Report a vulnerability), or email the maintainers listed in
 [CODEOWNERS](.github/CODEOWNERS).
 
@@ -24,10 +24,10 @@ with you. We credit reporters in the release notes unless you prefer to stay ano
 
 ## Scope
 
-In scope: the Strata server (memory substrate, REST/gRPC/PG-wire/MCP/LLM-proxy), the
+In scope: the Ecphoria server (memory substrate, REST/gRPC/PG-wire/MCP/LLM-proxy), the
 cluster/Raft layer, the CLI, the operator, and the official SDKs.
 
-Out of scope: issues that require a misconfiguration Strata explicitly warns against
+Out of scope: issues that require a misconfiguration Ecphoria explicitly warns against
 (e.g. running with `gateway.allow_insecure=true` on a public network — see
 [docs/threat-model.md](docs/threat-model.md)), third-party dependencies (report upstream;
 we track advisories via `cargo-audit` in CI), and self-inflicted denial of service.
@@ -35,6 +35,6 @@ we track advisories via `cargo-audit` in CI), and self-inflicted denial of servi
 ## Hardening
 
 Before deploying, read [docs/threat-model.md](docs/threat-model.md) and
-[docs/security.md](docs/security.md), and run `strata doctor` to lint your config.
+[docs/security.md](docs/security.md), and run `ecphoria doctor` to lint your config.
 Release container images are signed (cosign) and ship an SBOM + SLSA provenance;
 verification steps are in `docs/security.md`.

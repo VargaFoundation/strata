@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
-  title: Strata Context Lake API
+  title: Ecphoria Context Lake API
   description: >
-    REST API for Strata — episodic events, semantic search, agent state, and the bi-temporal
+    REST API for Ecphoria — episodic events, semantic search, agent state, and the bi-temporal
     memory cognition layer. When `auth_enabled`, all `/api/v1/*` routes require
     `Authorization: Bearer <token>` (API key, JWT HS256, or OIDC RS256) and are tenant-scoped.
   version: "0.2.0"

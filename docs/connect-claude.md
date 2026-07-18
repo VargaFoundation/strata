@@ -1,6 +1,6 @@
-# Connecting Claude to Strata
+# Connecting Claude to Ecphoria
 
-Strata gives Claude **persistent, self-hosted memory**. There are three ways to wire them
+Ecphoria gives Claude **persistent, self-hosted memory**. There are three ways to wire them
 together. They're listed best-first — and honestly, including current limitations.
 
 > When `gateway.auth_enabled = true`, every path below needs `Authorization: Bearer <token>`
@@ -10,13 +10,13 @@ together. They're listed best-first — and honestly, including current limitati
 
 ## 1. REST + Claude tool-use  ✅ recommended (works today, ~5 minutes)
 
-Define Anthropic tools that call Strata's REST API. This is the most robust path and needs no
+Define Anthropic tools that call Ecphoria's REST API. This is the most robust path and needs no
 proxy. A complete working example lives in [`examples/claude-agent/`](../examples/claude-agent/).
 
 ```python
 import anthropic, httpx
 
-STRATA = "http://localhost:8432"
+ECPHORIA = "http://localhost:8432"
 client = anthropic.Anthropic()
 
 tools = [
@@ -48,10 +48,10 @@ tools = [
 
 def run_tool(name, args):
     if name == "remember":
-        return httpx.post(f"{STRATA}/api/v1/memories", json={
+        return httpx.post(f"{ECPHORIA}/api/v1/memories", json={
             "content": args["text"], "user_id": args["user_id"]}).json()
     if name == "recall":
-        return httpx.post(f"{STRATA}/api/v1/memories/search", json={
+        return httpx.post(f"{ECPHORIA}/api/v1/memories/search", json={
             "query": args["query"], "user_id": args["user_id"]}).json()
 
 # Standard Anthropic tool-use loop: call client.messages.create(model=..., tools=tools, ...),
@@ -65,7 +65,7 @@ memory — "what did we believe, and when".
 
 ## 2. MCP  ✅ Streamable HTTP — Claude Code and Claude Desktop both connect natively
 
-Strata exposes an MCP **Streamable HTTP** endpoint at `/mcp`: `POST` for JSON-RPC 2.0
+Ecphoria exposes an MCP **Streamable HTTP** endpoint at `/mcp`: `POST` for JSON-RPC 2.0
 (`initialize` — which returns an `Mcp-Session-Id` header — `tools/list`, `tools/call`,
 `resources/list`, `prompts/list`) and `GET` for the server→client SSE stream. It includes 6
 memory tools — `add_memory`, `search_memory`, `get_memories`, `memory_history`, `delete_memory`,
@@ -73,22 +73,22 @@ memory tools — `add_memory`, `search_memory`, `get_memories`, `memory_history`
 
 **Claude Code** (HTTP MCP) — add to your MCP config:
 ```json
-{ "mcpServers": { "strata": { "url": "http://localhost:8432/mcp" } } }
+{ "mcpServers": { "ecphoria": { "url": "http://localhost:8432/mcp" } } }
 ```
 
 **Claude Desktop** — it speaks MCP Streamable HTTP (HTTP GET + SSE + `Mcp-Session-Id`), which
-Strata now serves, so point it at the URL directly. (If your client only supports stdio MCP, the
+Ecphoria now serves, so point it at the URL directly. (If your client only supports stdio MCP, the
 [`mcp-remote`](https://github.com/geelen/mcp-remote) bridge —
 `npx -y mcp-remote http://localhost:8432/mcp` — still works.)
 
-> Note: Strata is a stateless tool server, so the GET/SSE stream is an idle keep-alive (no
+> Note: Ecphoria is a stateless tool server, so the GET/SSE stream is an idle keep-alive (no
 > server-initiated notifications) — sufficient for the request/response tool calls clients make.
 
 ---
 
 ## 3. LLM proxy (auto-RAG)  ✅ great for chat; SSE streaming supported
 
-Point any OpenAI client at Strata and ask for a `claude-*` model. Strata injects relevant
+Point any OpenAI client at Ecphoria and ask for a `claude-*` model. Ecphoria injects relevant
 memories (scoped by the OpenAI `user` field) and forwards to Anthropic. Set `ANTHROPIC_API_KEY`
 in the server's environment.
 

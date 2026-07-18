@@ -15,7 +15,7 @@
 > et Zep paywall son graphe. Le « context lake / decision coherence » devient un **second acte
 > entreprise** (état partagé multi-agents, mémoire auditable en SQL), pas l'accroche.
 >
-> La couche d'**intelligence mémoire** qui manquait est désormais implémentée dans `strata-core`
+> La couche d'**intelligence mémoire** qui manquait est désormais implémentée dans `ecphoria-core`
 > (`memory/cognition.rs`) : mémoires bi-temporelles, résolution de contradictions, dédup/
 > consolidation, recherche hybride BM25+vecteur (RRF), oubli par decay, extraction LLM opt-in,
 > API compatible Mem0 (REST + MCP), et un harnais d'éval LoCoMo (`examples/locomo_eval.rs`).
@@ -29,18 +29,18 @@
 ## 1. RÉSUMÉ EXÉCUTIF
 
 ### Nom de travail (à finaliser — voir section 10)
-**Strata** (recommandation principale — voir section 10 pour alternatives)
+**Ecphoria** (recommandation principale — voir section 10 pour alternatives)
 
 ### Tagline
 "The open-source context lake. Deploy in 30 seconds. Scale to millions."
 
 ### One-liner pitch
-Strata est un context lake open source qui unifie mémoire épisodique, sémantique et d'état pour les agents IA dans un seul binaire Rust — déployable en Docker comme MinIO, scalable sur Kubernetes, compatible PostgreSQL et MCP-natif.
+Ecphoria est un context lake open source qui unifie mémoire épisodique, sémantique et d'état pour les agents IA dans un seul binaire Rust — déployable en Docker comme MinIO, scalable sur Kubernetes, compatible PostgreSQL et MCP-natif.
 
 ### Elevator pitch (60 secondes)
 Les agents IA en production aujourd'hui opèrent sur des données fragmentées. L'agent de fraude voit un snapshot vieux de 5 minutes. L'agent de support ne sait pas que l'agent d'analyse a déjà détecté un problème. Chaque agent a sa propre mémoire dans son propre silo.
 
-Strata résout ça. C'est un context lake — une couche de contexte partagé temps réel pour tous vos agents. Trois types de mémoire (ce qui s'est passé, ce que ça signifie, où on en est) unifiés dans un seul moteur. Les agents lisent et écrivent dans la même réalité. Le tout en open source, déployable en `docker run`, compatible avec les outils existants via le protocole PostgreSQL, et nativement intégré au Model Context Protocol.
+Ecphoria résout ça. C'est un context lake — une couche de contexte partagé temps réel pour tous vos agents. Trois types de mémoire (ce qui s'est passé, ce que ça signifie, où on en est) unifiés dans un seul moteur. Les agents lisent et écrivent dans la même réalité. Le tout en open source, déployable en `docker run`, compatible avec les outils existants via le protocole PostgreSQL, et nativement intégré au Model Context Protocol.
 
 Tacnode fait ça pour les grands comptes US sur AWS. Nous le faisons pour tous les autres — en open source, on-premise, RGPD-natif.
 
@@ -76,13 +76,13 @@ Tacnode fait ça pour les grands comptes US sur AWS. Nous le faisons pour tous l
 - **Produit** : Memory-as-a-service pour agents IA. API simple (3 lignes de code). Extraction automatique de mémoires. Scopes user/session/agent.
 - **Forces** : Écosystème le plus large, intégration AWS Agent SDK, DX excellente, traction massive
 - **Faiblesses** : Cloud-first (données sur serveurs Mem0), graph features derrière paywall $249/mo, score LongMemEval moyen (49%), pas de requêtes SQL, pas de feature store, pas de contexte opérationnel temps réel
-- **Notre différenciation** : Strata n'est PAS un memory framework — c'est une infrastructure data. Mem0 stocke des "souvenirs" d'interactions. Strata stocke l'état opérationnel complet d'un système. Mem0 est le cerveau conversationnel. Strata est la source de vérité partagée.
+- **Notre différenciation** : Ecphoria n'est PAS un memory framework — c'est une infrastructure data. Mem0 stocke des "souvenirs" d'interactions. Ecphoria stocke l'état opérationnel complet d'un système. Mem0 est le cerveau conversationnel. Ecphoria est la source de vérité partagée.
 
 #### Zep (Graphiti)
 - **Produit** : Temporal knowledge graph pour agents. Graphiti engine open source.
 - **Forces** : Meilleur score temporel (LongMemEval 63.8%), graph-based, production-ready
 - **Faiblesses** : Nécessite Neo4j/FalkorDB, self-hosting complexe, cloud pricing élevé, pas de feature store temps réel
-- **Notre différenciation** : Strata unifie tout dans un seul moteur — pas besoin de gérer Neo4j + vector DB + feature store séparément
+- **Notre différenciation** : Ecphoria unifie tout dans un seul moteur — pas besoin de gérer Neo4j + vector DB + feature store séparément
 
 #### Letta (ex-MemGPT)
 - **Fondé** : 2024, $10M seed (Felicis Ventures)
@@ -90,13 +90,13 @@ Tacnode fait ça pour les grands comptes US sur AWS. Nous le faisons pour tous l
 - **Produit** : Agent runtime avec mémoire tiered (core/recall/archival). Le LLM gère lui-même sa mémoire.
 - **Forces** : Architecture OS-like innovante, contrôle explicite de la mémoire, local-LLM friendly
 - **Faiblesses** : Lock-in dans le framework Letta, mémoire couplée au runtime agent, pas de SQL, pas de contexte partagé multi-agent
-- **Notre différenciation** : Strata est agnostique du framework agent. N'importe quel agent peut y lire/écrire. Pas de runtime propriétaire.
+- **Notre différenciation** : Ecphoria est agnostique du framework agent. N'importe quel agent peut y lire/écrire. Pas de runtime propriétaire.
 
 #### Cognee
 - **Produit** : Knowledge graph + vector search, 30+ connecteurs data, multimodal
 - **Forces** : Tourne entièrement en local (SQLite + LanceDB + Kuzu), pipeline d'extraction structurée
 - **Faiblesses** : Orienté RAG/extraction, pas de contexte opérationnel temps réel
-- **Notre différenciation** : Strata est une base de données, pas un pipeline d'extraction
+- **Notre différenciation** : Ecphoria est une base de données, pas un pipeline d'extraction
 
 #### Supermemory
 - **Produit** : Memory API avec MCP integrations, orienté coding agents
@@ -109,24 +109,24 @@ Tacnode fait ça pour les grands comptes US sur AWS. Nous le faisons pour tous l
 #### Vector DBs (Chroma, Milvus, Qdrant, Weaviate, pgvector)
 - Résolvent le problème du stockage/recherche vectorielle UNIQUEMENT
 - Pas de mémoire épisodique, pas d'état, pas de transactions cross-type, pas de MCP
-- Strata les remplace en incluant le vectoriel + tout le reste
+- Ecphoria les remplace en incluant le vectoriel + tout le reste
 
 #### Feature stores (Feast, Tecton, Featureform)
 - Orientés ML classique, pas agents IA
 - Batch-first pour la plupart
-- Strata inclut un feature store temps réel comme sous-ensemble de la State Memory
+- Ecphoria inclut un feature store temps réel comme sous-ensemble de la State Memory
 
 #### Stream processing (Kafka, Flink, NATS)
 - Transport de messages, pas stockage de contexte
-- Strata consomme depuis ces systèmes, ne les remplace pas
+- Ecphoria consomme depuis ces systèmes, ne les remplace pas
 
 #### Bases temps réel (Redis, DragonflyDB)
 - Cache/state, pas de persistance analytique ni vectorielle
-- Strata offre la persistance + analytique + vectoriel dans un seul système
+- Ecphoria offre la persistance + analytique + vectoriel dans un seul système
 
 ### 2.4 Matrice comparative synthétique
 
-| Critère | Strata | Tacnode | Mem0 | Zep | Letta | pgvector |
+| Critère | Ecphoria | Tacnode | Mem0 | Zep | Letta | pgvector |
 |---------|----------|---------|------|-----|-------|----------|
 | Open source | Apache 2.0 | Non | Partiel | Partiel | Oui | Oui |
 | Self-hosted | Oui (Docker/K8s) | Non (AWS) | Oui (limité) | Oui (complexe) | Oui | Oui |
@@ -209,11 +209,11 @@ Tacnode fait ça pour les grands comptes US sur AWS. Nous le faisons pour tous l
 - Primitives exposées :
 
 **Resources** (lecture passive de données) :
-- `strata://episodic/{source}` — événements par source
-- `strata://semantic/{collection}` — collections vectorielles
-- `strata://state/{agent_id}` — état d'un agent
-- `strata://schema` — schéma complet du context lake
-- `strata://stats` — métriques (volume, latence, santé)
+- `ecphoria://episodic/{source}` — événements par source
+- `ecphoria://semantic/{collection}` — collections vectorielles
+- `ecphoria://state/{agent_id}` — état d'un agent
+- `ecphoria://schema` — schéma complet du context lake
+- `ecphoria://stats` — métriques (volume, latence, santé)
 
 **Tools** (actions exécutables) :
 - `query(sql)` — requête SQL libre
@@ -237,10 +237,10 @@ Tacnode fait ça pour les grands comptes US sur AWS. Nous le faisons pour tous l
 // claude_desktop_config.json / cursor / vscode
 {
   "mcpServers": {
-    "strata": {
+    "ecphoria": {
       "url": "http://localhost:8432/mcp",
       "transport": "streamable-http",
-      "auth": { "type": "bearer", "token": "${STRATA_API_KEY}" }
+      "auth": { "type": "bearer", "token": "${ECPHORIA_API_KEY}" }
     }
   }
 }
@@ -337,14 +337,14 @@ SELECT * FROM user_risk_features WHERE user_id = 'usr_42';
 
 #### 3.6.1 CLI
 ```bash
-strata status                    # santé du cluster
-strata sources list              # sources d'ingestion
-strata agents list               # agents enregistrés
-strata query "SELECT count(*) FROM episodic"
-strata ingest --source myapp --file events.json
-strata export --entity usr_42 --format json   # export RGPD
-strata backup --target s3://bucket/backup
-strata restore --from s3://bucket/backup/2026-04-08
+ecphoria status                    # santé du cluster
+ecphoria sources list              # sources d'ingestion
+ecphoria agents list               # agents enregistrés
+ecphoria query "SELECT count(*) FROM episodic"
+ecphoria ingest --source myapp --file events.json
+ecphoria export --entity usr_42 --format json   # export RGPD
+ecphoria backup --target s3://bucket/backup
+ecphoria restore --from s3://bucket/backup/2026-04-08
 ```
 
 #### 3.6.2 Web UI (optionnel)
@@ -421,7 +421,7 @@ strata restore --from s3://bucket/backup/2026-04-08
 #### Mode Compose (Docker Compose)
 ```
 ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-│ Strata │ │  MinIO   │ │  Ollama  │ │ Strata   │
+│ Ecphoria │ │  MinIO   │ │  Ollama  │ │ Ecphoria   │
 │ (engine) │ │ (storage)│ │ (embed)  │ │ UI       │
 └──────────┘ └──────────┘ └──────────┘ └──────────┘
 ```
@@ -433,7 +433,7 @@ strata restore --from s3://bucket/backup/2026-04-08
 ┌─────────────────────────────────────────┐
 │          Kubernetes Cluster             │
 │  ┌──────────┐ ┌──────────┐ ┌────────┐ │
-│  │ Strata-1 │ │ Strata-2 │ │Strata-3│ │
+│  │ Ecphoria-1 │ │ Ecphoria-2 │ │Ecphoria-3│ │
 │  │ (leader) │ │(follower)│ │(follow)│ │
 │  └────┬─────┘ └────┬─────┘ └───┬────┘ │
 │       └─────────────┼───────────┘      │
@@ -455,7 +455,7 @@ strata restore --from s3://bucket/backup/2026-04-08
 ### 4.3 Structure du projet (pour Claude Code)
 
 ```
-strata/
+ecphoria/
 ├── Cargo.toml                    # Workspace Rust
 ├── Cargo.lock
 ├── README.md
@@ -465,7 +465,7 @@ strata/
 ├── Makefile
 │
 ├── crates/
-│   ├── strata-core/              # Moteur principal
+│   ├── ecphoria-core/              # Moteur principal
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── memory/
@@ -497,7 +497,7 @@ strata/
 │   │   │   └── materialized.rs   # Incremental materialized views
 │   │   └── Cargo.toml
 │   │
-│   ├── strata-gateway/           # Couche protocole
+│   ├── ecphoria-gateway/           # Couche protocole
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── pg_wire.rs        # PostgreSQL wire protocol
@@ -508,7 +508,7 @@ strata/
 │   │   │   └── auth.rs           # Auth middleware
 │   │   └── Cargo.toml
 │   │
-│   ├── strata-cluster/           # Mode distribué
+│   ├── ecphoria-cluster/           # Mode distribué
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── raft.rs           # Consensus Raft
@@ -516,19 +516,19 @@ strata/
 │   │   │   └── coordinator.rs    # Coordination des nœuds
 │   │   └── Cargo.toml
 │   │
-│   └── strata-cli/               # CLI admin
+│   └── ecphoria-cli/               # CLI admin
 │       ├── src/
 │       │   └── main.rs
 │       └── Cargo.toml
 │
-├── strata-server/                # Binaire principal
+├── ecphoria-server/                # Binaire principal
 │   ├── src/
 │   │   └── main.rs               # Point d'entrée, config, startup
 │   └── Cargo.toml
 │
 ├── sdk/
 │   ├── python/                   # SDK Python (PyO3 ou HTTP client)
-│   │   ├── strata/
+│   │   ├── ecphoria/
 │   │   │   ├── __init__.py
 │   │   │   ├── client.py
 │   │   │   ├── memory.py
@@ -545,7 +545,7 @@ strata/
 │   │   └── tests/
 │   │
 │   └── go/                       # SDK Go
-│       ├── strata.go
+│       ├── ecphoria.go
 │       └── go.mod
 │
 ├── deploy/
@@ -553,7 +553,7 @@ strata/
 │   │   ├── Dockerfile
 │   │   └── docker-compose.yml
 │   ├── helm/
-│   │   └── strata/
+│   │   └── ecphoria/
 │   │       ├── Chart.yaml
 │   │       ├── values.yaml
 │   │       └── templates/
@@ -573,7 +573,7 @@ strata/
 │
 ├── grafana/
 │   └── dashboards/
-│       └── strata-overview.json
+│       └── ecphoria-overview.json
 │
 ├── tests/
 │   ├── integration/
@@ -594,9 +594,9 @@ strata/
 
 ```python
 # SDK Python — Agent support
-from strata import Strata
+from ecphoria import Ecphoria
 
-db = Strata("localhost:8432")
+db = Ecphoria("localhost:8432")
 
 # 1. Ingestion de l'événement de contact
 db.ingest({
@@ -644,9 +644,9 @@ context = db.query("""
 
 ```python
 # Pipeline de détection de fraude
-from strata import Strata
+from ecphoria import Ecphoria
 
-db = Strata("strata.internal:8432")
+db = Ecphoria("ecphoria.internal:8432")
 
 # Materialized view (créée une fois)
 db.query("""
@@ -707,11 +707,11 @@ def evaluate_transaction(txn):
 # L'utilisateur dans Claude Code / Claude Desktop :
 > "Qu'est-ce qui s'est passé sur le service checkout dans la dernière heure ?"
 
-# Claude interroge Strata via MCP automatiquement :
+# Claude interroge Ecphoria via MCP automatiquement :
 # 1. tools/call → query("SELECT * FROM episodic WHERE ...")
 # 2. tools/call → get_state("sre-agent", "checkout-service")
 
-# Réponse de Claude (avec contexte de Strata) :
+# Réponse de Claude (avec contexte de Ecphoria) :
 "Voici ce qui s'est passé sur checkout dans la dernière heure :
 
 1. 14h32 — Deploy v2.3.1 (source: gitlab)
@@ -731,9 +731,9 @@ dans v2.3.1 avant de retenter le deploy."
 
 ```typescript
 // SDK TypeScript — Chatbot interne avec RAG
-import { Strata } from '@strata/sdk';
+import { Ecphoria } from '@ecphoria/sdk';
 
-const db = new Strata('http://strata:8432');
+const db = new Ecphoria('http://ecphoria:8432');
 
 // Ingestion continue depuis Confluence (webhook)
 app.post('/webhooks/confluence', async (req, res) => {
@@ -749,12 +749,12 @@ app.post('/webhooks/confluence', async (req, res) => {
       author: page.version.by.displayName,
     }
   });
-  // Strata chunk + embed automatiquement
+  // Ecphoria chunk + embed automatiquement
   res.sendStatus(200);
 });
 
-// Chatbot : utilise le proxy LLM de Strata
-const response = await fetch('http://strata:8432/v1/chat/completions', {
+// Chatbot : utilise le proxy LLM de Ecphoria
+const response = await fetch('http://ecphoria:8432/v1/chat/completions', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
@@ -770,7 +770,7 @@ const response = await fetch('http://strata:8432/v1/chat/completions', {
     }
   })
 });
-// → Strata trouve les chunks Confluence pertinents,
+// → Ecphoria trouve les chunks Confluence pertinents,
 //   les injecte dans le prompt, forward à Claude
 ```
 
@@ -785,18 +785,18 @@ const response = await fetch('http://strata:8432/v1/chat/completions', {
      │                │                │
      ▼                ▼                ▼
 ┌──────────────────────────────────────────┐
-│              Strata                     │
+│              Ecphoria                     │
 │  Episodic ◄──── Semantic ◄──── State     │
 │  (events)       (meaning)      (status)  │
 └──────────────────────────────────────────┘
 ```
 
-Chaque agent lit et écrit dans Strata. L'agent d'analyse voit les événements ingérés. L'agent d'action voit les conclusions de l'analyse. Tout est cohérent.
+Chaque agent lit et écrit dans Ecphoria. L'agent d'analyse voit les événements ingérés. L'agent d'action voit les conclusions de l'analyse. Tout est cohérent.
 
-### 5.6 Home Assistant + Strata (domotique intelligente)
+### 5.6 Home Assistant + Ecphoria (domotique intelligente)
 
 ```yaml
-# Strata ingère les événements Home Assistant
+# Ecphoria ingère les événements Home Assistant
 # via webhook ou via MCP bridge
 
 # L'agent IA peut alors :
@@ -805,7 +805,7 @@ Chaque agent lit et écrit dans Strata. L'agent d'analyse voit les événements 
 # - Maintenir l'état de la maison (state)
 
 # Exemple : "Pourquoi il fait froid dans le salon ?"
-# Strata contexte :
+# Ecphoria contexte :
 # - episodic: chauffage éteint il y a 2h (source: home-assistant)
 # - episodic: fenêtre ouverte il y a 45min (source: capteur)
 # - semantic: "le salon est orienté nord, mal isolé"
@@ -820,26 +820,26 @@ Chaque agent lit et écrit dans Strata. L'agent d'analyse voit les événements 
 
 ```bash
 # Minimal — stockage local, embedding OpenAI
-docker run -d --name strata \
+docker run -d --name ecphoria \
   -p 5432:5432 -p 8432:8432 \
-  -v strata-data:/data \
-  -e STRATA_LLM_PROVIDER=openai \
+  -v ecphoria-data:/data \
+  -e ECPHORIA_LLM_PROVIDER=openai \
   -e OPENAI_API_KEY=sk-... \
-  strata/strata:latest
+  ecphoria/ecphoria:latest
 
 # 100% local — embedding Ollama, zéro cloud
-docker run -d --name strata \
+docker run -d --name ecphoria \
   -p 5432:5432 -p 8432:8432 \
-  -v strata-data:/data \
-  -e STRATA_EMBEDDING_PROVIDER=ollama \
-  -e STRATA_EMBEDDING_MODEL=nomic-embed-text \
+  -v ecphoria-data:/data \
+  -e ECPHORIA_EMBEDDING_PROVIDER=ollama \
+  -e ECPHORIA_EMBEDDING_MODEL=nomic-embed-text \
   -e OLLAMA_URL=http://host.docker.internal:11434 \
-  strata/strata:latest
+  ecphoria/ecphoria:latest
 
 # Test immédiat
-psql -h localhost -U strata -d strata \
+psql -h localhost -U ecphoria -d ecphoria \
   -c "SELECT version();"
-# → Strata v0.1.0 (context lake engine)
+# → Ecphoria v0.1.0 (context lake engine)
 ```
 
 ### 6.2 Docker Compose (stack complète)
@@ -847,24 +847,24 @@ psql -h localhost -U strata -d strata \
 ```yaml
 version: '3.8'
 services:
-  strata:
-    image: strata/strata:latest
+  ecphoria:
+    image: ecphoria/ecphoria:latest
     ports: ["5432:5432", "8432:8432"]
     environment:
-      STRATA_STORAGE: minio
-      STRATA_S3_ENDPOINT: http://minio:9000
-      STRATA_S3_BUCKET: strata
-      STRATA_S3_ACCESS_KEY: minioadmin
-      STRATA_S3_SECRET_KEY: minioadmin
-      STRATA_EMBEDDING_PROVIDER: ollama
-      STRATA_EMBEDDING_MODEL: nomic-embed-text
+      ECPHORIA_STORAGE: minio
+      ECPHORIA_S3_ENDPOINT: http://minio:9000
+      ECPHORIA_S3_BUCKET: ecphoria
+      ECPHORIA_S3_ACCESS_KEY: minioadmin
+      ECPHORIA_S3_SECRET_KEY: minioadmin
+      ECPHORIA_EMBEDDING_PROVIDER: ollama
+      ECPHORIA_EMBEDDING_MODEL: nomic-embed-text
       OLLAMA_URL: http://ollama:11434
-      STRATA_MCP_ENABLED: "true"
-      STRATA_LLM_PROXY_ENABLED: "true"
-      STRATA_LLM_PROVIDER: anthropic
+      ECPHORIA_MCP_ENABLED: "true"
+      ECPHORIA_LLM_PROXY_ENABLED: "true"
+      ECPHORIA_LLM_PROVIDER: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     depends_on: [minio, ollama]
-    volumes: [strata-data:/data]
+    volumes: [ecphoria-data:/data]
 
   minio:
     image: minio/minio
@@ -884,14 +884,14 @@ services:
           devices:
             - capabilities: [gpu]  # optionnel
 
-  strata-ui:
-    image: strata/strata-ui:latest
+  ecphoria-ui:
+    image: ecphoria/ecphoria-ui:latest
     ports: ["3000:3000"]
     environment:
-      STRATA_URL: http://strata:8432
+      ECPHORIA_URL: http://ecphoria:8432
 
 volumes:
-  strata-data:
+  ecphoria-data:
   minio-data:
   ollama-data:
 ```
@@ -899,9 +899,9 @@ volumes:
 ### 6.3 Kubernetes (Helm)
 
 ```bash
-helm repo add strata https://charts.strata.dev
-helm install strata strata/strata \
-  --namespace strata --create-namespace \
+helm repo add ecphoria https://charts.ecphoria.dev
+helm install ecphoria ecphoria/ecphoria \
+  --namespace ecphoria --create-namespace \
   --values production-values.yaml
 ```
 
@@ -916,7 +916,7 @@ storage:
   type: s3
   s3:
     endpoint: http://minio.minio:9000
-    bucket: strata-prod
+    bucket: ecphoria-prod
   tiering:
     hot: 7d      # mémoire + SSD
     warm: 30d    # SSD only
@@ -933,14 +933,14 @@ mcp:
   auth: oauth2
   ingress:
     enabled: true
-    host: strata-mcp.internal.example.com
+    host: ecphoria-mcp.internal.example.com
 
 llmProxy:
   enabled: true
   provider: anthropic
   ingress:
     enabled: true
-    host: strata-llm.internal.example.com
+    host: ecphoria-llm.internal.example.com
 
 monitoring:
   prometheus: true
@@ -949,32 +949,32 @@ monitoring:
 ingress:
   enabled: true
   className: nginx
-  host: strata.internal.example.com
+  host: ecphoria.internal.example.com
   tls:
     enabled: true
-    secretName: strata-tls
+    secretName: ecphoria-tls
 
 backup:
   enabled: true
   schedule: "0 2 * * *"
-  target: s3://strata-backups/
+  target: s3://ecphoria-backups/
   retention: 30d
 ```
 
 ### 6.4 Kubernetes Operator (CRD)
 
 ```yaml
-apiVersion: strata.dev/v1alpha1
-kind: StrataCluster
+apiVersion: ecphoria.dev/v1alpha1
+kind: EcphoriaCluster
 metadata:
   name: production
-  namespace: strata
+  namespace: ecphoria
 spec:
   replicas: 3
   version: "0.5.0"
   storage:
     type: s3
-    bucket: strata-prod
+    bucket: ecphoria-prod
     tiering: { hot: 7d, warm: 30d }
   embedding:
     provider: ollama
@@ -999,12 +999,12 @@ spec:
 
 ```sql
 -- Right to access (Article 15)
-SELECT * FROM strata_export('entity_id', 'usr_42');
+SELECT * FROM ecphoria_export('entity_id', 'usr_42');
 -- → Exporte TOUTES les données liées à usr_42 
 --   dans les 3 mémoires en JSON
 
 -- Right to erasure (Article 17)
-CALL strata_erase('entity_id', 'usr_42');
+CALL ecphoria_erase('entity_id', 'usr_42');
 -- → Supprime dans episodic, semantic ET state
 -- → Supprime les vecteurs associés
 -- → Log l'opération dans l'audit trail
@@ -1015,7 +1015,7 @@ ALTER SOURCE 'analytics' SET RETENTION '30 days';
 -- → Les données sont automatiquement purgées
 
 -- Audit trail
-SELECT * FROM strata_audit_log
+SELECT * FROM ecphoria_audit_log
 WHERE entity_id = 'usr_42'
 ORDER BY ts DESC;
 -- → Qui a accédé à quoi, quand, via quel agent
@@ -1094,7 +1094,7 @@ ORDER BY ts DESC;
 
 **Message clé** :
 > Vos agents IA sont aveugles. Ils opèrent sur des données périmées, fragmentées, incohérentes.
-> Strata leur donne la vue. Une source de vérité partagée, temps réel, on-premise.
+> Ecphoria leur donne la vue. Une source de vérité partagée, temps réel, on-premise.
 > Déployez en 30 secondes. Gardez vos données chez vous.
 
 ### 9.2 Personas cibles
@@ -1130,12 +1130,12 @@ ORDER BY ts DESC;
 2. "Context Lake vs Data Lake vs Vector DB — what's the difference?" (éducation)
 3. "Deploy a shared context layer for your AI agents in 30 seconds" (tutorial)
 4. "How we built a PostgreSQL-compatible context lake in Rust" (build in public)
-5. "MCP + Strata: Give Claude access to your company's brain" (integration guide)
+5. "MCP + Ecphoria: Give Claude access to your company's brain" (integration guide)
 6. "GDPR-ready AI infrastructure: why on-premise matters" (positioning EU)
-7. "From Mem0 to Strata: when your agents need more than memory" (comparison)
+7. "From Mem0 to Ecphoria: when your agents need more than memory" (comparison)
 8. "Real-time fraud detection with a context lake" (use case deep dive)
-9. "Self-hosted RAG in 5 minutes: Strata + Ollama + your docs" (tutorial)
-10. "The architecture behind Strata: Rust, DuckDB, and zero-copy vectors" (deep tech)
+9. "Self-hosted RAG in 5 minutes: Ecphoria + Ollama + your docs" (tutorial)
+10. "The architecture behind Ecphoria: Rust, DuckDB, and zero-copy vectors" (deep tech)
 
 #### Réseaux sociaux
 - **Twitter/X** : Build in public, partage de métriques, réponses aux threads sur agent memory
@@ -1152,14 +1152,14 @@ ORDER BY ts DESC;
 ### 9.4 Launch strategy (ProductHunt + HackerNews)
 
 **ProductHunt** :
-- Titre : "Strata — Open source context lake for AI agents"
+- Titre : "Ecphoria — Open source context lake for AI agents"
 - Tagline : "Deploy in 30 seconds. Your agents share the same brain."
 - Jour : Mardi ou mercredi (meilleur traffic)
 - Assets : vidéo demo 60s, GIF d'un `docker run` → requête SQL → résultat
 - Hunters : solliciter un hunter connu dans l'IA
 
 **HackerNews (Show HN)** :
-- Titre : "Show HN: Strata – an open-source context lake for AI agents (Rust, PG-compatible)"
+- Titre : "Show HN: Ecphoria – an open-source context lake for AI agents (Rust, PG-compatible)"
 - Body : problème → solution → demo → GitHub link
 - Timing : publication entre 8h et 10h EST (14h-16h Paris)
 
@@ -1197,15 +1197,15 @@ SEO ("context lake") ──→    SDK integration   ──→    Annual contract
 - Évoque : fondation, ancrage, mémoire, contexte, vérité
 - Domaine .dev ou .io disponible (ou .com)
 - Pas de conflit avec un produit existant majeur
-- Fonctionne comme commande CLI (`strata query ...`)
+- Fonctionne comme commande CLI (`ecphoria query ...`)
 
 ### 10.2 Propositions classées
 
 | Rang | Nom | CLI | Domaines suggérés | Concept | Notes |
 |------|-----|-----|-------------------|---------|-------|
-| 1 | **Strata** | `strata` | strata.dev, stratadb.dev | Couches géologiques — les strates de mémoire. | Élu. Élégant, évoque la profondeur et les couches de données. |
+| 1 | **Ecphoria** | `ecphoria` | ecphoria.dev, ecphoriadb.dev | Couches géologiques — les strates de mémoire. | Élu. Élégant, évoque la profondeur et les couches de données. |
 | 2 | **Bedrock** | `bedrock` | getbedrock.dev, bedrock.run | La couche fondamentale. | ⚠️ Conflit potentiel avec AWS Bedrock. À éviter pour cette raison. |
-| 3 | **Strata** | `strata` | strata.dev, stratadb.dev | Couches géologiques — les strates de mémoire. | Élégant, évoque la profondeur. Vérifier les conflits. |
+| 3 | **Ecphoria** | `ecphoria` | ecphoria.dev, ecphoriadb.dev | Couches géologiques — les strates de mémoire. | Élégant, évoque la profondeur. Vérifier les conflits. |
 | 4 | **Mnemonic** | `mnemo` | mnemonic.dev, mnemo.dev | Art de la mémoire (grec). | Culturel, peut être difficile à épeler. |
 | 5 | **Engram** | `engram` | engram.dev, engramdb.dev | Trace mnésique en neuroscience. | Technique, plaisant pour les nerds. |
 | 6 | **Axon** | `axon` | axondb.dev, axon.run | Le câble du neurone. | Court, punchy. Vérifier les conflits. |
@@ -1221,31 +1221,31 @@ SEO ("context lake") ──→    SDK integration   ──→    Annual contract
 
 ### 10.3 Recommandation
 
-**Strata** est le choix le plus solide :
+**Ecphoria** est le choix le plus solide :
 - "Ground truth" est un concept universellement compris en IA/ML
 - "Grounding" est le terme Bessemer/Forrester pour connecter l'IA à la réalité
-- `ground` en CLI est naturel : `strata query`, `strata ingest`, `strata status`
-- strata.dev est probablement disponible (nouveau TLD, niche)
+- `ground` en CLI est naturel : `ecphoria query`, `ecphoria ingest`, `ecphoria status`
+- ecphoria.dev est probablement disponible (nouveau TLD, niche)
 - Pas de conflit majeur identifié
 - Fonctionne aussi comme verbe : "Ground your agents in reality"
 
 **Alternative forte** : **Engram** si on veut un positionnement plus neuroscience/recherche.
-**Alternative safe** : **Strata** si on veut quelque chose de plus corporate.
+**Alternative safe** : **Ecphoria** si on veut quelque chose de plus corporate.
 
 ### 10.4 Domaines à réserver (en priorité)
 
 ```
-strata.dev       ← principal
-strata.io        ← alternatif
-strata.com       ← si disponible
-getstrata.com    ← fallback
-strata-db.dev      ← protection
+ecphoria.dev       ← principal
+ecphoria.io        ← alternatif
+ecphoria.com       ← si disponible
+getecphoria.com    ← fallback
+ecphoria-db.dev      ← protection
 ```
 
 Et si choix alternatif :
 ```
 engram.dev / engramdb.dev
-strata.dev / stratadb.dev
+ecphoria.dev / ecphoriadb.dev
 mnemos.dev / mnemos.io
 ```
 
@@ -1293,22 +1293,22 @@ mnemos.dev / mnemos.io
   <img src="logo.svg" width="120" />
 </p>
 
-<h1 align="center">Strata</h1>
+<h1 align="center">Ecphoria</h1>
 <p align="center">
   <strong>The open-source context lake for AI agents.</strong><br>
   Deploy in 30 seconds. Scale to millions. Keep your data on your servers.
 </p>
 
 <p align="center">
-  <a href="https://strata.dev/docs">Docs</a> •
-  <a href="https://strata.dev/docs/quickstart">Quickstart</a> •
-  <a href="https://discord.gg/strata">Discord</a> •
-  <a href="https://strata.dev/blog">Blog</a>
+  <a href="https://ecphoria.dev/docs">Docs</a> •
+  <a href="https://ecphoria.dev/docs/quickstart">Quickstart</a> •
+  <a href="https://discord.gg/ecphoria">Discord</a> •
+  <a href="https://ecphoria.dev/blog">Blog</a>
 </p>
 
 ---
 
-Strata is a **context lake** — a unified data layer that gives your AI agents
+Ecphoria is a **context lake** — a unified data layer that gives your AI agents
 a shared, real-time understanding of reality. It combines three types of memory
 in a single engine:
 
@@ -1319,25 +1319,25 @@ in a single engine:
 All three are queried in a single ACID transaction, so every agent sees the same
 coherent snapshot of reality. No stale data. No conflicting views.
 
-## Why Strata?
+## Why Ecphoria?
 
-| Problem | Without Strata | With Strata |
+| Problem | Without Ecphoria | With Ecphoria |
 |---------|------------------|---------------|
 | Agent A and B see different data | ✗ Conflicting decisions | ✓ Same snapshot, same reality |
 | Context is 5 minutes old | ✗ Fraud slips through | ✓ Sub-10ms freshness |
 | Need SQL + vectors + state | ✗ 3 separate databases | ✓ One engine, one query |
-| GDPR compliance | ✗ Data scattered everywhere | ✓ One `CALL strata_erase()` |
+| GDPR compliance | ✗ Data scattered everywhere | ✓ One `CALL ecphoria_erase()` |
 | Connecting to Claude/GPT | ✗ Custom integration code | ✓ Built-in MCP server |
 
 ## Quick Start
 
 ```bash
-docker run -d -p 5432:5432 -p 8432:8432 strata/strata:latest
+docker run -d -p 5432:5432 -p 8432:8432 ecphoria/ecphoria:latest
 ```
 
 ```sql
 -- Connect with any PostgreSQL client
-psql -h localhost -U strata -d strata
+psql -h localhost -U ecphoria -d ecphoria
 
 -- Ingest an event
 INSERT INTO episodic (source, event_type, payload)
@@ -1352,13 +1352,13 @@ SELECT * FROM state WHERE agent_id = 'support-bot';
 
 ## MCP Integration
 
-Strata includes a built-in MCP server. Add it to Claude Desktop, Cursor,
+Ecphoria includes a built-in MCP server. Add it to Claude Desktop, Cursor,
 or any MCP-compatible agent:
 
 ```json
 {
   "mcpServers": {
-    "strata": {
+    "ecphoria": {
       "url": "http://localhost:8432/mcp"
     }
   }
@@ -1381,9 +1381,9 @@ or any MCP-compatible agent:
 
 | Mode | Command | Best for |
 |------|---------|----------|
-| Docker | `docker run strata/strata` | Dev, small prod |
+| Docker | `docker run ecphoria/ecphoria` | Dev, small prod |
 | Compose | `docker compose up` | Teams, medium prod |
-| Kubernetes | `helm install strata` | Enterprise, HA |
+| Kubernetes | `helm install ecphoria` | Enterprise, HA |
 
 ## License
 
@@ -1396,7 +1396,7 @@ Apache 2.0 — Use it however you want.
 
 1. **Le problème** : Les agents IA sont aveugles. Ils opèrent sur des données fragmentées et périmées.
 2. **La taille du marché** : $100B+ investis dans l'IA en 2025. L'infra data pour agents est le prochain goulot d'étranglement (Bessemer, Forrester).
-3. **La solution** : Strata — context lake open source. 3 mémoires unifiées, PostgreSQL-compatible, MCP-natif.
+3. **La solution** : Ecphoria — context lake open source. 3 mémoires unifiées, PostgreSQL-compatible, MCP-natif.
 4. **Le produit** : Demo live — `docker run` → ingestion → requête → résultat en 30 secondes.
 5. **Le marché** : Context lakes validés par Forrester (feb 2026). Tacnode est cloud-only/US. Zéro solution open source.
 6. **Le business model** : Open core (Community gratuit → Pro €49/nœud → Enterprise devis).

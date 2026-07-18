@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use strata_core::{CoreConfig, StrataEngine};
+use ecphoria_core::{CoreConfig, EcphoriaEngine};
 use tower::ServiceExt;
 
 const SECRET: &str = "test-secret-key-256-bits-long!!!";
@@ -37,14 +37,14 @@ async fn authed_router() -> axum::Router {
     config.memory.episodic.db_path = ":memory:".into();
     config.memory.state.db_path = ":memory:".into();
     config.memory.cognition.db_path = ":memory:".into();
-    let engine = Arc::new(StrataEngine::new(config).await.unwrap());
+    let engine = Arc::new(EcphoriaEngine::new(config).await.unwrap());
 
-    let auth = strata_gateway::auth::middleware::AuthState::new(vec![], Some(SECRET.into()), 0);
-    let gw = strata_gateway::server::GatewayConfig {
+    let auth = ecphoria_gateway::auth::middleware::AuthState::new(vec![], Some(SECRET.into()), 0);
+    let gw = ecphoria_gateway::server::GatewayConfig {
         auth_enabled: true,
         ..Default::default()
     };
-    strata_gateway::rest::router_with_engine_and_auth(engine, Some(auth), None, None, &gw)
+    ecphoria_gateway::rest::router_with_engine_and_auth(engine, Some(auth), None, None, &gw)
 }
 
 async fn send(

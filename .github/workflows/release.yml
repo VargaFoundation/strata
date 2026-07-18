@@ -75,19 +75,19 @@ jobs:
         with:
           image: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
           format: spdx-json
-          output-file: strata-sbom.spdx.json
+          output-file: ecphoria-sbom.spdx.json
 
       - name: Attest SBOM with cosign
         env:
           IMAGE: ghcr.io/${{ github.repository }}
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: cosign attest --yes --predicate strata-sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
+        run: cosign attest --yes --predicate ecphoria-sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: strata-sbom
-          path: strata-sbom.spdx.json
+          name: ecphoria-sbom
+          path: ecphoria-sbom.spdx.json
 
   operator-docker:
     name: Build & Push operator image
@@ -110,7 +110,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/${{ github.repository_owner }}/strata-operator
+          images: ghcr.io/${{ github.repository_owner }}/ecphoria-operator
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -128,13 +128,13 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Sign operator image with cosign
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/strata-operator
+          IMAGE: ghcr.io/${{ github.repository_owner }}/ecphoria-operator
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
       - name: Attest operator build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/strata-operator
+          subject-name: ghcr.io/${{ github.repository_owner }}/ecphoria-operator
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
@@ -159,14 +159,14 @@ jobs:
       - name: Download SBOM
         uses: actions/download-artifact@v4
         with:
-          name: strata-sbom
+          name: ecphoria-sbom
         continue-on-error: true
 
       - uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
           files: |
-            strata-sbom.spdx.json
+            ecphoria-sbom.spdx.json
 
   publish-python:
     name: Publish Python SDK (PyPI)
@@ -216,5 +216,5 @@ jobs:
           fi
           npm publish --access public
 
-  # The Go SDK (module github.com/VargaFoundation/strata/sdk/go) is pull-based: `go get` resolves it
+  # The Go SDK (module github.com/VargaFoundation/ecphoria/sdk/go) is pull-based: `go get` resolves it
   # from the pushed tag via the Go module proxy / pkg.go.dev — no publish step needed.

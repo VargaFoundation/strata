@@ -1,15 +1,15 @@
-# LoCoMo head-to-head — Strata vs naive-RAG (vs Mem0)
+# LoCoMo head-to-head — Ecphoria vs naive-RAG (vs Mem0)
 
-Companion to [`benchmarks-locomo.md`](benchmarks-locomo.md). Where that page measures Strata alone,
-this one puts Strata **on the same dataset and the same metrics** as a competitor floor, so the
+Companion to [`benchmarks-locomo.md`](benchmarks-locomo.md). Where that page measures Ecphoria alone,
+this one puts Ecphoria **on the same dataset and the same metrics** as a competitor floor, so the
 numbers are directly comparable instead of cited from different methodologies.
 
-All engines run through one harness (`crates/strata-core/examples/locomo_eval.rs`, toggled by
-`STRATA_BENCH__ENGINE`):
+All engines run through one harness (`crates/ecphoria-core/examples/locomo_eval.rs`, toggled by
+`ECPHORIA_BENCH__ENGINE`):
 
 - **naive-RAG** — pure top-k vector over the raw turns (one per-user index, no BM25/RRF/graph/rerank,
   no fact extraction). The honest RAG floor. Same embeddings (incl. the query/document task prefixes).
-- **Strata** — the full cognition path: hybrid BM25+vector fused by RRF, optional graph expansion,
+- **Ecphoria** — the full cognition path: hybrid BM25+vector fused by RRF, optional graph expansion,
   optional rerank, optional LLM fact extraction.
 - **Mem0** — the competitor, via `ops/bench/mem0_locomo.py` (Ollama-local, same metrics). Not part
   of the run below (needs `pip install mem0ai`); published reference numbers are in the last section.
@@ -26,11 +26,11 @@ Real run · full LoCoMo (snap-research/locomo, 10 conversations / 1986 QA) · Ol
 |---|---|---|---|---|---|---|
 | naive-RAG, **no** prefix | 9.7% | 16.8% | 20.5% | 0.145 | 32.8% | 35 ms |
 | naive-RAG, **+prefix** | 12.5% | 19.8% | **23.0%** | 0.168 | 35.3% | 42 ms |
-| Strata *shared* index + graph, no prefix | 6.2% | 13.4% | 18.5% | 0.114 | 27.3% | 192 ms |
-| Strata *shared* index + graph, +prefix *(old defaults)* | 6.4% | 13.7% | 18.6% | 0.116 | 26.6% | 186 ms |
-| Strata *shared* index, no-graph + **wide-pool** hack | 13.5% | 21.1% | 24.2% | 0.179 | 35.4% | 586 ms |
-| **Strata partitioned index, no-graph, +prefix (the fix)** | 13.2% | 20.8% | **23.6%** | **0.176** | 35.0% | **113 ms** |
-| Strata partitioned index, graph on, +prefix | 6.4% | 13.6% | 18.3% | 0.115 | 26.5% | 178 ms |
+| Ecphoria *shared* index + graph, no prefix | 6.2% | 13.4% | 18.5% | 0.114 | 27.3% | 192 ms |
+| Ecphoria *shared* index + graph, +prefix *(old defaults)* | 6.4% | 13.7% | 18.6% | 0.116 | 26.6% | 186 ms |
+| Ecphoria *shared* index, no-graph + **wide-pool** hack | 13.5% | 21.1% | 24.2% | 0.179 | 35.4% | 586 ms |
+| **Ecphoria partitioned index, no-graph, +prefix (the fix)** | 13.2% | 20.8% | **23.6%** | **0.176** | 35.0% | **113 ms** |
+| Ecphoria partitioned index, graph on, +prefix | 6.4% | 13.6% | 18.3% | 0.115 | 26.5% | 178 ms |
 
 *Partitioned* rows use the shipped `ScopedVectorIndex` (one HNSW partition per exact scope). It
 recovers the recall that the `wide-pool` hack recovered (23.6% vs 24.2%) but at **5× lower latency**
@@ -63,17 +63,17 @@ honest floor for a nomic-768d + haiku pipeline, far below the GPT-4o-class publi
 
 **1. The embedding task-prefix fix is real (+~12% relative recall).** On pure vector, adding the
 model's asymmetric prefixes (`search_query:` / `search_document:` for nomic) moves recall@5 from
-**20.5% → 23.0%** and MRR 0.145 → 0.168. Before the fix, Strata embedded queries and documents
+**20.5% → 23.0%** and MRR 0.145 → 0.168. Before the fix, Ecphoria embedded queries and documents
 identically with no prefix — a known regression for prefix-trained models. Fixed in the
 `EmbeddingProvider::embed_query` / `embed_documents` split.
 
-**2. Strata's *default-style* hybrid+graph stack was net-negative — worse than naive vector, and
+**2. Ecphoria's *default-style* hybrid+graph stack was net-negative — worse than naive vector, and
 prefix-blind.** 18.6% vs naive's 23.0% recall@5, at **4× the latency**. Tellingly, turning the
 prefixes on or off barely moved it (18.6% vs 18.5%): the fusion + graph + importance/recency blend
 were **drowning the vector signal**, so better embeddings couldn't show through.
 
 **3. The deficit is configuration/design, not the algorithm — and it is now fixed.** Partitioning the
-vector index by scope (shipped as `ScopedVectorIndex`) and dropping graph expansion takes Strata to
+vector index by scope (shipped as `ScopedVectorIndex`) and dropping graph expansion takes Ecphoria to
 **23.6%** recall@5 / 0.176 MRR at **113 ms** — the hybrid now **beats** the naive floor (as a good
 hybrid should) and is prefix-sensitive again, at 1/5th the latency of the earlier wide-pool
 workaround (586 ms). The search machinery is fine; its defaults sabotaged it.
@@ -117,14 +117,14 @@ workaround (586 ms). The search machinery is fine; its defaults sabotaged it.
    weights; **default kept 1/1** (equal) since the best ratio is workload-dependent (keyword-heavy
    corpora want BM25 back). The importance/recency blend, by contrast, was **neutral** (see root cause).
 4. **Keep the embedding task-prefix fix** (shipped). A "stronger" model isn't automatically better:
-   **bge-m3 (1024d) tested *worse* than nomic-embed-text** on LoCoMo (strata, 3 conv: recall@5 19.7%
+   **bge-m3 (1024d) tested *worse* than nomic-embed-text** on LoCoMo (ecphoria, 3 conv: recall@5 19.7%
    → 17.7%, and 3× the query latency) — via Ollama bge-m3 is dense-only (loses its sparse+ColBERT
    edge) and is tuned for multilingual/long-doc, whereas LoCoMo is short English turns where nomic +
    its task prefixes fit better. nomic-with-prefixes is the best *local* option here; a hosted
    `text-embedding-3-large` is the untested candidate.
 5. **Cross-encoder reranker — measured positive; the biggest quality lever after the index fix.**
    bge-reranker (`--features rerank-local`) over the top-50 fused candidates: recall@5 **19.7% →
-   23.9%** (+4.2 pts / +21%), R@1 13.1% → 15.9%, MRR 0.160 → 0.190 (nomic, strata, 3 conv). Cost:
+   23.9%** (+4.2 pts / +21%), R@1 13.1% → 15.9%, MRR 0.160 → 0.190 (nomic, ecphoria, 3 conv). Cost:
    query p50 119 ms → **~1.1 s** (CPU cross-encoder over 50 pairs) — the latency/quality trade the
    docs predicted; gate it behind an SLA. Also fixed the feature's build (it pulled system OpenSSL
    via hf-hub's native-tls → switched to rustls) so it works in lean/rootless environments.
@@ -146,20 +146,20 @@ ollama pull nomic-embed-text
 # retrieval metrics, all engines, full dataset:
 ops/bench/run-compare.sh
 # quick smoke (1 conversation, two engines):
-CONVS=1 ENGINES="naive strata" ops/bench/run-compare.sh
+CONVS=1 ENGINES="naive ecphoria" ops/bench/run-compare.sh
 # end-to-end QA accuracy via the Claude CLI judge:
 JUDGE=1 ops/bench/run-compare.sh
 # A/B the prefix fix on an identical binary:
-STRATA_EMBEDDING__QUERY_PREFIX= STRATA_EMBEDDING__DOCUMENT_PREFIX= ...   # forces prefixes off
+ECPHORIA_EMBEDDING__QUERY_PREFIX= ECPHORIA_EMBEDDING__DOCUMENT_PREFIX= ...   # forces prefixes off
 # the recovered config from the table:
-GRAPH=0 STRATA_COGNITION__RETRIEVAL_POOL=800 STRATA_COGNITION__RETRIEVAL_SCAN_CAP=6000 ...
+GRAPH=0 ECPHORIA_COGNITION__RETRIEVAL_POOL=800 ECPHORIA_COGNITION__RETRIEVAL_SCAN_CAP=6000 ...
 ```
 
 ## Mem0 comparison
 
 `ops/bench/mem0_locomo.py` runs Mem0 over the same `locomo.json` and prints the same metrics
 (Ollama-local extraction + embeddings, Claude-CLI judge — no API key). Enable it in the harness with
-`ENGINES="naive strata mem0"` after `pip install mem0ai chromadb`.
+`ENGINES="naive ecphoria mem0"` after `pip install mem0ai chromadb`.
 
 Published LoCoMo references (methodology differs — an **LLM-judge over generated answers**, which is
 far more lenient than the substring recall above, so *not* directly comparable to this page's

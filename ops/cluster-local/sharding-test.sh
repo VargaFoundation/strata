@@ -13,7 +13,7 @@ HOST="${HOST:-127.0.0.1}"
 HTTP_BASE="${HTTP_BASE:-28001}"
 SHARDS="${SHARDS:-2}"
 REPLICAS="${REPLICAS:-3}"
-RUN_DIR="${RUN_DIR:-/tmp/strata-sharded}"
+RUN_DIR="${RUN_DIR:-/tmp/ecphoria-sharded}"
 
 # tenant → api key (kept in sync with run-sharded.sh API_KEYS).
 declare -A KEY=( [alpha]=alpha-key [beta]=beta-key [gamma]=gamma-key [delta]=delta-key )

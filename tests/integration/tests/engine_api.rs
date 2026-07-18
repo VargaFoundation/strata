@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use strata_core::{CoreConfig, StrataEngine};
+use ecphoria_core::{CoreConfig, EcphoriaEngine};
 use tower::ServiceExt;
 
 async fn engine_router() -> axum::Router {
@@ -15,8 +15,8 @@ async fn engine_router() -> axum::Router {
     config.memory.state.db_path = ":memory:".into();
     config.memory.cognition.db_path = ":memory:".into();
     config.runtime.db_path = ":memory:".into();
-    let engine = Arc::new(StrataEngine::new(config).await.unwrap());
-    strata_gateway::rest::router_with_engine(engine)
+    let engine = Arc::new(EcphoriaEngine::new(config).await.unwrap());
+    ecphoria_gateway::rest::router_with_engine(engine)
 }
 
 async fn json_body(resp: axum::response::Response) -> serde_json::Value {
@@ -565,8 +565,8 @@ async fn memory_router() -> axum::Router {
     config.memory.episodic.db_path = ":memory:".into();
     config.memory.state.db_path = ":memory:".into();
     config.memory.cognition.db_path = ":memory:".into();
-    let engine = Arc::new(StrataEngine::new(config).await.unwrap());
-    strata_gateway::rest::router_with_engine(engine)
+    let engine = Arc::new(EcphoriaEngine::new(config).await.unwrap());
+    ecphoria_gateway::rest::router_with_engine(engine)
 }
 
 async fn post_json(app: &axum::Router, uri: &str, body: &str) -> serde_json::Value {

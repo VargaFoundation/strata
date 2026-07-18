@@ -1,0 +1,63 @@
+{{- if .Values.prometheusRule.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "ecphoria.fullname" . }}
+  labels:
+    {{- include "ecphoria.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: ecphoria.rules
+      rules:
+        - alert: EcphoriaNoRaftLeader
+          expr: max(ecphoria_raft_is_leader) == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Ecphoria cluster has no Raft leader"
+            description: "No node reports ecphoria_raft_is_leader=1 for 2m — writes are unavailable."
+        - alert: EcphoriaEmbeddingFailures
+          expr: sum(rate(ecphoria_memory_embed_failures_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ecphoria embeddings are failing"
+            description: "ecphoria_memory_embed_failures_total is increasing — memory search is degrading to BM25-only (check the embedding provider)."
+        - alert: EcphoriaHighReplicationLag
+          expr: max(ecphoria_raft_replication_lag) > 1000
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ecphoria Raft replication lag is high"
+            description: "ecphoria_raft_replication_lag > 1000 for 5m — a follower is falling behind the leader."
+        - alert: EcphoriaRaftLeaderFlapping
+          expr: sum(rate(ecphoria_raft_leader_changes_total[15m])) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ecphoria Raft leadership is flapping"
+            description: "Frequent ecphoria_raft_leader_changes_total over 15m — cluster instability."
+        - alert: EcphoriaHighRequestLatency
+          expr: histogram_quantile(0.99, sum by (le) (rate(ecphoria_rest_request_duration_seconds_bucket[5m]))) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ecphoria REST p99 latency is high"
+            description: "p99 of ecphoria_rest_request_duration_seconds > 1s for 10m."
+        - alert: EcphoriaAgentRunFailures
+          expr: sum(rate(ecphoria_runs_completed_total{status="failed"}[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ecphoria agent runs are failing"
+            description: "ecphoria_runs_completed_total{status=\"failed\"} is increasing over 10m."
+{{- end }}

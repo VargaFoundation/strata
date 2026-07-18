@@ -14,25 +14,25 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
-RUN cargo build --release --bin strata-server && \
-    strip target/release/strata-server
+RUN cargo build --release --bin ecphoria-server && \
+    strip target/release/ecphoria-server
 
 # Stage 4: Runtime — minimal scratch-like image
 FROM alpine:3.21 AS runtime
 RUN apk add --no-cache ca-certificates curl && \
-    adduser -D -u 1000 strata
-COPY --from=builder /app/target/release/strata-server /usr/local/bin/strata-server
+    adduser -D -u 1000 ecphoria
+COPY --from=builder /app/target/release/ecphoria-server /usr/local/bin/ecphoria-server
 
-USER strata
+USER ecphoria
 EXPOSE 5432 8432 9432 9433
 VOLUME ["/data"]
 
-ENV STRATA_STORAGE__DATA_DIR=/data
-ENV STRATA_MEMORY__EPISODIC__DB_PATH=/data/episodic.duckdb
-ENV STRATA_MEMORY__STATE__DB_PATH=/data/state.db
-ENV STRATA_MEMORY__SEMANTIC__INDEX_DIR=/data/vectors
+ENV ECPHORIA_STORAGE__DATA_DIR=/data
+ENV ECPHORIA_MEMORY__EPISODIC__DB_PATH=/data/episodic.duckdb
+ENV ECPHORIA_MEMORY__STATE__DB_PATH=/data/state.db
+ENV ECPHORIA_MEMORY__SEMANTIC__INDEX_DIR=/data/vectors
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s \
     CMD curl -f http://localhost:8432/health || exit 1
 
-ENTRYPOINT ["strata-server"]
+ENTRYPOINT ["ecphoria-server"]

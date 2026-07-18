@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bring up a local **sharded** Strata cluster: SHARDS independent Raft groups, REPLICAS nodes each
+# Bring up a local **sharded** Ecphoria cluster: SHARDS independent Raft groups, REPLICAS nodes each
 # (SHARDS*REPLICAS processes on one host). Each shard forms its own group (its own PEERS + leader);
 # every node knows the whole fleet's shard layout (SHARDS + SHARD_BASE_URLS) so the gateway routes
 # each request to its tenant's owning shard. Auth is ON with per-tenant API keys — with auth off the
@@ -13,9 +13,9 @@
 #   SHARDS=3 REPLICAS=3 ops/cluster-local/run-sharded.sh
 set -euo pipefail
 
-BIN="${STRATA_BIN:-./target/release/strata-server}"
+BIN="${ECPHORIA_BIN:-./target/release/ecphoria-server}"
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
-RUN_DIR="${RUN_DIR:-/tmp/strata-sharded}"
+RUN_DIR="${RUN_DIR:-/tmp/ecphoria-sharded}"
 SHARDS="${SHARDS:-2}"
 REPLICAS="${REPLICAS:-3}"
 HOST="${HOST:-127.0.0.1}"
@@ -32,8 +32,8 @@ RAFT_BASE="${RAFT_BASE:-29101}"
 API_KEYS="${API_KEYS:-alpha-key@alpha:admin,beta-key@beta:admin,gamma-key@gamma:admin,delta-key@delta:admin}"
 
 if [[ ! -x "$BIN" ]]; then
-  echo "strata-server binary not found at '$BIN'." >&2
-  echo "Build it first: cargo build --release --bin strata-server" >&2
+  echo "ecphoria-server binary not found at '$BIN'." >&2
+  echo "Build it first: cargo build --release --bin ecphoria-server" >&2
   exit 1
 fi
 
@@ -67,19 +67,19 @@ for s in $(seq 0 $((SHARDS - 1))); do
     mkdir -p "$nodedir"
     (
       cd "$nodedir"
-      STRATA_CLUSTER__ENABLED=true \
-      STRATA_CLUSTER__NODE_ID="$((r + 1))" \
-      STRATA_CLUSTER__LISTEN="0.0.0.0:${raft}" \
-      STRATA_CLUSTER__PEERS="$peers" \
-      STRATA_CLUSTER__SHARDS="$SHARDS" \
-      STRATA_CLUSTER__SHARD_INDEX="$s" \
-      STRATA_CLUSTER__SHARD_BASE_URLS="$BASE_URLS" \
-      STRATA_GATEWAY__LISTEN="0.0.0.0:${http}" \
-      STRATA_GATEWAY__PG_LISTEN="0.0.0.0:${pg}" \
-      STRATA_GATEWAY__GRPC_LISTEN="0.0.0.0:${grpc}" \
-      STRATA_GATEWAY__AUTH_ENABLED=true \
-      STRATA_GATEWAY__API_KEYS="$API_KEYS" \
-      STRATA_CLUSTER__SECRET="${STRATA_CLUSTER__SECRET:-sharded-dev-secret}" \
+      ECPHORIA_CLUSTER__ENABLED=true \
+      ECPHORIA_CLUSTER__NODE_ID="$((r + 1))" \
+      ECPHORIA_CLUSTER__LISTEN="0.0.0.0:${raft}" \
+      ECPHORIA_CLUSTER__PEERS="$peers" \
+      ECPHORIA_CLUSTER__SHARDS="$SHARDS" \
+      ECPHORIA_CLUSTER__SHARD_INDEX="$s" \
+      ECPHORIA_CLUSTER__SHARD_BASE_URLS="$BASE_URLS" \
+      ECPHORIA_GATEWAY__LISTEN="0.0.0.0:${http}" \
+      ECPHORIA_GATEWAY__PG_LISTEN="0.0.0.0:${pg}" \
+      ECPHORIA_GATEWAY__GRPC_LISTEN="0.0.0.0:${grpc}" \
+      ECPHORIA_GATEWAY__AUTH_ENABLED=true \
+      ECPHORIA_GATEWAY__API_KEYS="$API_KEYS" \
+      ECPHORIA_CLUSTER__SECRET="${ECPHORIA_CLUSTER__SECRET:-sharded-dev-secret}" \
       exec "$BIN" >"$nodedir/server.log" 2>&1
     ) &
     echo "$!" >"$RUN_DIR/shard-$s-node-$r.pid"

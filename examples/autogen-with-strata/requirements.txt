@@ -1,2 +1,0 @@
-pyautogen>=0.2
-strata-client>=0.2.0

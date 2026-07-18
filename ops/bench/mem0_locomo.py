@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Mem0 vs Strata on LoCoMo — an apples-to-apples competitor baseline.
+Mem0 vs Ecphoria on LoCoMo — an apples-to-apples competitor baseline.
 
 Runs **Mem0** over the *same* `locomo.json` that the Rust harness
-(`crates/strata-core/examples/locomo_eval.rs`) consumes, and reports the *same* metrics
+(`crates/ecphoria-core/examples/locomo_eval.rs`) consumes, and reports the *same* metrics
 (recall@{1,3,5}, MRR, and an optional end-to-end QA LLM-judge), so the two numbers are directly
 comparable rather than cited from different methodologies.
 
-Local + free by default, matching the Strata bench's philosophy:
+Local + free by default, matching the Ecphoria bench's philosophy:
   - Mem0's fact extraction (LLM) and embeddings run on **Ollama** (no API key).
   - The QA answerer + judge use the logged-in **`claude` CLI** (`claude -p`, no API key), exactly
     like `ops/bench/run-locomo-claude.sh`.
@@ -131,7 +131,7 @@ def build_memory():
         },
         "vector_store": {
             "provider": "chroma",
-            "config": {"collection_name": "locomo_mem0", "path": "/tmp/strata-bench/mem0_chroma"},
+            "config": {"collection_name": "locomo_mem0", "path": "/tmp/ecphoria-bench/mem0_chroma"},
         },
     }
     return Memory.from_config(config)

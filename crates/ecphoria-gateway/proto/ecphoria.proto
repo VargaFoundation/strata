@@ -1,0 +1,168 @@
+syntax = "proto3";
+
+package ecphoria;
+
+import "google/protobuf/struct.proto";
+
+// Ecphoria Context Lake gRPC Service
+service Ecphoria {
+  // Execute a SQL query
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // Ingest events into episodic memory
+  rpc Ingest(IngestRequest) returns (IngestResponse);
+
+  // Semantic search
+  rpc Search(SearchRequest) returns (SearchResponse);
+
+  // Get agent state
+  rpc GetState(GetStateRequest) returns (GetStateResponse);
+
+  // Set agent state
+  rpc SetState(SetStateRequest) returns (SetStateResponse);
+
+  // Health check
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // ── Memory cognition layer ──
+  rpc AddMemory(AddMemoryRequest) returns (google.protobuf.Struct);
+  rpc SearchMemory(SearchMemoryRequest) returns (MemoryHits);
+  rpc GetMemories(GetMemoriesRequest) returns (MemoryList);
+  rpc DeleteMemory(DeleteMemoryRequest) returns (DeleteMemoryResponse);
+
+  // ── Sessions ──
+  rpc StartSession(StartSessionRequest) returns (SessionResponse);
+  rpc EndSession(EndSessionRequest) returns (SessionResponse);
+  rpc RecallSession(RecallSessionRequest) returns (RecallSessionResponse);
+}
+
+// Scope tuple for the memory cognition layer. The server overrides tenant_id with the caller's
+// authenticated tenant (a client cannot claim another tenant); empty user/agent/session = unscoped.
+message MemoryScope {
+  string user_id = 1;
+  string agent_id = 2;
+  string session_id = 3;
+}
+
+message AddMemoryRequest {
+  string content = 1;
+  MemoryScope scope = 2;
+  optional string subject = 3;
+  optional float importance = 4;
+}
+
+message SearchMemoryRequest {
+  string query = 1;
+  MemoryScope scope = 2;
+  uint32 k = 3;
+}
+
+message MemoryHits {
+  repeated google.protobuf.Struct hits = 1;
+}
+
+message GetMemoriesRequest {
+  MemoryScope scope = 1;
+  uint32 limit = 2;
+}
+
+message MemoryList {
+  repeated google.protobuf.Struct memories = 1;
+}
+
+message DeleteMemoryRequest {
+  string id = 1;
+}
+
+message DeleteMemoryResponse {
+  bool deleted = 1;
+}
+
+message StartSessionRequest {
+  string session_id = 1;
+  string agent_id = 2;
+  optional string parent_session_id = 3;
+}
+
+message EndSessionRequest {
+  string session_id = 1;
+  optional string summary = 2;
+}
+
+message SessionResponse {
+  string session_id = 1;
+  string status = 2;
+}
+
+message RecallSessionRequest {
+  string session_id = 1;
+}
+
+message RecallSessionResponse {
+  repeated google.protobuf.Struct events = 1;
+}
+
+message QueryRequest {
+  string sql = 1;
+}
+
+message QueryResponse {
+  repeated google.protobuf.Struct rows = 1; // Each row as a structured object
+  int64 count = 2;
+}
+
+message IngestRequest {
+  string source = 1;
+  repeated google.protobuf.Struct events = 2; // Each event as a structured object
+}
+
+message IngestResponse {
+  uint64 ingested = 1;
+}
+
+message SearchRequest {
+  string query = 1;
+  repeated float vector = 2;
+  uint32 k = 3;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+}
+
+message SearchResult {
+  string id = 1;
+  string content = 2;
+  float score = 3;
+  google.protobuf.Struct metadata = 4;
+}
+
+message GetStateRequest {
+  string agent_id = 1;
+  string key = 2;
+}
+
+message GetStateResponse {
+  string agent_id = 1;
+  string key = 2;
+  google.protobuf.Value value = 3;
+  uint64 version = 4;
+  bool found = 5;
+}
+
+message SetStateRequest {
+  string agent_id = 1;
+  string key = 2;
+  google.protobuf.Value value = 3;
+}
+
+message SetStateResponse {
+  uint64 version = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+}

@@ -11,7 +11,7 @@ import asyncio
 import logging
 import uuid
 
-from agents.shared import StrataClient
+from agents.shared import EcphoriaClient
 from agents import triage, support_l1, escalation_l2
 
 logging.basicConfig(
@@ -36,7 +36,7 @@ SAMPLE_TICKETS = [
 RUN_DURATION = 30  # seconds
 
 
-async def generate_tickets(client: StrataClient) -> list[str]:
+async def generate_tickets(client: EcphoriaClient) -> list[str]:
     """Ingest sample tickets and return their IDs."""
     ticket_ids = []
 
@@ -57,7 +57,7 @@ async def generate_tickets(client: StrataClient) -> list[str]:
     return ticket_ids
 
 
-async def run_agents(client: StrataClient, duration: int) -> None:
+async def run_agents(client: EcphoriaClient, duration: int) -> None:
     """Run all three agents concurrently for a fixed duration."""
 
     async def with_timeout(coro):
@@ -73,7 +73,7 @@ async def run_agents(client: StrataClient, duration: int) -> None:
     )
 
 
-async def print_summary(client: StrataClient, ticket_ids: list[str]) -> None:
+async def print_summary(client: EcphoriaClient, ticket_ids: list[str]) -> None:
     """Print final status of all tickets."""
     resolved = 0
     escalated = 0
@@ -121,15 +121,15 @@ async def print_summary(client: StrataClient, ticket_ids: list[str]) -> None:
 
 
 async def main() -> None:
-    client = StrataClient()
+    client = EcphoriaClient()
 
     if not await client.health():
-        print("Error: cannot reach Strata. Is it running?")
+        print("Error: cannot reach Ecphoria. Is it running?")
         print("Start it with: docker run -d -p 8432:8432 -p 5432:5432 "
-              "ghcr.io/varga-foundation/strata:latest")
+              "ghcr.io/varga-foundation/ecphoria:latest")
         return
 
-    log.info("Connected to Strata — generating %d sample tickets", len(SAMPLE_TICKETS))
+    log.info("Connected to Ecphoria — generating %d sample tickets", len(SAMPLE_TICKETS))
     ticket_ids = await generate_tickets(client)
 
     log.info("Starting agents for %d seconds...", RUN_DURATION)

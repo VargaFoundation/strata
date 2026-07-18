@@ -1,4 +1,4 @@
-# Strata Explorer (web UI)
+# Ecphoria Explorer (web UI)
 
 > **Looking for the admin console?** The server now ships a full **Admin UI** built in — just open
 > **`http://localhost:8432/ui`** (or `/`). It covers overview/cluster status, memory search+add,
@@ -22,5 +22,5 @@ xdg-open examples/web-ui/index.html
 python3 -m http.server -d examples/web-ui 3000   # then visit http://localhost:3000
 ```
 
-> For browser access, the Strata server's CORS must allow your origin (it's permissive by default
+> For browser access, the Ecphoria server's CORS must allow your origin (it's permissive by default
 > when auth is disabled; set `gateway.cors_origins` when auth is enabled).

@@ -1,5 +1,5 @@
 services:
-  strata:
+  ecphoria:
     build:
       context: .
       dockerfile: Dockerfile
@@ -8,24 +8,24 @@ services:
       - "8432:8432"
     environment:
       # Containers must bind all interfaces for port mapping to work…
-      STRATA_GATEWAY__LISTEN: 0.0.0.0:8432
-      STRATA_GATEWAY__PG_LISTEN: 0.0.0.0:5432
-      STRATA_GATEWAY__GRPC_LISTEN: 0.0.0.0:9432
+      ECPHORIA_GATEWAY__LISTEN: 0.0.0.0:8432
+      ECPHORIA_GATEWAY__PG_LISTEN: 0.0.0.0:5432
+      ECPHORIA_GATEWAY__GRPC_LISTEN: 0.0.0.0:9432
       # …so authentication is mandatory (the server refuses to start otherwise).
-      # Generate a key first:  export STRATA_API_KEY=$(openssl rand -hex 32)
-      STRATA_GATEWAY__AUTH_ENABLED: "true"
-      STRATA_GATEWAY__API_KEYS: "${STRATA_API_KEY:?STRATA_API_KEY is required - generate one with openssl rand -hex 32}"
-      STRATA_STORAGE__DATA_DIR: /data
-      STRATA_STORAGE__ENGINE: s3
-      STRATA_STORAGE__S3__ENDPOINT: http://minio:9000
-      STRATA_STORAGE__S3__BUCKET: strata
-      STRATA_STORAGE__S3__ACCESS_KEY: minioadmin
-      STRATA_STORAGE__S3__SECRET_KEY: minioadmin
-      STRATA_EMBEDDING__PROVIDER: ollama
-      STRATA_EMBEDDING__MODEL: nomic-embed-text
-      STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
+      # Generate a key first:  export ECPHORIA_API_KEY=$(openssl rand -hex 32)
+      ECPHORIA_GATEWAY__AUTH_ENABLED: "true"
+      ECPHORIA_GATEWAY__API_KEYS: "${ECPHORIA_API_KEY:?ECPHORIA_API_KEY is required - generate one with openssl rand -hex 32}"
+      ECPHORIA_STORAGE__DATA_DIR: /data
+      ECPHORIA_STORAGE__ENGINE: s3
+      ECPHORIA_STORAGE__S3__ENDPOINT: http://minio:9000
+      ECPHORIA_STORAGE__S3__BUCKET: ecphoria
+      ECPHORIA_STORAGE__S3__ACCESS_KEY: minioadmin
+      ECPHORIA_STORAGE__S3__SECRET_KEY: minioadmin
+      ECPHORIA_EMBEDDING__PROVIDER: ollama
+      ECPHORIA_EMBEDDING__MODEL: nomic-embed-text
+      ECPHORIA_EMBEDDING__OLLAMA_URL: http://ollama:11434
     volumes:
-      - strata-data:/data
+      - ecphoria-data:/data
     depends_on:
       minio:
         condition: service_healthy
@@ -57,7 +57,7 @@ services:
     entrypoint: >
       /bin/sh -c "
       mc alias set local http://minio:9000 minioadmin minioadmin;
-      mc mb local/strata --ignore-existing;
+      mc mb local/ecphoria --ignore-existing;
       exit 0;
       "
 
@@ -69,6 +69,6 @@ services:
       - ollama-data:/root/.ollama
 
 volumes:
-  strata-data:
+  ecphoria-data:
   minio-data:
   ollama-data:

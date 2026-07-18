@@ -7,16 +7,16 @@ use axum::http::{header, Request, StatusCode};
 use tower::ServiceExt;
 
 fn app() -> axum::Router {
-    strata_gateway::rest::router()
+    ecphoria_gateway::rest::router()
 }
 
 async fn app_with_engine() -> axum::Router {
     let engine = Arc::new(
-        strata_core::StrataEngine::new(strata_core::CoreConfig::default())
+        ecphoria_core::EcphoriaEngine::new(ecphoria_core::CoreConfig::default())
             .await
             .unwrap(),
     );
-    strata_gateway::rest::router_with_engine(engine)
+    ecphoria_gateway::rest::router_with_engine(engine)
 }
 
 #[tokio::test]

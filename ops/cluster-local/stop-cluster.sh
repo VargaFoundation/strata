@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stop the local cluster started by run-cluster.sh (kills each recorded PID).
 set -uo pipefail
-RUN_DIR="${RUN_DIR:-/tmp/strata-cluster}"
+RUN_DIR="${RUN_DIR:-/tmp/ecphoria-cluster}"
 
 shopt -s nullglob
 # Matches both the single-group harness (node-*.pid) and the sharded harness (shard-*-node-*.pid).

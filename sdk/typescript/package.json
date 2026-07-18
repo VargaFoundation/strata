@@ -1,7 +1,7 @@
 {
-  "name": "@strata/client",
+  "name": "@ecphoria/client",
   "version": "0.3.0",
-  "description": "TypeScript/JavaScript client for the Strata context lake",
+  "description": "TypeScript/JavaScript client for the Ecphoria context lake",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -21,7 +21,7 @@
     "prepublishOnly": "npm run build"
   },
   "keywords": [
-    "strata",
+    "ecphoria",
     "ai",
     "agents",
     "context-lake",
@@ -30,10 +30,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/VargaFoundation/strata",
+    "url": "https://github.com/VargaFoundation/ecphoria",
     "directory": "sdk/typescript"
   },
-  "homepage": "https://github.com/VargaFoundation/strata/tree/main/sdk/typescript",
+  "homepage": "https://github.com/VargaFoundation/ecphoria/tree/main/sdk/typescript",
   "devDependencies": {
     "typescript": "^5.4"
   },

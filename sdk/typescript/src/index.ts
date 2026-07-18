@@ -1,5 +1,5 @@
-export { StrataClient } from "./client.js";
-export { StrataError } from "./errors.js";
+export { EcphoriaClient } from "./client.js";
+export { EcphoriaError } from "./errors.js";
 export type {
   BackupResponse,
   ClusterStatus,
@@ -16,6 +16,6 @@ export type {
   SearchResult,
   StateEntry,
   StateSetResponse,
-  StrataApiError,
-  StrataClientOptions,
+  EcphoriaApiError,
+  EcphoriaClientOptions,
 } from "./types.js";

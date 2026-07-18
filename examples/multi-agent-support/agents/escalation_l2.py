@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .shared import POLL_INTERVAL, StrataClient
+from .shared import POLL_INTERVAL, EcphoriaClient
 
 log = logging.getLogger("escalation-l2")
 
 
-async def handle_ticket(client: StrataClient, ticket_id: str, info: dict) -> None:
+async def handle_ticket(client: EcphoriaClient, ticket_id: str, info: dict) -> None:
     # Gather the original ticket.
     original = await client.query(
         f"SELECT ts, payload FROM episodic "
@@ -72,10 +72,10 @@ async def handle_ticket(client: StrataClient, ticket_id: str, info: dict) -> Non
     }])
 
 
-async def run(client: StrataClient | None = None) -> None:
+async def run(client: EcphoriaClient | None = None) -> None:
     own_client = client is None
     if own_client:
-        client = StrataClient()
+        client = EcphoriaClient()
 
     log.info("L2 Escalation agent started — polling for escalated tickets")
     processed: set[str] = set()

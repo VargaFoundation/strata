@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "strata": {
+    "ecphoria": {
       "url": "http://localhost:8432/mcp"
     }
   }

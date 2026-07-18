@@ -1,0 +1,34 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ecphoria.fullname" . }}
+  labels:
+    {{- include "ecphoria.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ecphoria.selectorLabels" . | nindent 6 }}
+  # Ingress only — egress stays open (DNS, embedding provider, S3, cross-shard HTTP).
+  policyTypes:
+    - Ingress
+  ingress:
+    # Intra-fleet pod-to-pod: peers reach each other's HTTP (shard proxy), PG, gRPC and Raft ports.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ecphoria.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 8432 }
+        - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: 9432 }
+        - { protocol: TCP, port: 9433 }
+    # HTTP API (:8432) from external sources — restricted to `httpFrom`, or from anywhere if empty.
+    # PG/gRPC/Raft are deliberately NOT listed here, so they are only reachable intra-fleet.
+    - ports:
+        - { protocol: TCP, port: 8432 }
+      {{- with .Values.networkPolicy.httpFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,4 +1,4 @@
-import { StrataError } from "./errors.js";
+import { EcphoriaError } from "./errors.js";
 import type {
   BackupResponse,
   ClusterStatus,
@@ -14,18 +14,18 @@ import type {
   SearchResult,
   StateEntry,
   StateSetResponse,
-  StrataApiError,
-  StrataClientOptions,
+  EcphoriaApiError,
+  EcphoriaClientOptions,
 } from "./types.js";
 
 /**
- * Strata client — fetch-based HTTP client for the Strata context lake API.
+ * Ecphoria client — fetch-based HTTP client for the Ecphoria context lake API.
  *
  * Zero runtime dependencies. Uses the global `fetch` API (Node 18+, Deno, Bun, browsers).
  *
  * @example
  * ```ts
- * const client = new StrataClient({ url: "http://localhost:8432" });
+ * const client = new EcphoriaClient({ url: "http://localhost:8432" });
  *
  * // Ingest events
  * const count = await client.ingest("my-app", [
@@ -43,12 +43,12 @@ import type {
  * const entry = await client.stateGet("bot-1", "mood");
  * ```
  */
-export class StrataClient {
+export class EcphoriaClient {
   private readonly baseUrl: string;
   private readonly headers: Record<string, string>;
   private readonly timeout: number;
 
-  constructor(options: StrataClientOptions = {}) {
+  constructor(options: EcphoriaClientOptions = {}) {
     this.baseUrl = (options.url ?? "http://localhost:8432").replace(/\/+$/, "");
     this.headers = { "Content-Type": "application/json" };
     if (options.apiKey) {
@@ -73,19 +73,19 @@ export class StrataClient {
       });
 
       if (!resp.ok) {
-        let apiErr: StrataApiError | undefined;
+        let apiErr: EcphoriaApiError | undefined;
         try {
           const json = await resp.json();
           if (json && typeof json === "object" && "message" in json) {
-            apiErr = json as StrataApiError;
+            apiErr = json as EcphoriaApiError;
           }
         } catch {
           // not JSON
         }
         if (apiErr) {
-          throw StrataError.fromApiError(apiErr, resp.status);
+          throw EcphoriaError.fromApiError(apiErr, resp.status);
         }
-        throw new StrataError(
+        throw new EcphoriaError(
           `HTTP ${resp.status}: ${resp.statusText}`,
           "HTTP_ERROR",
           resp.status,
@@ -121,7 +121,7 @@ export class StrataClient {
         signal: controller.signal,
       });
       if (!resp.ok) {
-        throw new StrataError(
+        throw new EcphoriaError(
           `HTTP ${resp.status}: ${resp.statusText}`,
           "HTTP_ERROR",
           resp.status,
@@ -199,7 +199,7 @@ export class StrataClient {
       });
       if (resp.status === 404) return null;
       if (!resp.ok) {
-        throw new StrataError(
+        throw new EcphoriaError(
           `HTTP ${resp.status}: ${resp.statusText}`,
           "HTTP_ERROR",
           resp.status,
@@ -305,7 +305,7 @@ export class StrataClient {
       const resp = await fetch(url, { headers: this.headers, signal: controller.signal });
       if (resp.status === 404) return null;
       if (!resp.ok) {
-        throw new StrataError(
+        throw new EcphoriaError(
           `HTTP ${resp.status}: ${resp.statusText}`,
           "HTTP_ERROR",
           resp.status,
@@ -338,7 +338,7 @@ export class StrataClient {
       });
       if (resp.status === 404) return false;
       if (!resp.ok) {
-        throw new StrataError(
+        throw new EcphoriaError(
           `HTTP ${resp.status}: ${resp.statusText}`,
           "HTTP_ERROR",
           resp.status,

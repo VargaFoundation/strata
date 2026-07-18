@@ -1,31 +1,31 @@
-# Render.com Blueprint — one-click self-hosted Strata.
+# Render.com Blueprint — one-click self-hosted Ecphoria.
 #
 # Use: in the Render dashboard, "New +" → "Blueprint" → point at this repo (or use a
-# "Deploy to Render" button). Strata runs as a single container with a persistent disk for /data.
+# "Deploy to Render" button). Ecphoria runs as a single container with a persistent disk for /data.
 #
-# Note: Render routes to the port your service binds. Strata listens on 8432 below; if your Render
-# setup injects $PORT, set STRATA_GATEWAY__LISTEN to bind it instead.
+# Note: Render routes to the port your service binds. Ecphoria listens on 8432 below; if your Render
+# setup injects $PORT, set ECPHORIA_GATEWAY__LISTEN to bind it instead.
 services:
   - type: web
-    name: strata
+    name: ecphoria
     runtime: image
     image:
-      url: ghcr.io/vargafoundation/strata:latest
+      url: ghcr.io/vargafoundation/ecphoria:latest
     plan: starter
     healthCheckPath: /health
     envVars:
-      - key: STRATA_GATEWAY__LISTEN
+      - key: ECPHORIA_GATEWAY__LISTEN
         value: 0.0.0.0:8432
       # Render is a PUBLIC endpoint — authentication is mandatory. Render generates the key;
-      # read it in the dashboard (Environment → STRATA_GATEWAY__API_KEYS) and send it as
+      # read it in the dashboard (Environment → ECPHORIA_GATEWAY__API_KEYS) and send it as
       # `Authorization: Bearer <key>`.
-      - key: STRATA_GATEWAY__AUTH_ENABLED
+      - key: ECPHORIA_GATEWAY__AUTH_ENABLED
         value: "true"
-      - key: STRATA_GATEWAY__API_KEYS
+      - key: ECPHORIA_GATEWAY__API_KEYS
         generateValue: true
-      - key: STRATA_STORAGE__DATA_DIR
+      - key: ECPHORIA_STORAGE__DATA_DIR
         value: /data
     disk:
-      name: strata-data
+      name: ecphoria-data
       mountPath: /data
       sizeGB: 1

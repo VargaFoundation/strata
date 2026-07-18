@@ -1,8 +1,8 @@
 """
-Ingest documents into Strata for the RAG pipeline.
+Ingest documents into Ecphoria for the RAG pipeline.
 
 Reads .txt and .md files from a directory, splits them into paragraph-based
-chunks, and ingests each chunk via the Strata REST API.
+chunks, and ingests each chunk via the Ecphoria REST API.
 
 Usage:
     python ingest.py                     # Ingest ./sample_docs
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import httpx
 
-STRATA_URL = os.environ.get("STRATA_URL", "http://localhost:8432")
+ECPHORIA_URL = os.environ.get("ECPHORIA_URL", "http://localhost:8432")
 SOURCE = "langchain-rag"
 MIN_CHUNK_LENGTH = 50  # Skip very short chunks.
 
@@ -49,7 +49,7 @@ def split_into_chunks(text: str) -> list[str]:
 
 
 def ingest_file(client: httpx.Client, filepath: Path) -> int:
-    """Read a file, split into chunks, and ingest into Strata."""
+    """Read a file, split into chunks, and ingest into Ecphoria."""
     text = filepath.read_text(encoding="utf-8")
     chunks = split_into_chunks(text)
 
@@ -70,7 +70,7 @@ def ingest_file(client: httpx.Client, filepath: Path) -> int:
         })
 
     resp = client.post(
-        f"{STRATA_URL}/api/v1/ingest",
+        f"{ECPHORIA_URL}/api/v1/ingest",
         json={"source": SOURCE, "events": events},
         timeout=30.0,
     )
@@ -96,14 +96,14 @@ def main() -> None:
         print(f"No .txt or .md files found in {docs_dir}")
         sys.exit(1)
 
-    print(f"Ingesting {len(files)} files from {docs_dir} into Strata ({STRATA_URL})\n")
+    print(f"Ingesting {len(files)} files from {docs_dir} into Ecphoria ({ECPHORIA_URL})\n")
 
     with httpx.Client() as client:
         # Health check.
         try:
-            client.get(f"{STRATA_URL}/health").raise_for_status()
+            client.get(f"{ECPHORIA_URL}/health").raise_for_status()
         except httpx.ConnectError:
-            print(f"Error: cannot reach Strata at {STRATA_URL}")
+            print(f"Error: cannot reach Ecphoria at {ECPHORIA_URL}")
             sys.exit(1)
 
         total = 0

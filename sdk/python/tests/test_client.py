@@ -1,4 +1,4 @@
-"""Tests for the Strata Python client — no network, via an in-memory httpx MockTransport."""
+"""Tests for the Ecphoria Python client — no network, via an in-memory httpx MockTransport."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import json
 
 import httpx
 
-from strata.client import StrataClient
+from ecphoria.client import EcphoriaClient
 
 
-def make_client(handler) -> StrataClient:
-    """A StrataClient whose transport is an in-memory mock (no sockets)."""
-    client = StrataClient("http://test")
+def make_client(handler) -> EcphoriaClient:
+    """A EcphoriaClient whose transport is an in-memory mock (no sockets)."""
+    client = EcphoriaClient("http://test")
     client._client = httpx.AsyncClient(
         base_url="http://test", transport=httpx.MockTransport(handler)
     )

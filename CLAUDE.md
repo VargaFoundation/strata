@@ -1,8 +1,8 @@
-# Strata — Claude Code Agent Guide
+# Ecphoria — Claude Code Agent Guide
 
-## What is Strata?
+## What is Ecphoria?
 
-Strata is an open-source **agentic memory platform** — a single Rust binary that gives AI agents a
+Ecphoria is an open-source **agentic memory platform** — a single Rust binary that gives AI agents a
 durable, HA memory **and runs the agents on top of it**. It has three layers: a **memory substrate**
 (episodic events, semantic embeddings, live key-value state, and a bi-temporal cognition/graph layer
 with hybrid retrieval), an **agent runtime** (durable runs, an LLM↔tool driver, HITL approvals,
@@ -14,7 +14,7 @@ See `docs/architecture.md` for the detailed, current architecture diagram.
 
 ## Architecture Overview
 
-Single binary (`strata-server`) with embedded DuckDB (analytics), USearch (vector HNSW),
+Single binary (`ecphoria-server`) with embedded DuckDB (analytics), USearch (vector HNSW),
 and SQLite B-tree (state KV). Exposes PostgreSQL wire protocol on port 5432,
 HTTP (REST + MCP + LLM proxy + Prometheus metrics) on port 8432, gRPC on port 9432,
 and Raft inter-node RPC on port 9433.
@@ -24,11 +24,11 @@ and Raft inter-node RPC on port 9433.
 ```
 Cargo.toml                 Workspace root
 ├── crates/
-│   ├── strata-core/       Core engine: memories, query, storage, ingest, embedding
-│   ├── strata-gateway/    Protocol layer: pg_wire, REST, gRPC, MCP, LLM proxy, auth, cluster routes
-│   ├── strata-cluster/    Distributed: Raft consensus (openraft), replication, coordination
-│   └── strata-cli/        CLI admin tool (binary: `strata`)
-├── strata-server/         Main binary: `strata-server`
+│   ├── ecphoria-core/       Core engine: memories, query, storage, ingest, embedding
+│   ├── ecphoria-gateway/    Protocol layer: pg_wire, REST, gRPC, MCP, LLM proxy, auth, cluster routes
+│   ├── ecphoria-cluster/    Distributed: Raft consensus (openraft), replication, coordination
+│   └── ecphoria-cli/        CLI admin tool (binary: `ecphoria`)
+├── ecphoria-server/         Main binary: `ecphoria-server`
 ├── deploy/                Helm chart, Docker Compose cluster config
 ├── tests/                 Integration tests
 └── docs/                  Documentation
@@ -37,13 +37,13 @@ Cargo.toml                 Workspace root
 ## Crate Dependency Graph
 
 ```
-strata-server (bin)
-  ├── strata-gateway → strata-core, strata-cluster
-  ├── strata-cluster → strata-core
-  └── strata-core
+ecphoria-server (bin)
+  ├── ecphoria-gateway → ecphoria-core, ecphoria-cluster
+  ├── ecphoria-cluster → ecphoria-core
+  └── ecphoria-core
 
-strata-cli (bin)
-  └── strata-core (shared types only; talks to server via HTTP)
+ecphoria-cli (bin)
+  └── ecphoria-core (shared types only; talks to server via HTTP)
 ```
 
 **Rule**: dependencies go DOWN. Core has zero knowledge of gateway or cluster.
@@ -56,10 +56,10 @@ cargo fmt --all                                         # Format
 cargo fmt --all -- --check                              # Check format (CI)
 cargo clippy --workspace --all-targets -- -D warnings   # Lint
 cargo test --workspace                                  # All tests (~474 tests)
-cargo test -p strata-core                               # Single crate tests
+cargo test -p ecphoria-core                               # Single crate tests
 cargo build --release                                   # Release build
-cargo run --bin strata-server                           # Run server
-cargo run --bin strata -- status                        # Run CLI
+cargo run --bin ecphoria-server                           # Run server
+cargo run --bin ecphoria -- status                        # Run CLI
 ```
 
 ## Coding Conventions
@@ -72,8 +72,8 @@ cargo run --bin strata -- status                        # Run CLI
   Levels: error (broken), warn (degraded), info (lifecycle), debug (flow), trace (data).
 - **Metrics**: `metrics` crate with Prometheus exporter. Record counters and histograms
   at key operations (ingest, query, search). Exposed at `/metrics`.
-- **Configuration**: `serde` + TOML deserialization. Env var overrides via `STRATA_` prefix.
-  Nested keys use double underscore: `STRATA_STORAGE__ENGINE=s3`.
+- **Configuration**: `serde` + TOML deserialization. Env var overrides via `ECPHORIA_` prefix.
+  Nested keys use double underscore: `ECPHORIA_STORAGE__ENGINE=s3`.
 - **Testing**: Unit tests in `#[cfg(test)] mod tests` at bottom of each file.
   Integration tests in `tests/` directory. Use `#[tokio::test]` for async tests.
 - **Naming**: snake_case for functions/variables, PascalCase for types, SCREAMING_SNAKE for constants.
@@ -82,11 +82,11 @@ cargo run --bin strata -- status                        # Run CLI
 ## Adding a New Feature
 
 1. Identify which crate owns the feature (core engine vs protocol vs cluster).
-2. If touching the public API of `strata-core`, update both core and gateway.
+2. If touching the public API of `ecphoria-core`, update both core and gateway.
 3. Add types/structs in a new module or extend existing module.
 4. Write unit tests first (`cargo test -p <crate>`).
-5. If adding an API endpoint, add it in `strata-gateway/src/rest/` and document the route.
-6. If adding a CLI command, add it in `strata-cli/src/commands/`.
+5. If adding an API endpoint, add it in `ecphoria-gateway/src/rest/` and document the route.
+6. If adding a CLI command, add it in `ecphoria-cli/src/commands/`.
 7. Run `cargo clippy` and `cargo fmt` before considering work done.
 
 ## Key Dependencies
@@ -110,17 +110,17 @@ cargo run --bin strata -- status                        # Run CLI
 
 ## Environment Variables
 
-All prefixed with `STRATA_`. Nested keys use `__`. Examples:
-- `STRATA_STORAGE__DATA_DIR` — data directory (default: `./data`)
-- `STRATA_STORAGE__ENGINE` — `local` or `s3`
-- `STRATA_GATEWAY__LISTEN` — HTTP listen address (default: `0.0.0.0:8432`)
-- `STRATA_GATEWAY__PG_LISTEN` — PG wire listen address (default: `0.0.0.0:5432`)
-- `STRATA_GATEWAY__AUTH_ENABLED` — enable API key authentication
-- `STRATA_EMBEDDING__PROVIDER` — `ollama` or `openai`
-- `STRATA_EMBEDDING__OLLAMA_URL` — Ollama URL (default: `http://localhost:11434`)
-- `STRATA_CLUSTER__ENABLED` — enable Raft cluster mode
-- `STRATA_CLUSTER__NODE_ID` — this node's Raft ID
-- `STRATA_CLUSTER__PEERS` — comma-separated peer addresses
+All prefixed with `ECPHORIA_`. Nested keys use `__`. Examples:
+- `ECPHORIA_STORAGE__DATA_DIR` — data directory (default: `./data`)
+- `ECPHORIA_STORAGE__ENGINE` — `local` or `s3`
+- `ECPHORIA_GATEWAY__LISTEN` — HTTP listen address (default: `0.0.0.0:8432`)
+- `ECPHORIA_GATEWAY__PG_LISTEN` — PG wire listen address (default: `0.0.0.0:5432`)
+- `ECPHORIA_GATEWAY__AUTH_ENABLED` — enable API key authentication
+- `ECPHORIA_EMBEDDING__PROVIDER` — `ollama` or `openai`
+- `ECPHORIA_EMBEDDING__OLLAMA_URL` — Ollama URL (default: `http://localhost:11434`)
+- `ECPHORIA_CLUSTER__ENABLED` — enable Raft cluster mode
+- `ECPHORIA_CLUSTER__NODE_ID` — this node's Raft ID
+- `ECPHORIA_CLUSTER__PEERS` — comma-separated peer addresses
 
 ## Implementation Status
 
@@ -130,7 +130,7 @@ All prefixed with `STRATA_`. Nested keys use `__`. Examples:
 | **SemanticStore** | Working | USearch HNSW index, upsert/search/delete, cosine similarity, persistent save/load, memory-efficient (EntryMetadata without vector duplication) |
 | **StateStore** | Working | rusqlite + DashMap hot cache, CRUD + compare-and-swap, race-safe cache population |
 | **IngestPipeline** | Working | Auto-embed via EmbeddingProvider (batched by config.batch_size), SQL injection protection (sqlparser whitelist) |
-| **StrataEngine** | Working | Wires subsystems, async query_sql with spawn_blocking + timeout, configurable max_rows pagination |
+| **EcphoriaEngine** | Working | Wires subsystems, async query_sql with spawn_blocking + timeout, configurable max_rows pagination |
 | **REST API** | Working | Health, query, ingest, search, state, webhook endpoints with auth middleware and Prometheus metrics |
 | **HTTP Server** | Working | axum with graceful shutdown, 30s request timeout, CORS, tracing |
 | **PG wire protocol** | Working | pgwire SimpleQuery+ExtendedQuery, routes SQL to DuckDB, connection limit (Semaphore) |
@@ -143,7 +143,7 @@ All prefixed with `STRATA_`. Nested keys use `__`. Examples:
 | **Config loading** | Working | TOML + env vars layered |
 | **S3 Storage** | Working | aws-sdk-s3, put/get/delete/list, MinIO-compatible |
 | **MaterializedViews** | Working | DuckDB CREATE TABLE AS, refresh, drop, list, SQL-injection-safe |
-| **gRPC** | Working | tonic, proto/strata.proto, Query/Ingest/Search/State/Health RPCs |
+| **gRPC** | Working | tonic, proto/ecphoria.proto, Query/Ingest/Search/State/Health RPCs |
 | **Webhook normalizers** | Working | GitHub, Sentry, Slack, PagerDuty + generic |
 | **Raft consensus** | Working | openraft 0.9, TypeConfig, in-memory MemStore, HTTP network transport |
 | **ClusterCoordinator** | Working | Raft lifecycle, client_write, leader detection, single-node init, graceful shutdown |
@@ -170,10 +170,10 @@ All prefixed with `STRATA_`. Nested keys use `__`. Examples:
 
 Each crate is designed for independent development by different agents:
 
-- **strata-core**: No network dependencies for unit tests. Mock storage and embedding.
-- **strata-gateway**: Depends on core + cluster via struct interfaces. Can mock engine for testing.
-- **strata-cluster**: Depends on core. Can be tested with in-memory Raft (single-node).
-- **strata-cli**: Pure HTTP client — test against mock HTTP server.
-- **strata-server**: Thin wiring layer, minimal logic.
+- **ecphoria-core**: No network dependencies for unit tests. Mock storage and embedding.
+- **ecphoria-gateway**: Depends on core + cluster via struct interfaces. Can mock engine for testing.
+- **ecphoria-cluster**: Depends on core. Can be tested with in-memory Raft (single-node).
+- **ecphoria-cli**: Pure HTTP client — test against mock HTTP server.
+- **ecphoria-server**: Thin wiring layer, minimal logic.
 
 When working on a crate, read that crate's `CLAUDE.md` for specific guidance.

@@ -1,6 +1,6 @@
 # Getting Started
 
-Get Strata running in under a minute.
+Get Ecphoria running in under a minute.
 
 ## Prerequisites
 
@@ -10,11 +10,11 @@ Get Strata running in under a minute.
 ## Quick Start with Docker
 
 ```bash
-docker run -d --name strata \
+docker run -d --name ecphoria \
   -p 5432:5432 -p 8432:8432 \
-  -v strata-data:/data \
-  -e STRATA_MEMORY__EPISODIC__DB_PATH=/data/episodic.duckdb \
-  ghcr.io/vargafoundation/strata:latest
+  -v ecphoria-data:/data \
+  -e ECPHORIA_MEMORY__EPISODIC__DB_PATH=/data/episodic.duckdb \
+  ghcr.io/vargafoundation/ecphoria:latest
 ```
 
 Verify it's running:
@@ -58,20 +58,20 @@ curl -X POST http://localhost:8432/api/v1/ingest \
 For a complete dev environment with S3-compatible storage and local embeddings:
 
 ```bash
-git clone https://github.com/VargaFoundation/strata.git
-cd strata
+git clone https://github.com/VargaFoundation/ecphoria.git
+cd ecphoria
 docker compose up -d
 ```
 
 This starts:
-- **Strata** on ports 5432 (PG wire) and 8432 (HTTP)
+- **Ecphoria** on ports 5432 (PG wire) and 8432 (HTTP)
 - **MinIO** on port 9000 (S3 API) and 9001 (console)
 - **Ollama** on port 11434 (embedding model)
 
 Pull the embedding model on first run:
 
 ```bash
-docker exec strata-ollama-1 ollama pull nomic-embed-text
+docker exec ecphoria-ollama-1 ollama pull nomic-embed-text
 ```
 
 Events ingested via `/api/v1/ingest` are now automatically embedded and searchable via `/api/v1/search`.
@@ -93,36 +93,36 @@ curl http://localhost:8432/cluster/status
 
 All three nodes share the same data via Raft consensus. Reads are served by any node; writes go through the leader.
 
-For Kubernetes deployment, see the [Helm chart](../deploy/helm/strata/):
+For Kubernetes deployment, see the [Helm chart](../deploy/helm/ecphoria/):
 
 ```bash
-helm install strata deploy/helm/strata/ --set replicaCount=3
+helm install ecphoria deploy/helm/ecphoria/ --set replicaCount=3
 ```
 
 ## Build from Source
 
 ```bash
-git clone https://github.com/VargaFoundation/strata.git
-cd strata
+git clone https://github.com/VargaFoundation/ecphoria.git
+cd ecphoria
 cargo build --release
 ```
 
 Run the server:
 
 ```bash
-./target/release/strata-server
+./target/release/ecphoria-server
 ```
 
-The server reads configuration from `strata.toml` and environment variables prefixed with `STRATA_`.
+The server reads configuration from `ecphoria.toml` and environment variables prefixed with `ECPHORIA_`.
 
 ## MCP Integration
 
-Strata includes a built-in MCP server. Add to your MCP client configuration:
+Ecphoria includes a built-in MCP server. Add to your MCP client configuration:
 
 ```json
 {
   "mcpServers": {
-    "strata": {
+    "ecphoria": {
       "url": "http://localhost:8432/mcp"
     }
   }
@@ -130,7 +130,7 @@ Strata includes a built-in MCP server. Add to your MCP client configuration:
 ```
 
 Available MCP tools:
-- `query` — Execute SQL against Strata
+- `query` — Execute SQL against Ecphoria
 - `ingest` — Ingest events into episodic memory
 - `search` — Semantic search across stored knowledge
 - `get_state` / `set_state` — Read/write agent state
@@ -138,53 +138,53 @@ Available MCP tools:
 
 ## CLI Usage
 
-The `strata` CLI communicates with the server over HTTP:
+The `ecphoria` CLI communicates with the server over HTTP:
 
 ```bash
 # Check server status
-strata status
+ecphoria status
 
 # Execute a SQL query
-strata query "SELECT count(*) FROM episodic"
+ecphoria query "SELECT count(*) FROM episodic"
 
 # Ingest from a file
-strata ingest --source my-app --file events.json
+ecphoria ingest --source my-app --file events.json
 ```
 
-Set `STRATA_URL` to point at a remote server:
+Set `ECPHORIA_URL` to point at a remote server:
 
 ```bash
-export STRATA_URL=http://strata.internal:8432
-strata status
+export ECPHORIA_URL=http://ecphoria.internal:8432
+ecphoria status
 ```
 
 ## Monitoring
 
-Strata exposes Prometheus-compatible metrics:
+Ecphoria exposes Prometheus-compatible metrics:
 
 ```bash
 curl http://localhost:8432/metrics
 ```
 
 Key metrics:
-- `strata_episodic_events_ingested_total` — total events ingested
-- `strata_episodic_queries_total` — total queries executed
-- `strata_episodic_append_duration_seconds` — ingest latency
-- `strata_episodic_query_duration_seconds` — query latency
+- `ecphoria_episodic_events_ingested_total` — total events ingested
+- `ecphoria_episodic_queries_total` — total queries executed
+- `ecphoria_episodic_append_duration_seconds` — ingest latency
+- `ecphoria_episodic_query_duration_seconds` — query latency
 
 ## Configuration
 
-Strata loads configuration in this order (later sources override earlier):
+Ecphoria loads configuration in this order (later sources override earlier):
 
 1. Built-in defaults
-2. `strata.toml` (in working directory)
-3. Environment variables with `STRATA_` prefix
+2. `ecphoria.toml` (in working directory)
+3. Environment variables with `ECPHORIA_` prefix
 
 See [deployment.md](deployment.md) for the full configuration reference.
 
 ## Next Steps
 
-- [Architecture](architecture.md) — understand Strata's internals
+- [Architecture](architecture.md) — understand Ecphoria's internals
 - [API Reference](api-reference.md) — full REST, PG wire, MCP, and cluster documentation
 - [Deployment](deployment.md) — production deployment, Kubernetes Helm chart, and configuration
-- [Contributing](contributing.md) — how to contribute to Strata
+- [Contributing](contributing.md) — how to contribute to Ecphoria

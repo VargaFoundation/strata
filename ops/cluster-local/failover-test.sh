@@ -7,7 +7,7 @@ set -euo pipefail
 HOST="${HOST:-127.0.0.1}"
 HTTP_BASE="${HTTP_BASE:-18001}"
 NODES="${NODES:-3}"
-RUN_DIR="${RUN_DIR:-/tmp/strata-cluster}"
+RUN_DIR="${RUN_DIR:-/tmp/ecphoria-cluster}"
 
 port_of() { echo $((HTTP_BASE + $1 - 1)); }
 status_of() { curl -fsS --max-time 2 "http://${HOST}:$(port_of "$1")/cluster/status" 2>/dev/null || true; }

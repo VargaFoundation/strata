@@ -1,21 +1,21 @@
 # Security & Hardening
 
-This guide covers Strata's security model and the knobs to harden a deployment. Strata is built
+This guide covers Ecphoria's security model and the knobs to harden a deployment. Ecphoria is built
 for authorized, self-hosted use. It is **secure by default in the one way that matters most**: it
 **refuses to start unauthenticated on a non-loopback interface** (bind loopback, enable auth, or set
 `gateway.allow_insecure=true` to accept the risk explicitly). See [threat-model.md](threat-model.md)
-for the trust boundaries and the guarantees Strata does / does not make; **production deployments
+for the trust boundaries and the guarantees Ecphoria does / does not make; **production deployments
 must still enable the controls below.**
 
 ## Threat model in one line
 
-Strata holds an agent's memory (events, vectors, state, distilled memories) for one or many
+Ecphoria holds an agent's memory (events, vectors, state, distilled memories) for one or many
 tenants. The assets to protect are: (1) per-tenant data confidentiality/integrity, (2) the Raft
 cluster's integrity, (3) secrets (JWT/API keys, provider keys).
 
 ## Authentication & authorization
 
-- **Enable auth** (`gateway.auth_enabled = true`). Strata then requires a Bearer token on
+- **Enable auth** (`gateway.auth_enabled = true`). Ecphoria then requires a Bearer token on
   `/api/v1/*`, `/mcp`, and `/v1/chat/completions`. It supports **API keys**, **JWT (HS256)**, and
   **OIDC (RS256/JWKS)**, with RBAC roles (admin/writer/reader/agent).
 - **RBAC is enforced on both REST and gRPC.** A Reader token may read but not write on either
@@ -39,7 +39,7 @@ cluster's integrity, (3) secrets (JWT/API keys, provider keys).
   password step, dev only). Because the password crosses the wire, **enable TLS** (`[gateway.pg_tls]`
   `cert_path`/`key_path`) or keep :5432 on a private subnet / NetworkPolicy. Generate a dev cert with
   `scripts/gen-pg-tls.sh`; in production use a CA-issued cert (cert-manager) and **rotate** it —
-  Strata reads the cert at startup, so rotation is a rolling-restart concern: cert-manager renews the
+  Ecphoria reads the cert at startup, so rotation is a rolling-restart concern: cert-manager renews the
   Secret + [Stakater Reloader](https://github.com/stakater/Reloader) (`reloader.stakater.com/auto:
   "true"`, exposed via the chart's `podAnnotations`) restarts the pods on change (same pattern as the
   Raft certs).
@@ -49,7 +49,7 @@ cluster's integrity, (3) secrets (JWT/API keys, provider keys).
 ## Multi-tenant isolation
 
 Every read path is tenant-scoped when the caller presents a tenant-scoped JWT: SQL queries are
-rewritten to a per-tenant view, `strata_state()`/`strata_search()` are namespaced/filtered, memory
+rewritten to a per-tenant view, `ecphoria_state()`/`ecphoria_search()` are namespaced/filtered, memory
 get/delete/history are 404-on-mismatch, semantic search is tenant-filtered, and the LLM proxy scopes
 memory-RAG by the authenticated tenant. gRPC RPCs are likewise tenant-scoped **and RBAC-enforced**.
 Cross-tenant leak tests live in `tests/integration/tests/tenant_isolation.rs`.
@@ -84,7 +84,7 @@ into episodic memory → memory distillation → auto-RAG; an unauthenticated fo
 
 The LLM proxy retrieves memories/events and injects them into the completion. Retrieved content
 originates from arbitrary prior ingestion and is therefore **untrusted**: it is injected into the
-**user turn** inside a delimited `<strata_retrieved_context>` block with a framing instruction to
+**user turn** inside a delimited `<ecphoria_retrieved_context>` block with a framing instruction to
 treat it as data — **never** into the system message, so an ingested "ignore previous instructions…"
 cannot gain instruction rank. The response cache is keyed by **(tenant, user, retrieved-context
 fingerprint)**, so a RAG-augmented answer is never replayed across users or after the underlying
@@ -100,7 +100,7 @@ metadata endpoint), unspecified and multicast are always blocked.**
 
 ## Backup integrity
 
-`backup()` writes a `manifest.json` with per-artifact SHA-256 checksums, store counts, the Strata
+`backup()` writes a `manifest.json` with per-artifact SHA-256 checksums, store counts, the Ecphoria
 version and a capture timestamp; `restore_from_backup()` **verifies the checksums first** and
 refuses a corrupted/truncated backup. Note the four store exports are not wrapped in a single global
 write barrier, so a backup taken under concurrent writes may be fuzzy at the edges — for a strict
@@ -109,15 +109,15 @@ consistent point regardless).
 
 ## Encryption at rest
 
-Strata's on-disk stores (DuckDB for episodic + memories, SQLite for state, the USearch vector index)
+Ecphoria's on-disk stores (DuckDB for episodic + memories, SQLite for state, the USearch vector index)
 are **plaintext files**. The **supported, recommended mechanism for data-at-rest confidentiality is
 volume / disk encryption** — the correct layer for a self-hosted single binary. It is transparent to
-Strata, covers *all* four stores uniformly (including backups on the same volume), and needs no
+Ecphoria, covers *all* four stores uniformly (including backups on the same volume), and needs no
 application changes. Application-level per-store encryption would be partial (DuckDB has no encryption
 in the bundled version; rusqlite is not SQLCipher; USearch is raw) — we deliberately do **not** ship a
 half-measure that would over-claim.
 
-Configure it at the storage layer that hosts `STRATA_STORAGE__DATA_DIR` (default `./data`):
+Configure it at the storage layer that hosts `ECPHORIA_STORAGE__DATA_DIR` (default `./data`):
 
 - **Bare metal / VM:** put the data dir on a **LUKS**-encrypted volume
   (`cryptsetup luksFormat …` → `mkfs` → mount), key managed by your KMS / TPM / a passphrase unsealed
@@ -142,27 +142,27 @@ deploying:
 
 ```bash
 # Signature — issuer is GitHub Actions, identity is this repo's release workflow.
-cosign verify ghcr.io/vargafoundation/strata:<tag> \
-  --certificate-identity-regexp 'https://github.com/VargaFoundation/strata/.github/workflows/release.yml@.*' \
+cosign verify ghcr.io/vargafoundation/ecphoria:<tag> \
+  --certificate-identity-regexp 'https://github.com/VargaFoundation/ecphoria/.github/workflows/release.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # SBOM attestation.
-cosign verify-attestation --type spdxjson ghcr.io/vargafoundation/strata:<tag> \
-  --certificate-identity-regexp 'https://github.com/VargaFoundation/strata/.*' \
+cosign verify-attestation --type spdxjson ghcr.io/vargafoundation/ecphoria:<tag> \
+  --certificate-identity-regexp 'https://github.com/VargaFoundation/ecphoria/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # Build provenance (SLSA).
-gh attestation verify oci://ghcr.io/vargafoundation/strata:<tag> --repo VargaFoundation/strata
+gh attestation verify oci://ghcr.io/vargafoundation/ecphoria:<tag> --repo VargaFoundation/ecphoria
 ```
 
 CI also runs `cargo-audit` (RUSTSEC advisories) and `cargo-deny` (license/ban policy) on every build.
 
 ## Cluster (Raft) security
 
-- **Inter-node authentication:** set `STRATA_CLUSTER__SECRET` to require a shared Bearer token on
+- **Inter-node authentication:** set `ECPHORIA_CLUSTER__SECRET` to require a shared Bearer token on
   every Raft RPC. A node without the token is rejected (constant-time check), so an unauthorized
   node cannot inject AppendEntries/Vote and corrupt the log/state machine. **Set this for any
-  multi-node deployment.** It supports the **`_FILE` convention** (`STRATA_CLUSTER__SECRET_FILE`),
+  multi-node deployment.** It supports the **`_FILE` convention** (`ECPHORIA_CLUSTER__SECRET_FILE`),
   so you can mount it from a Kubernetes/Docker secret instead of a plaintext env var.
 - **Encryption in transit:** the Raft gRPC transport is HTTP/2 cleartext. For confidentiality, run
   inter-node traffic over a **service mesh / mTLS** (Istio, Linkerd) or a private network. (App-level
@@ -204,7 +204,7 @@ CI also runs `cargo-audit` (RUSTSEC advisories) and `cargo-deny` (license/ban po
 
 - [ ] `auth_enabled=true` with real credentials (or OIDC); strong `jwt_secret` (≥32 bytes).
 - [ ] API keys provided **pre-hashed** (`sha256:<hex>@tenant:role`) so no plaintext secret at rest.
-- [ ] `STRATA_CLUSTER__SECRET` set on every node (multi-node).
+- [ ] `ECPHORIA_CLUSTER__SECRET` set on every node (multi-node).
 - [ ] Webhook secrets set per source (`webhook_secrets`) and `webhook_require_signature=true`.
 - [ ] `tool_gateway_allow_private_networks` left **false** unless downstream MCP servers are on a
       trusted private network.

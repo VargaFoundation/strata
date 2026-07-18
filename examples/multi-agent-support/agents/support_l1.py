@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .shared import POLL_INTERVAL, StrataClient
+from .shared import POLL_INTERVAL, EcphoriaClient
 
 log = logging.getLogger("support-l1")
 
 SIMILARITY_THRESHOLD = 0.80
 
 
-async def handle_ticket(client: StrataClient, ticket_id: str, info: dict) -> None:
+async def handle_ticket(client: EcphoriaClient, ticket_id: str, info: dict) -> None:
     subject = info.get("subject", "")
     category = info.get("category", "general")
 
@@ -70,10 +70,10 @@ async def handle_ticket(client: StrataClient, ticket_id: str, info: dict) -> Non
         }])
 
 
-async def run(client: StrataClient | None = None) -> None:
+async def run(client: EcphoriaClient | None = None) -> None:
     own_client = client is None
     if own_client:
-        client = StrataClient()
+        client = EcphoriaClient()
 
     log.info("L1 Support agent started — polling for assigned tickets")
     processed: set[str] = set()

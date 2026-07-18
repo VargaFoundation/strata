@@ -1,6 +1,6 @@
 # Agentic platform
 
-Strata is not just an agent **memory** engine — it also **runs and remembers** your agents. On top
+Ecphoria is not just an agent **memory** engine — it also **runs and remembers** your agents. On top
 of the memory substrate (episodic + semantic + state + cognition) it adds a durable, HA, observable
 **agent runtime**: runs, a built-in agent loop, sub-agent workflows, human-in-the-loop approvals,
 event triggers, a governed MCP tool-gateway, and Prometheus metrics — all reusing the same single
@@ -51,9 +51,9 @@ curl -X POST localhost:8432/api/v1/tools/github/call -d '{"tool":"create_issue",
 ## SDK (Python)
 
 ```python
-from strata import StrataClient
+from ecphoria import EcphoriaClient
 
-async with StrataClient("http://localhost:8432") as s:
+async with EcphoriaClient("http://localhost:8432") as s:
     run = await s.run_agent("support", "What plan is cust_42 on?")
     print(run["status"], run["result"])
     trace = await s.run_trace(run["id"])           # LLM/tool/HITL steps
@@ -71,7 +71,7 @@ async with StrataClient("http://localhost:8432") as s:
     result = await s.tool_call("github", "create_issue", {"title": "bug"})
 ```
 
-The TypeScript SDK (`@strata/client`) exposes the same surface (`runAgent`, `runApprove`,
+The TypeScript SDK (`@ecphoria/client`) exposes the same surface (`runAgent`, `runApprove`,
 `runResume`, `triggerRegister`, `toolCall`, …).
 
 ## Workflows (DAG + sub-agents)
@@ -82,8 +82,8 @@ question, deps }` runs once its `deps` complete (topological order), as a child 
 
 ## Observability
 
-Prometheus at `/metrics`: `strata_runs_created_total`, `strata_runs_completed_total{status}`,
-`strata_run_steps_total{type}`. Because steps are episodic events, run analytics (cost, latency,
+Prometheus at `/metrics`: `ecphoria_runs_created_total`, `ecphoria_runs_completed_total{status}`,
+`ecphoria_run_steps_total{type}`. Because steps are episodic events, run analytics (cost, latency,
 success rate per agent) are also plain SQL over the episodic store.
 
 ## What's HA vs leader-local

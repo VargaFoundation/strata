@@ -1,13 +1,13 @@
-# Strata Go SDK
+# Ecphoria Go SDK
 
-Go client for the [Strata](https://github.com/VargaFoundation/strata) context lake.
+Go client for the [Ecphoria](https://github.com/VargaFoundation/ecphoria) context lake.
 
 Zero external dependencies — uses only the Go standard library (`net/http`, `encoding/json`).
 
 ## Install
 
 ```bash
-go get github.com/VargaFoundation/strata/sdk/go
+go get github.com/VargaFoundation/ecphoria/sdk/go
 ```
 
 ## Quick Start
@@ -20,15 +20,15 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/VargaFoundation/strata/sdk/go/strata"
+	"github.com/VargaFoundation/ecphoria/sdk/go/ecphoria"
 )
 
 func main() {
 	ctx := context.Background()
-	client := strata.NewClient("http://localhost:8432", nil)
+	client := ecphoria.NewClient("http://localhost:8432", nil)
 
 	// Ingest events
-	n, err := client.Ingest(ctx, "my-app", []strata.Event{
+	n, err := client.Ingest(ctx, "my-app", []ecphoria.Event{
 		{"event_type": "user.signup", "user_id": "u1"},
 	})
 	if err != nil {
@@ -73,7 +73,7 @@ func main() {
 ## Authentication
 
 ```go
-client := strata.NewClient("http://localhost:8432", &strata.ClientOptions{
+client := ecphoria.NewClient("http://localhost:8432", &ecphoria.ClientOptions{
 	APIKey: "your-api-key",
 })
 ```

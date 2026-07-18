@@ -2054,6 +2054,175 @@ dependencies = [
 ]
 
 [[package]]
+name = "ecphoria-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "ecphoria-core",
+ "reqwest",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ecphoria-cluster"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "ecphoria-core",
+ "futures",
+ "metrics",
+ "openraft",
+ "parking_lot",
+ "prost",
+ "protobuf-src",
+ "rcgen",
+ "rmp-serde",
+ "rusqlite",
+ "rustls 0.23.37",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ecphoria-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "bytes",
+ "chrono",
+ "criterion",
+ "dashmap",
+ "duckdb",
+ "fastembed",
+ "futures",
+ "metrics",
+ "parking_lot",
+ "proptest",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlparser",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "usearch",
+ "uuid",
+]
+
+[[package]]
+name = "ecphoria-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.8",
+ "axum-extra",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "duckdb",
+ "ecphoria-cluster",
+ "ecphoria-core",
+ "futures",
+ "hmac 0.12.1",
+ "hyper 1.9.0",
+ "jsonwebtoken",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "openraft",
+ "parking_lot",
+ "pgwire",
+ "prost",
+ "prost-types",
+ "protobuf-src",
+ "reqwest",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tokio-rustls 0.26.4",
+ "toml",
+ "tonic",
+ "tonic-build",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+ "usearch",
+ "uuid",
+]
+
+[[package]]
+name = "ecphoria-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "ecphoria-cluster",
+ "ecphoria-core",
+ "ecphoria-gateway",
+ "jsonwebtoken",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tower 0.5.3",
+]
+
+[[package]]
+name = "ecphoria-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.8",
+ "clap",
+ "config",
+ "ecphoria-cluster",
+ "ecphoria-core",
+ "ecphoria-gateway",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "mimalloc",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "serde",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5671,175 +5840,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "strata-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "reqwest",
- "rustyline",
- "serde",
- "serde_json",
- "strata-core",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "strata-cluster"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "futures",
- "metrics",
- "openraft",
- "parking_lot",
- "prost",
- "protobuf-src",
- "rcgen",
- "rmp-serde",
- "rusqlite",
- "rustls 0.23.37",
- "serde",
- "serde_json",
- "strata-core",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tonic",
- "tonic-build",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "strata-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "bytes",
- "chrono",
- "criterion",
- "dashmap",
- "duckdb",
- "fastembed",
- "futures",
- "metrics",
- "parking_lot",
- "proptest",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlparser",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "usearch",
- "uuid",
-]
-
-[[package]]
-name = "strata-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.8",
- "axum-extra",
- "bytes",
- "chrono",
- "dashmap",
- "duckdb",
- "futures",
- "hmac 0.12.1",
- "hyper 1.9.0",
- "jsonwebtoken",
- "metrics",
- "metrics-exporter-prometheus",
- "openraft",
- "parking_lot",
- "pgwire",
- "prost",
- "prost-types",
- "protobuf-src",
- "reqwest",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "strata-cluster",
- "strata-core",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-postgres",
- "tokio-rustls 0.26.4",
- "toml",
- "tonic",
- "tonic-build",
- "tower 0.5.3",
- "tower-http",
- "tracing",
- "usearch",
- "uuid",
-]
-
-[[package]]
-name = "strata-integration-tests"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.8",
- "jsonwebtoken",
- "serde_json",
- "strata-cluster",
- "strata-core",
- "strata-gateway",
- "tokio",
- "toml",
- "tower 0.5.3",
-]
-
-[[package]]
-name = "strata-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum 0.8.8",
- "clap",
- "config",
- "metrics",
- "metrics-exporter-prometheus",
- "mimalloc",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "serde",
- "strata-cluster",
- "strata-core",
- "strata-gateway",
- "tokio",
- "toml",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "stringprep"

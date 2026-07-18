@@ -1,0 +1,37 @@
+{{- if .Values.autoscaling.enabled -}}
+{{- /*
+  NOTE: Ecphoria nodes form a Raft group — changing the replica count changes cluster membership,
+  which the HPA does NOT coordinate. Prefer the operator (ops/operator) for cluster-aware scaling.
+  Use the HPA only for a single-node (replicaCount: 1) or a read-heavy, membership-stable setup.
+*/ -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "ecphoria.fullname" . }}
+  labels:
+    {{- include "ecphoria.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: {{ include "ecphoria.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}

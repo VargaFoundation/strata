@@ -1,0 +1,55 @@
+[package]
+name = "ecphoria-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Main server binary for the Ecphoria context lake"
+
+[[bin]]
+name = "ecphoria-server"
+path = "src/main.rs"
+
+[features]
+# Passthrough to ecphoria-core's optional local ONNX backends (off by default; each pulls a heavy
+# native onnxruntime dep + model download). Build e.g.:
+#   cargo build -p ecphoria-server --release --features embed-local
+embed-local = ["ecphoria-core/embed-local"]
+rerank-local = ["ecphoria-core/rerank-local"]
+# Export traces to an OTLP collector (Tempo/Grafana/Jaeger) alongside Prometheus metrics. Off by
+# default — pulls the opentelemetry SDK + exporter. Build: cargo build -p ecphoria-server --features otlp
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
+[dependencies]
+ecphoria-core.workspace = true
+ecphoria-gateway.workspace = true
+ecphoria-cluster.workspace = true
+
+tokio.workspace = true
+config.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+anyhow.workspace = true
+clap.workspace = true
+mimalloc.workspace = true
+
+[dev-dependencies]
+# Used only by the `otlp`-gated telemetry test to stand up a mock OTLP collector.
+axum.workspace = true

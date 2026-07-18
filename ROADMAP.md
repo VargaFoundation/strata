@@ -1,18 +1,18 @@
 # Roadmap
 
-Strata is an open-source agentic memory platform. This roadmap is directional, not a
+Ecphoria is an open-source agentic memory platform. This roadmap is directional, not a
 commitment — priorities shift with feedback. File an issue to propose or reprioritize.
 
 ## Versioning & stability
 
-Strata is **pre-1.0 (`0.x`)**: minor versions may contain breaking changes to the API,
+Ecphoria is **pre-1.0 (`0.x`)**: minor versions may contain breaking changes to the API,
 config, wire/Raft formats, and on-disk layout. We call out breaking changes in the
 release notes. **API stability (SemVer with a deprecation policy) begins at `1.0`.**
 
 ## Now (shipping on `main`)
 
 - **Secure by default** — refuses to start unauthenticated on a public bind; hashed API
-  keys; per-vendor webhook signatures; SSRF-guarded tool gateway; `strata doctor`.
+  keys; per-vendor webhook signatures; SSRF-guarded tool gateway; `ecphoria doctor`.
 - **Memory substrate** — bi-temporal memories, contradiction resolution, dedup, hybrid
   retrieval (BM25 + vector), decay, knowledge graph.
 - **Cognition APIs** — provenance, feedback loop, CDC stream, HITL contradiction review,
@@ -41,5 +41,5 @@ release notes. **API stability (SemVer with a deprecation policy) begins at `1.0
 
 ## Non-goals
 
-- Being a general-purpose database — Strata is a memory platform for agents.
+- Being a general-purpose database — Ecphoria is a memory platform for agents.
 - A hosted/managed offering in this repository (self-hosted first).

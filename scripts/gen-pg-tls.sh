@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gen-pg-tls.sh — generate a self-signed TLS cert/key for the Strata PostgreSQL-wire listener.
+# gen-pg-tls.sh — generate a self-signed TLS cert/key for the Ecphoria PostgreSQL-wire listener.
 #
 # The PG-wire password IS the API key/JWT, so it must not cross the network in cleartext. Enabling
 # TLS on :5432 encrypts the handshake. This helper makes a **development / internal** self-signed
@@ -11,7 +11,7 @@
 #     CN       certificate Common Name / SAN    (default localhost)
 #     DAYS     validity                          (default 825)
 #
-# Then point Strata at them:
+# Then point Ecphoria at them:
 #   [gateway.pg_tls]
 #   cert_path = "<OUT_DIR>/pg.crt"
 #   key_path  = "<OUT_DIR>/pg.key"

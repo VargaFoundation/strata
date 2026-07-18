@@ -7,18 +7,18 @@
 | Docker | `docker run` | Development, single-node production |
 | Docker Compose | `docker compose up` | Teams, development with full stack |
 | Docker Compose Cluster | `docker compose -f deploy/docker-compose.cluster.yml up` | Local 3-node HA testing |
-| Kubernetes | `helm install strata deploy/helm/strata/` | Production, high availability |
-| Binary | `./strata-server` | Embedded, custom deployments |
+| Kubernetes | `helm install ecphoria deploy/helm/ecphoria/` | Production, high availability |
+| Binary | `./ecphoria-server` | Embedded, custom deployments |
 
 ## Docker (Standalone)
 
 ```bash
 docker run -d \
-  --name strata \
+  --name ecphoria \
   -p 5432:5432 \
   -p 8432:8432 \
-  -v strata-data:/data \
-  ghcr.io/vargafoundation/strata:latest
+  -v ecphoria-data:/data \
+  ghcr.io/vargafoundation/ecphoria:latest
 ```
 
 The Docker image includes a built-in HEALTHCHECK on the `/health` endpoint.
@@ -41,13 +41,13 @@ The Docker image includes a built-in HEALTHCHECK on the `/health` endpoint.
 ## Docker Compose (Full Stack)
 
 ```bash
-git clone https://github.com/VargaFoundation/strata.git
-cd strata
+git clone https://github.com/VargaFoundation/ecphoria.git
+cd ecphoria
 docker compose up -d
 ```
 
 Services:
-- **strata** — Context lake server
+- **ecphoria** — Context lake server
 - **minio** — S3-compatible object storage (ports 9000, 9001)
 - **minio-init** — One-shot bucket creation
 - **ollama** — Local embedding model server (port 11434)
@@ -55,7 +55,7 @@ Services:
 First-time setup for embeddings:
 
 ```bash
-docker exec strata-ollama-1 ollama pull nomic-embed-text
+docker exec ecphoria-ollama-1 ollama pull nomic-embed-text
 ```
 
 ## Docker Compose (3-Node Cluster)
@@ -67,9 +67,9 @@ docker compose -f deploy/docker-compose.cluster.yml up -d
 ```
 
 This starts:
-- **strata-1** (node_id=1, leader candidate) on port 8432
-- **strata-2** (node_id=2) on port 8433
-- **strata-3** (node_id=3) on port 8434
+- **ecphoria-1** (node_id=1, leader candidate) on port 8432
+- **ecphoria-2** (node_id=2) on port 8433
+- **ecphoria-3** (node_id=3) on port 8434
 - **ollama** — shared embedding server
 
 Check cluster status:
@@ -91,7 +91,7 @@ curl -X POST http://localhost:8433/api/v1/ingest -d '...'
 ### Quick Start
 
 ```bash
-helm install strata deploy/helm/strata/ \
+helm install ecphoria deploy/helm/ecphoria/ \
   --set replicaCount=3 \
   --set config.embedding.ollamaUrl=http://ollama:11434
 ```
@@ -102,9 +102,9 @@ The Helm chart deploys a StatefulSet with automatic cluster configuration:
 
 ```
 StatefulSet (3 replicas)
-  strata-0 (node_id=1) ─┐
-  strata-1 (node_id=2) ─┤── Raft consensus via headless service DNS
-  strata-2 (node_id=3) ─┘
+  ecphoria-0 (node_id=1) ─┐
+  ecphoria-1 (node_id=2) ─┤── Raft consensus via headless service DNS
+  ecphoria-2 (node_id=3) ─┘
 
 Service (ClusterIP)       → load-balanced client reads
 Headless Service          → direct pod-to-pod Raft RPCs
@@ -113,8 +113,8 @@ ServiceMonitor (optional) → Prometheus scraping
 ```
 
 Each pod automatically:
-1. Derives its `node_id` from the StatefulSet ordinal (strata-0 → node_id=1)
-2. Discovers peers via headless service DNS (`strata-1.strata-headless.namespace.svc.cluster.local:9433`)
+1. Derives its `node_id` from the StatefulSet ordinal (ecphoria-0 → node_id=1)
+2. Discovers peers via headless service DNS (`ecphoria-1.ecphoria-headless.namespace.svc.cluster.local:9433`)
 3. Forms a Raft cluster and elects a leader
 
 ### Production Values
@@ -124,7 +124,7 @@ Each pod automatically:
 replicaCount: 3
 
 image:
-  repository: ghcr.io/vargafoundation/strata
+  repository: ghcr.io/vargafoundation/ecphoria
   tag: "0.1.0"
 
 config:
@@ -173,15 +173,15 @@ podDisruptionBudget:
 Install:
 
 ```bash
-helm install strata deploy/helm/strata/ -f values-production.yaml
+helm install ecphoria deploy/helm/ecphoria/ -f values-production.yaml
 ```
 
 ### Helm Values Reference
 
 | Value | Default | Description |
 |-------|---------|-------------|
-| `replicaCount` | `3` | Number of Strata nodes |
-| `image.repository` | `ghcr.io/vargafoundation/strata` | Docker image |
+| `replicaCount` | `3` | Number of Ecphoria nodes |
+| `image.repository` | `ghcr.io/vargafoundation/ecphoria` | Docker image |
 | `image.tag` | `latest` | Image tag |
 | `config.cluster.enabled` | `true` | Enable Raft consensus |
 | `config.gateway.authEnabled` | `false` | Enable API key auth |
@@ -198,73 +198,73 @@ helm install strata deploy/helm/strata/ -f values-production.yaml
 
 ## Configuration Reference
 
-Strata loads configuration from three sources (in order of precedence):
+Ecphoria loads configuration from three sources (in order of precedence):
 
 1. **Built-in defaults** — sensible defaults for local development
-2. **`strata.toml`** — file in the working directory
-3. **Environment variables** — prefixed with `STRATA_`, nested with `__`
+2. **`ecphoria.toml`** — file in the working directory
+3. **Environment variables** — prefixed with `ECPHORIA_`, nested with `__`
 
 ### Server
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
-| `gateway.listen` | `STRATA_GATEWAY__LISTEN` | `0.0.0.0:8432` | HTTP listen address |
-| `gateway.pg_listen` | `STRATA_GATEWAY__PG_LISTEN` | `0.0.0.0:5432` | PG wire listen address |
-| `gateway.grpc_listen` | `STRATA_GATEWAY__GRPC_LISTEN` | `0.0.0.0:9432` | gRPC listen address |
-| `gateway.mcp_enabled` | `STRATA_GATEWAY__MCP_ENABLED` | `true` | Enable MCP server |
-| `gateway.llm_proxy_enabled` | `STRATA_GATEWAY__LLM_PROXY_ENABLED` | `false` | Enable LLM proxy |
-| `gateway.auth_enabled` | `STRATA_GATEWAY__AUTH_ENABLED` | `false` | Enable API key authentication |
-| `gateway.max_pg_connections` | `STRATA_GATEWAY__MAX_PG_CONNECTIONS` | `256` | Max concurrent PG wire connections |
+| `gateway.listen` | `ECPHORIA_GATEWAY__LISTEN` | `0.0.0.0:8432` | HTTP listen address |
+| `gateway.pg_listen` | `ECPHORIA_GATEWAY__PG_LISTEN` | `0.0.0.0:5432` | PG wire listen address |
+| `gateway.grpc_listen` | `ECPHORIA_GATEWAY__GRPC_LISTEN` | `0.0.0.0:9432` | gRPC listen address |
+| `gateway.mcp_enabled` | `ECPHORIA_GATEWAY__MCP_ENABLED` | `true` | Enable MCP server |
+| `gateway.llm_proxy_enabled` | `ECPHORIA_GATEWAY__LLM_PROXY_ENABLED` | `false` | Enable LLM proxy |
+| `gateway.auth_enabled` | `ECPHORIA_GATEWAY__AUTH_ENABLED` | `false` | Enable API key authentication |
+| `gateway.max_pg_connections` | `ECPHORIA_GATEWAY__MAX_PG_CONNECTIONS` | `256` | Max concurrent PG wire connections |
 
 ### Storage
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
-| `storage.data_dir` | `STRATA_STORAGE__DATA_DIR` | `./data` | Local data directory |
-| `storage.engine` | `STRATA_STORAGE__ENGINE` | `local` | `local` or `s3` |
-| `storage.s3.endpoint` | `STRATA_STORAGE__S3__ENDPOINT` | | S3 endpoint URL |
-| `storage.s3.bucket` | `STRATA_STORAGE__S3__BUCKET` | `strata` | S3 bucket name |
-| `storage.s3.access_key` | `STRATA_STORAGE__S3__ACCESS_KEY` | | S3 access key |
-| `storage.s3.secret_key` | `STRATA_STORAGE__S3__SECRET_KEY` | | S3 secret key |
-| `storage.s3.region` | `STRATA_STORAGE__S3__REGION` | `us-east-1` | S3 region |
+| `storage.data_dir` | `ECPHORIA_STORAGE__DATA_DIR` | `./data` | Local data directory |
+| `storage.engine` | `ECPHORIA_STORAGE__ENGINE` | `local` | `local` or `s3` |
+| `storage.s3.endpoint` | `ECPHORIA_STORAGE__S3__ENDPOINT` | | S3 endpoint URL |
+| `storage.s3.bucket` | `ECPHORIA_STORAGE__S3__BUCKET` | `ecphoria` | S3 bucket name |
+| `storage.s3.access_key` | `ECPHORIA_STORAGE__S3__ACCESS_KEY` | | S3 access key |
+| `storage.s3.secret_key` | `ECPHORIA_STORAGE__S3__SECRET_KEY` | | S3 secret key |
+| `storage.s3.region` | `ECPHORIA_STORAGE__S3__REGION` | `us-east-1` | S3 region |
 
 ### Memory
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
-| `memory.episodic.db_path` | `STRATA_MEMORY__EPISODIC__DB_PATH` | `:memory:` | DuckDB path (`:memory:` or file path) |
-| `memory.episodic.default_retention_days` | `STRATA_MEMORY__EPISODIC__DEFAULT_RETENTION_DAYS` | `365` | Default event retention |
-| `memory.semantic.index_dir` | `STRATA_MEMORY__SEMANTIC__INDEX_DIR` | `./data/vectors` | Vector index directory |
-| `memory.semantic.default_dimension` | `STRATA_MEMORY__SEMANTIC__DEFAULT_DIMENSION` | `768` | Default vector dimensions |
-| `memory.semantic.metric` | `STRATA_MEMORY__SEMANTIC__METRIC` | `cosine` | Distance metric |
-| `memory.state.db_path` | `STRATA_MEMORY__STATE__DB_PATH` | `./data/state.db` | State DB file path |
+| `memory.episodic.db_path` | `ECPHORIA_MEMORY__EPISODIC__DB_PATH` | `:memory:` | DuckDB path (`:memory:` or file path) |
+| `memory.episodic.default_retention_days` | `ECPHORIA_MEMORY__EPISODIC__DEFAULT_RETENTION_DAYS` | `365` | Default event retention |
+| `memory.semantic.index_dir` | `ECPHORIA_MEMORY__SEMANTIC__INDEX_DIR` | `./data/vectors` | Vector index directory |
+| `memory.semantic.default_dimension` | `ECPHORIA_MEMORY__SEMANTIC__DEFAULT_DIMENSION` | `768` | Default vector dimensions |
+| `memory.semantic.metric` | `ECPHORIA_MEMORY__SEMANTIC__METRIC` | `cosine` | Distance metric |
+| `memory.state.db_path` | `ECPHORIA_MEMORY__STATE__DB_PATH` | `./data/state.db` | State DB file path |
 
 ### Embedding
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
-| `embedding.provider` | `STRATA_EMBEDDING__PROVIDER` | `ollama` | `ollama` or `openai` |
-| `embedding.model` | `STRATA_EMBEDDING__MODEL` | `nomic-embed-text` | Model name |
-| `embedding.dimension` | `STRATA_EMBEDDING__DIMENSION` | `768` | Vector dimension |
-| `embedding.batch_size` | `STRATA_EMBEDDING__BATCH_SIZE` | `64` | Max texts per embedding API call |
-| `embedding.ollama_url` | `STRATA_EMBEDDING__OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
-| `embedding.openai_api_key` | `STRATA_EMBEDDING__OPENAI_API_KEY` | | OpenAI API key |
+| `embedding.provider` | `ECPHORIA_EMBEDDING__PROVIDER` | `ollama` | `ollama` or `openai` |
+| `embedding.model` | `ECPHORIA_EMBEDDING__MODEL` | `nomic-embed-text` | Model name |
+| `embedding.dimension` | `ECPHORIA_EMBEDDING__DIMENSION` | `768` | Vector dimension |
+| `embedding.batch_size` | `ECPHORIA_EMBEDDING__BATCH_SIZE` | `64` | Max texts per embedding API call |
+| `embedding.ollama_url` | `ECPHORIA_EMBEDDING__OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
+| `embedding.openai_api_key` | `ECPHORIA_EMBEDDING__OPENAI_API_KEY` | | OpenAI API key |
 
 ### Query
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
-| `query.max_rows` | `STRATA_QUERY__MAX_ROWS` | `10000` | Max rows returned per query |
-| `query.timeout_ms` | `STRATA_QUERY__TIMEOUT_MS` | `30000` | Query timeout in milliseconds |
+| `query.max_rows` | `ECPHORIA_QUERY__MAX_ROWS` | `10000` | Max rows returned per query |
+| `query.timeout_ms` | `ECPHORIA_QUERY__TIMEOUT_MS` | `30000` | Query timeout in milliseconds |
 
 ### Cluster
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
-| `cluster.enabled` | `STRATA_CLUSTER__ENABLED` | `false` | Enable Raft cluster mode |
-| `cluster.node_id` | `STRATA_CLUSTER__NODE_ID` | `1` | This node's Raft ID |
-| `cluster.listen` | `STRATA_CLUSTER__LISTEN` | `0.0.0.0:9433` | Raft RPC listen address |
-| `cluster.peers` | `STRATA_CLUSTER__PEERS` | `[]` | Comma-separated peer addresses |
+| `cluster.enabled` | `ECPHORIA_CLUSTER__ENABLED` | `false` | Enable Raft cluster mode |
+| `cluster.node_id` | `ECPHORIA_CLUSTER__NODE_ID` | `1` | This node's Raft ID |
+| `cluster.listen` | `ECPHORIA_CLUSTER__LISTEN` | `0.0.0.0:9433` | Raft RPC listen address |
+| `cluster.peers` | `ECPHORIA_CLUSTER__PEERS` | `[]` | Comma-separated peer addresses |
 
 ## Production Checklist
 
@@ -273,11 +273,11 @@ Security controls are summarized here; see [security.md](security.md) and
 
 **Security**
 - [ ] **Auth**: `gateway.auth_enabled = true` with real credentials (or OIDC); `jwt_secret` ≥32 bytes.
-      (Strata refuses to start unauthenticated on a non-loopback bind unless `allow_insecure=true`.)
+      (Ecphoria refuses to start unauthenticated on a non-loopback bind unless `allow_insecure=true`.)
 - [ ] **Hashed keys**: provide `api_keys` pre-hashed as `sha256:<hex>@tenant:role` (no plaintext at rest).
 - [ ] **TLS**: front REST/gRPC with a TLS-terminating proxy/Ingress. **PG wire (:5432) has no TLS** —
       keep it on loopback / a private subnet (its password is the API key).
-- [ ] **Cluster secret**: set `STRATA_CLUSTER__SECRET` on every node (multi-node).
+- [ ] **Cluster secret**: set `ECPHORIA_CLUSTER__SECRET` on every node (multi-node).
 - [ ] **Webhooks**: per-source `webhook_secrets` + `webhook_require_signature = true` (fail-closed).
 - [ ] **Tool gateway**: leave `tool_gateway_allow_private_networks = false` unless downstream MCP
       servers live on a trusted private network.
@@ -293,7 +293,7 @@ Security controls are summarized here; see [security.md](security.md) and
 - [ ] **Backups**: Schedule regular backups of `/data`; run a **restore drill** (manifest verification)
 - [ ] **Retention**: Configure `memory.episodic.default_retention_days`
 - [ ] **Resources**: Allocate sufficient memory for vector indices (~4 bytes × dimensions × vectors)
-- [ ] **Logging**: Set `RUST_LOG=info,strata=debug` for production logging
+- [ ] **Logging**: Set `RUST_LOG=info,ecphoria=debug` for production logging
 
 ## Health Checks
 
@@ -308,8 +308,8 @@ curl http://localhost:8432/cluster/status
 
 # Prometheus metrics
 curl http://localhost:8432/metrics
-# strata_episodic_events_ingested_total 1234
-# strata_episodic_query_duration_seconds_bucket{le="0.01"} 567
+# ecphoria_episodic_events_ingested_total 1234
+# ecphoria_episodic_query_duration_seconds_bucket{le="0.01"} 567
 # ...
 ```
 
@@ -319,14 +319,14 @@ For Kubernetes, liveness and readiness probes are configured in the Helm chart.
 ### Distributed tracing (OTLP)
 
 Metrics ship to Prometheus out of the box. For **traces**, build with the `otlp` feature and point
-Strata at an OTLP collector (Tempo, Jaeger, Grafana Agent, OpenTelemetry Collector). Spans export
+Ecphoria at an OTLP collector (Tempo, Jaeger, Grafana Agent, OpenTelemetry Collector). Spans export
 over OTLP/HTTP in parallel with the Prometheus exporter.
 
 ```bash
-cargo build --release -p strata-server --features otlp
+cargo build --release -p ecphoria-server --features otlp
 # Full traces endpoint (OTLP/HTTP defaults to :4318):
-STRATA_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces strata-server
+ECPHORIA_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces ecphoria-server
 ```
 
-When the feature is absent or `STRATA_OTLP_ENDPOINT` is unset, only the fmt logger + Prometheus run
-(zero overhead). The service reports as `service.name=strata-server`.
+When the feature is absent or `ECPHORIA_OTLP_ENDPOINT` is unset, only the fmt logger + Prometheus run
+(zero overhead). The service reports as `service.name=ecphoria-server`.

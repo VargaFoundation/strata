@@ -2,11 +2,11 @@
 
 **Status**: Accepted  
 **Date**: 2024-06-15  
-**Author**: Strata Core Team
+**Author**: Ecphoria Core Team
 
 ## Context
 
-Strata's episodic memory stores time-ordered events from AI agents — user interactions, tool calls, decisions, observations. The access pattern is append-heavy with analytical reads: agents rarely update past events but frequently query them with filters, aggregations, window functions, and time-range scans.
+Ecphoria's episodic memory stores time-ordered events from AI agents — user interactions, tool calls, decisions, observations. The access pattern is append-heavy with analytical reads: agents rarely update past events but frequently query them with filters, aggregations, window functions, and time-range scans.
 
 We need an embedded database (no external process) that handles:
 

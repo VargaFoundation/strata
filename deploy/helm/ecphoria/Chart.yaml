@@ -1,0 +1,19 @@
+apiVersion: v2
+name: ecphoria
+description: The open-source context lake for AI agents
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ai
+  - agents
+  - context-lake
+  - memory
+  - vector-search
+  - raft
+home: https://github.com/VargaFoundation/ecphoria
+sources:
+  - https://github.com/VargaFoundation/ecphoria
+maintainers:
+  - name: Varga Foundation
+    url: https://github.com/VargaFoundation

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# Seed Strata with sample events so the Grafana dashboard isn't empty.
-# Waits for Strata to be healthy, then ingests 50 events across multiple sources.
+# Seed Ecphoria with sample events so the Grafana dashboard isn't empty.
+# Waits for Ecphoria to be healthy, then ingests 50 events across multiple sources.
 
 set -euo pipefail
 
-STRATA_URL="${STRATA_URL:-http://strata:8432}"
+ECPHORIA_URL="${ECPHORIA_URL:-http://ecphoria:8432}"
 
-echo "Waiting for Strata to be ready..."
+echo "Waiting for Ecphoria to be ready..."
 for i in $(seq 1 30); do
-  if curl -sf "${STRATA_URL}/health" > /dev/null 2>&1; then
-    echo "Strata is ready."
+  if curl -sf "${ECPHORIA_URL}/health" > /dev/null 2>&1; then
+    echo "Ecphoria is ready."
     break
   fi
   sleep 2
@@ -19,7 +19,7 @@ done
 ingest() {
   local source="$1"
   local events="$2"
-  curl -sf -X POST "${STRATA_URL}/api/v1/ingest" \
+  curl -sf -X POST "${ECPHORIA_URL}/api/v1/ingest" \
     -H 'Content-Type: application/json' \
     -d "{\"source\": \"${source}\", \"events\": ${events}}" > /dev/null
 }

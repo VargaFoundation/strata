@@ -1,4 +1,4 @@
-"""Shared Strata client and utilities for the multi-agent support system."""
+"""Shared Ecphoria client and utilities for the multi-agent support system."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-STRATA_URL = os.environ.get("STRATA_URL", "http://localhost:8432")
+ECPHORIA_URL = os.environ.get("ECPHORIA_URL", "http://localhost:8432")
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "2.0"))
 
 logging.basicConfig(
@@ -17,10 +17,10 @@ logging.basicConfig(
 )
 
 
-class StrataClient:
-    """Thin async wrapper around Strata's REST API."""
+class EcphoriaClient:
+    """Thin async wrapper around Ecphoria's REST API."""
 
-    def __init__(self, base_url: str = STRATA_URL) -> None:
+    def __init__(self, base_url: str = ECPHORIA_URL) -> None:
         self.base_url = base_url
         self._client = httpx.AsyncClient(base_url=base_url, timeout=30.0)
 

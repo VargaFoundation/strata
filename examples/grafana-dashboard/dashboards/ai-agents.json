@@ -1,9 +1,9 @@
 {
-  "uid": "strata-ai-agents",
-  "title": "Strata \u2014 AI Agent Observatory",
-  "description": "Real-time monitoring of AI agent activity, events, and performance via Strata",
+  "uid": "ecphoria-ai-agents",
+  "title": "Ecphoria \u2014 AI Agent Observatory",
+  "description": "Real-time monitoring of AI agent activity, events, and performance via Ecphoria",
   "tags": [
-    "strata",
+    "ecphoria",
     "ai-agents"
   ],
   "timezone": "browser",
@@ -29,7 +29,7 @@
       },
       "datasource": {
         "type": "postgres",
-        "uid": "strata-pg"
+        "uid": "ecphoria-pg"
       },
       "targets": [
         {
@@ -80,7 +80,7 @@
       },
       "datasource": {
         "type": "postgres",
-        "uid": "strata-pg"
+        "uid": "ecphoria-pg"
       },
       "targets": [
         {
@@ -127,7 +127,7 @@
       },
       "datasource": {
         "type": "postgres",
-        "uid": "strata-pg"
+        "uid": "ecphoria-pg"
       },
       "targets": [
         {
@@ -178,7 +178,7 @@
       },
       "datasource": {
         "type": "postgres",
-        "uid": "strata-pg"
+        "uid": "ecphoria-pg"
       },
       "targets": [
         {
@@ -239,7 +239,7 @@
       },
       "datasource": {
         "type": "postgres",
-        "uid": "strata-pg"
+        "uid": "ecphoria-pg"
       },
       "targets": [
         {
@@ -284,7 +284,7 @@
       },
       "datasource": {
         "type": "postgres",
-        "uid": "strata-pg"
+        "uid": "ecphoria-pg"
       },
       "targets": [
         {
@@ -335,7 +335,7 @@
       },
       "datasource": {
         "type": "postgres",
-        "uid": "strata-pg"
+        "uid": "ecphoria-pg"
       },
       "targets": [
         {
@@ -375,7 +375,7 @@
       },
       "datasource": {
         "type": "postgres",
-        "uid": "strata-pg"
+        "uid": "ecphoria-pg"
       },
       "targets": [
         {
@@ -436,11 +436,11 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "strata-prom"
+        "uid": "ecphoria-prom"
       },
       "targets": [
         {
-          "expr": "rate(strata_rest_requests_total[5m])",
+          "expr": "rate(ecphoria_rest_requests_total[5m])",
           "legendFormat": "{{ endpoint }}",
           "refId": "A"
         }
@@ -478,11 +478,11 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "strata-prom"
+        "uid": "ecphoria-prom"
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, rate(strata_rest_request_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.99, rate(ecphoria_rest_request_duration_seconds_bucket[5m]))",
           "legendFormat": "{{ endpoint }} p99",
           "refId": "A"
         }
@@ -527,7 +527,7 @@
       "title": "Agent runs / min",
       "datasource": {
         "type": "prometheus",
-        "uid": "strata-prom"
+        "uid": "ecphoria-prom"
       },
       "gridPos": {
         "h": 8,
@@ -557,12 +557,12 @@
       },
       "targets": [
         {
-          "expr": "rate(strata_runs_created_total[5m]) * 60",
+          "expr": "rate(ecphoria_runs_created_total[5m]) * 60",
           "legendFormat": "created",
           "refId": "A"
         },
         {
-          "expr": "sum by (status) (rate(strata_runs_completed_total[5m])) * 60",
+          "expr": "sum by (status) (rate(ecphoria_runs_completed_total[5m])) * 60",
           "legendFormat": "completed {{status}}",
           "refId": "B"
         }
@@ -574,7 +574,7 @@
       "title": "Run steps / min by type",
       "datasource": {
         "type": "prometheus",
-        "uid": "strata-prom"
+        "uid": "ecphoria-prom"
       },
       "gridPos": {
         "h": 8,
@@ -604,7 +604,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (type) (rate(strata_run_steps_total[5m])) * 60",
+          "expr": "sum by (type) (rate(ecphoria_run_steps_total[5m])) * 60",
           "legendFormat": "{{type}}",
           "refId": "A"
         }
@@ -616,7 +616,7 @@
       "title": "Embedding failures / s (degrades search to BM25)",
       "datasource": {
         "type": "prometheus",
-        "uid": "strata-prom"
+        "uid": "ecphoria-prom"
       },
       "gridPos": {
         "h": 8,
@@ -646,7 +646,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (op) (rate(strata_memory_embed_failures_total[5m]))",
+          "expr": "sum by (op) (rate(ecphoria_memory_embed_failures_total[5m]))",
           "legendFormat": "{{op}}",
           "refId": "A"
         }
@@ -658,7 +658,7 @@
       "title": "LLM cache hit ratio",
       "datasource": {
         "type": "prometheus",
-        "uid": "strata-prom"
+        "uid": "ecphoria-prom"
       },
       "gridPos": {
         "h": 8,
@@ -694,7 +694,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(strata_llm_cache_hits_total[5m])) / clamp_min(sum(rate(strata_llm_cache_hits_total[5m])) + sum(rate(strata_llm_cache_misses_total[5m])), 1)",
+          "expr": "sum(rate(ecphoria_llm_cache_hits_total[5m])) / clamp_min(sum(rate(ecphoria_llm_cache_hits_total[5m])) + sum(rate(ecphoria_llm_cache_misses_total[5m])), 1)",
           "legendFormat": "hit ratio",
           "refId": "A"
         }
@@ -706,7 +706,7 @@
       "title": "Raft leader (1 = leader)",
       "datasource": {
         "type": "prometheus",
-        "uid": "strata-prom"
+        "uid": "ecphoria-prom"
       },
       "gridPos": {
         "h": 8,
@@ -742,7 +742,7 @@
       },
       "targets": [
         {
-          "expr": "strata_raft_is_leader",
+          "expr": "ecphoria_raft_is_leader",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
@@ -754,7 +754,7 @@
       "title": "Raft term & replication lag",
       "datasource": {
         "type": "prometheus",
-        "uid": "strata-prom"
+        "uid": "ecphoria-prom"
       },
       "gridPos": {
         "h": 8,
@@ -784,17 +784,17 @@
       },
       "targets": [
         {
-          "expr": "strata_raft_term",
+          "expr": "ecphoria_raft_term",
           "legendFormat": "term {{instance}}",
           "refId": "A"
         },
         {
-          "expr": "strata_raft_replication_lag",
+          "expr": "ecphoria_raft_replication_lag",
           "legendFormat": "lag {{instance}}",
           "refId": "B"
         },
         {
-          "expr": "rate(strata_raft_leader_changes_total[15m])",
+          "expr": "rate(ecphoria_raft_leader_changes_total[15m])",
           "legendFormat": "leader changes/s {{instance}}",
           "refId": "C"
         }

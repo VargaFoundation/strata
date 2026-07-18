@@ -1,81 +1,81 @@
-# 3-node Strata Raft cluster with Ollama for embeddings.
+# 3-node Ecphoria Raft cluster with Ollama for embeddings.
 # Usage: docker compose -f deploy/docker-compose.cluster.yml up -d
 
 services:
-  strata-1:
+  ecphoria-1:
     build:
       context: ..
       dockerfile: Dockerfile
-    hostname: strata-1
+    hostname: ecphoria-1
     ports:
       - "8432:8432"
       - "5432:5432"
     environment:
-      STRATA_CLUSTER__ENABLED: "true"
-      STRATA_CLUSTER__NODE_ID: "1"
+      ECPHORIA_CLUSTER__ENABLED: "true"
+      ECPHORIA_CLUSTER__NODE_ID: "1"
       # Local DEMO cluster: explicitly unauthenticated (containers must bind 0.0.0.0).
       # Do NOT reuse this file for anything network-reachable — set
-      # STRATA_GATEWAY__AUTH_ENABLED=true + STRATA_GATEWAY__API_KEYS instead.
-      STRATA_GATEWAY__ALLOW_INSECURE: "true"
-      STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
+      # ECPHORIA_GATEWAY__AUTH_ENABLED=true + ECPHORIA_GATEWAY__API_KEYS instead.
+      ECPHORIA_GATEWAY__ALLOW_INSECURE: "true"
+      ECPHORIA_CLUSTER__LISTEN: "0.0.0.0:9433"
       # Full voter membership as id@addr, INCLUDING this node (lowest id bootstraps).
-      STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
-      STRATA_CLUSTER__DATA_DIR: "/data/raft"
-      STRATA_STORAGE__DATA_DIR: "/data"
-      STRATA_EMBEDDING__PROVIDER: ollama
-      STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
+      ECPHORIA_CLUSTER__PEERS: "1@http://ecphoria-1:9433,2@http://ecphoria-2:9433,3@http://ecphoria-3:9433"
+      ECPHORIA_CLUSTER__DATA_DIR: "/data/raft"
+      ECPHORIA_STORAGE__DATA_DIR: "/data"
+      ECPHORIA_EMBEDDING__PROVIDER: ollama
+      ECPHORIA_EMBEDDING__OLLAMA_URL: http://ollama:11434
     volumes:
-      - strata-1-data:/data
+      - ecphoria-1-data:/data
     depends_on:
       - ollama
 
-  strata-2:
+  ecphoria-2:
     build:
       context: ..
       dockerfile: Dockerfile
-    hostname: strata-2
+    hostname: ecphoria-2
     ports:
       - "8433:8432"
     environment:
-      STRATA_CLUSTER__ENABLED: "true"
-      STRATA_CLUSTER__NODE_ID: "2"
+      ECPHORIA_CLUSTER__ENABLED: "true"
+      ECPHORIA_CLUSTER__NODE_ID: "2"
       # Local DEMO cluster: explicitly unauthenticated (containers must bind 0.0.0.0).
       # Do NOT reuse this file for anything network-reachable — set
-      # STRATA_GATEWAY__AUTH_ENABLED=true + STRATA_GATEWAY__API_KEYS instead.
-      STRATA_GATEWAY__ALLOW_INSECURE: "true"
-      STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
-      STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
-      STRATA_CLUSTER__DATA_DIR: "/data/raft"
-      STRATA_STORAGE__DATA_DIR: "/data"
-      STRATA_EMBEDDING__PROVIDER: ollama
-      STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
+      # ECPHORIA_GATEWAY__AUTH_ENABLED=true + ECPHORIA_GATEWAY__API_KEYS instead.
+      ECPHORIA_GATEWAY__ALLOW_INSECURE: "true"
+      ECPHORIA_CLUSTER__LISTEN: "0.0.0.0:9433"
+      ECPHORIA_CLUSTER__PEERS: "1@http://ecphoria-1:9433,2@http://ecphoria-2:9433,3@http://ecphoria-3:9433"
+      ECPHORIA_CLUSTER__DATA_DIR: "/data/raft"
+      ECPHORIA_STORAGE__DATA_DIR: "/data"
+      ECPHORIA_EMBEDDING__PROVIDER: ollama
+      ECPHORIA_EMBEDDING__OLLAMA_URL: http://ollama:11434
     volumes:
-      - strata-2-data:/data
+      - ecphoria-2-data:/data
     depends_on:
       - ollama
 
-  strata-3:
+  ecphoria-3:
     build:
       context: ..
       dockerfile: Dockerfile
-    hostname: strata-3
+    hostname: ecphoria-3
     ports:
       - "8434:8432"
     environment:
-      STRATA_CLUSTER__ENABLED: "true"
-      STRATA_CLUSTER__NODE_ID: "3"
+      ECPHORIA_CLUSTER__ENABLED: "true"
+      ECPHORIA_CLUSTER__NODE_ID: "3"
       # Local DEMO cluster: explicitly unauthenticated (containers must bind 0.0.0.0).
       # Do NOT reuse this file for anything network-reachable — set
-      # STRATA_GATEWAY__AUTH_ENABLED=true + STRATA_GATEWAY__API_KEYS instead.
-      STRATA_GATEWAY__ALLOW_INSECURE: "true"
-      STRATA_CLUSTER__LISTEN: "0.0.0.0:9433"
-      STRATA_CLUSTER__PEERS: "1@http://strata-1:9433,2@http://strata-2:9433,3@http://strata-3:9433"
-      STRATA_CLUSTER__DATA_DIR: "/data/raft"
-      STRATA_STORAGE__DATA_DIR: "/data"
-      STRATA_EMBEDDING__PROVIDER: ollama
-      STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
+      # ECPHORIA_GATEWAY__AUTH_ENABLED=true + ECPHORIA_GATEWAY__API_KEYS instead.
+      ECPHORIA_GATEWAY__ALLOW_INSECURE: "true"
+      ECPHORIA_CLUSTER__LISTEN: "0.0.0.0:9433"
+      ECPHORIA_CLUSTER__PEERS: "1@http://ecphoria-1:9433,2@http://ecphoria-2:9433,3@http://ecphoria-3:9433"
+      ECPHORIA_CLUSTER__DATA_DIR: "/data/raft"
+      ECPHORIA_STORAGE__DATA_DIR: "/data"
+      ECPHORIA_EMBEDDING__PROVIDER: ollama
+      ECPHORIA_EMBEDDING__OLLAMA_URL: http://ollama:11434
     volumes:
-      - strata-3-data:/data
+      - ecphoria-3-data:/data
     depends_on:
       - ollama
 
@@ -87,7 +87,7 @@ services:
       - ollama-data:/root/.ollama
 
 volumes:
-  strata-1-data:
-  strata-2-data:
-  strata-3-data:
+  ecphoria-1-data:
+  ecphoria-2-data:
+  ecphoria-3-data:
   ollama-data:

@@ -1,0 +1,2 @@
+crewai>=0.30
+ecphoria-client>=0.2.0

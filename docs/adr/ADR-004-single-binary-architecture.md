@@ -2,13 +2,13 @@
 
 **Status**: Accepted  
 **Date**: 2024-06-10  
-**Author**: Strata Core Team
+**Author**: Ecphoria Core Team
 
 ## Context
 
 AI agent infrastructure is already complex. A typical agent stack includes an LLM provider, a vector database, a cache, a message queue, an event store, and an orchestration layer. Each service has its own deployment, configuration, monitoring, and upgrade lifecycle.
 
-Adding a "context lake" to this stack should reduce complexity, not increase it. The deployment experience matters as much as the feature set — if Strata requires a Docker Compose file with 5 services just to get started, most developers will close the tab.
+Adding a "context lake" to this stack should reduce complexity, not increase it. The deployment experience matters as much as the feature set — if Ecphoria requires a Docker Compose file with 5 services just to get started, most developers will close the tab.
 
 We need an architecture that:
 
@@ -27,7 +27,7 @@ We need an architecture that:
 
 ## Decision
 
-Build Strata as a **single binary** (`strata-server`) that embeds all three storage engines and exposes all protocols from one process.
+Build Ecphoria as a **single binary** (`ecphoria-server`) that embeds all three storage engines and exposes all protocols from one process.
 
 The binary includes:
 

@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ecphoria.fullname" . }}
+  labels:
+    {{- include "ecphoria.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: pg
+      port: {{ .Values.service.pgPort }}
+      targetPort: pg
+      protocol: TCP
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+  selector:
+    {{- include "ecphoria.selectorLabels" . | nindent 4 }}
+---
+# Headless service for StatefulSet peer discovery and Raft communication (single-group mode;
+# sharded mode uses a per-shard headless service in service-sharded.yaml).
+{{- if and .Values.headlessService.enabled (not .Values.sharding.enabled) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ecphoria.fullname" . }}-headless
+  labels:
+    {{- include "ecphoria.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: http
+      port: {{ .Values.service.httpPort }}
+      targetPort: http
+    - name: pg
+      port: {{ .Values.service.pgPort }}
+      targetPort: pg
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+    - name: raft
+      port: {{ .Values.service.raftPort }}
+      targetPort: raft
+  selector:
+    {{- include "ecphoria.selectorLabels" . | nindent 4 }}
+{{- end }}

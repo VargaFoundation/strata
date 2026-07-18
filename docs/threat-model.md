@@ -1,12 +1,12 @@
-# Strata Threat Model
+# Ecphoria Threat Model
 
-A 10-minute read for an architect evaluating Strata: what it is trusted to hold, where the trust
+A 10-minute read for an architect evaluating Ecphoria: what it is trusted to hold, where the trust
 boundaries are, what it **guarantees**, and — just as important — what it **does not**. Pairs with
 [security.md](security.md) (the how-to for each control).
 
-## What Strata protects
+## What Ecphoria protects
 
-Strata stores an AI agent's memory for one or many tenants:
+Ecphoria stores an AI agent's memory for one or many tenants:
 
 - **Episodic** events (DuckDB) — logs, actions, webhook payloads.
 - **Semantic** vectors (USearch) — embeddings for similarity search.
@@ -26,12 +26,12 @@ Strata stores an AI agent's memory for one or many tenants:
              └───────────────┬───────────────────────────────────────────┘
                              │  (A) authentication + RBAC + tenant scoping
              ┌───────────────▼──────────── TRUSTED (in-process) ─────────┐
-             │ StrataEngine: episodic · semantic · state · memories · runs│
+             │ EcphoriaEngine: episodic · semantic · state · memories · runs│
              │  (B) SQL AST tenant-rewrite   (C) outbound SSRF guard      │
              └───────────────┬───────────────────────────────────────────┘
                              │  (D) Raft shared-secret auth (cleartext H2)
              ┌───────────────▼──────────── PEER NODES ───────────────────┐
-             │ other Strata replicas (same fleet)                         │
+             │ other Ecphoria replicas (same fleet)                         │
              └───────────────────────────────────────────────────────────┘
    outbound: embedding/LLM providers, downstream MCP servers  ← (C)
 ```
@@ -48,7 +48,7 @@ Strata stores an AI agent's memory for one or many tenants:
 - **(D) Node → node.** Raft RPCs require a shared secret (constant-time checked). Transport is
   cleartext HTTP/2 — confidentiality relies on a mesh/mTLS or a private network.
 
-## What Strata guarantees
+## What Ecphoria guarantees
 
 - **No unauthenticated public exposure by accident** — fail-closed startup guard.
 - **Authn/authz** on REST **and** gRPC; `/admin/*` and `/cluster/*` are Admin-only.
@@ -64,7 +64,7 @@ Strata stores an AI agent's memory for one or many tenants:
 - **Prompt-injection containment:** retrieved memory is injected as delimited untrusted **user**-turn
   data, never as a system instruction; response cache scoped by (tenant, user, context).
 
-## What Strata does NOT guarantee (know these)
+## What Ecphoria does NOT guarantee (know these)
 
 - **PG wire (:5432) is unauthenticated at the protocol layer** — the password *is* the API key, but
   there is **no TLS on that listener today**, so the key crosses the network in cleartext. Bind it to

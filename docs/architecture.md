@@ -1,6 +1,6 @@
 # Architecture
 
-Strata is an **open-source agentic memory platform**: a single Rust binary that gives AI agents a
+Ecphoria is an **open-source agentic memory platform**: a single Rust binary that gives AI agents a
 durable, HA memory *and* runs the agents on top of it. This document is the detailed map — the
 pillars, where LLMs and embeddings actually fit, the crate/module layout, the memory-retrieval
 pipeline, the agent runtime, the clustering layer, and the request flows.
@@ -11,17 +11,17 @@ pipeline, the agent runtime, the clustering layer, and the request flows.
 
 ## 1. The three pillars
 
-Strata is not one thing; it's three layers stacked, in one process:
+Ecphoria is not one thing; it's three layers stacked, in one process:
 
 ```
  ┌──────────────────────────────────────────────────────────────────────────────┐
- │  PROTOCOLS  (strata-gateway)                                                    │
+ │  PROTOCOLS  (ecphoria-gateway)                                                    │
  │  REST/MCP/LLM-proxy :8432   ·   PostgreSQL wire :5432   ·   gRPC :9432          │
  │  auth (API key / JWT / OIDC) · RBAC · rate-limit · audit · multi-tenant         │
  └───────────────┬────────────────────────────────────────────────────────────────┘
-                 │  every request → StrataEngine (tenant-scoped)
+                 │  every request → EcphoriaEngine (tenant-scoped)
  ┌───────────────▼────────────────────────────────────────────────────────────────┐
- │  ENGINE  (strata-core :: StrataEngine)                                          │
+ │  ENGINE  (ecphoria-core :: EcphoriaEngine)                                          │
  │                                                                                  │
  │  ┌──────────────────────────────┐        ┌──────────────────────────────────┐   │
  │  │  AGENT RUNTIME               │ uses → │  MEMORY SUBSTRATE                │   │
@@ -41,7 +41,7 @@ Strata is not one thing; it's three layers stacked, in one process:
  └───────────────┬────────────────────────────────────────────────────────────────┘
                  │  writes proposed through consensus (cluster mode)
  ┌───────────────▼────────────────────────────────────────────────────────────────┐
- │  CLUSTER / HA  (strata-cluster)                                                 │
+ │  CLUSTER / HA  (ecphoria-cluster)                                                 │
  │  Raft (openraft) · gRPC+MessagePack transport :9433 · leader-forward ·           │
  │  sharding (N Raft groups) · snapshots · k8s operator                            │
  └──────────────────────────────────────────────────────────────────────────────┘
@@ -51,7 +51,7 @@ The agent runtime **uses** the memory substrate: when `run_agent` drives an agen
 `memory_search` (via the built-in `search` tool) to recall context. So memory-retrieval quality is
 not a side quest — it directly determines how good the agents are.
 
-There are **three** components, not two. The middle box **is** `strata-core` — the engine that holds
+There are **three** components, not two. The middle box **is** `ecphoria-core` — the engine that holds
 all business logic; the gateway above only *exposes* it, and the cluster below only *replicates* its
 writes. So `gateway → core → cluster`, with the core at the center (core knows nothing of either).
 
@@ -74,7 +74,7 @@ eval-only:
 | **Reranker** (LLM judge *or* local ONNX cross-encoder) | re-score the top candidates from hybrid search | **Product — optional** (read-path). |
 | **Bench answerer + judge** (`ops/bench`, via the Claude CLI) | simulate an agent asking questions + grade answers | **Eval-only.** Never in the product path. |
 
-Completion providers are pluggable (`crates/strata-core/src/llm/`): **Ollama**, **OpenAI**,
+Completion providers are pluggable (`crates/ecphoria-core/src/llm/`): **Ollama**, **OpenAI**,
 **Anthropic** (HTTP API), and **Claude via the logged-in CLI** (`claude -p`, no API key). Embedding
 providers: **Ollama**, **OpenAI**.
 
@@ -82,18 +82,18 @@ providers: **Ollama**, **OpenAI**.
 
 ## 3. Crate structure
 
-Cargo workspace; dependencies flow **downward** (`core ← cluster ← gateway ← server`). `strata-core`
+Cargo workspace; dependencies flow **downward** (`core ← cluster ← gateway ← server`). `ecphoria-core`
 knows nothing of protocols or Raft.
 
 ```
-strata-server (bin)   ── wiring: config → engine → coordinator → gateway → RunDispatcher → signals
-  ├── strata-gateway  → strata-core, strata-cluster
-  ├── strata-cluster  → strata-core
-  └── strata-core
-strata-cli (bin)      → strata-core (shared types; talks to the server over HTTP)
+ecphoria-server (bin)   ── wiring: config → engine → coordinator → gateway → RunDispatcher → signals
+  ├── ecphoria-gateway  → ecphoria-core, ecphoria-cluster
+  ├── ecphoria-cluster  → ecphoria-core
+  └── ecphoria-core
+ecphoria-cli (bin)      → ecphoria-core (shared types; talks to the server over HTTP)
 ```
 
-### `strata-core` — the engine (business logic, zero protocol/cluster knowledge)
+### `ecphoria-core` — the engine (business logic, zero protocol/cluster knowledge)
 | Module | Purpose |
 |--------|---------|
 | `memory::episodic` | DuckDB event store — SQL, connection pool, batch txns, `session_id`/`tenant_id`, TIMESTAMPTZ/JSON |
@@ -107,19 +107,19 @@ strata-cli (bin)      → strata-core (shared types; talks to the server over HT
 | `runtime` | **agentic substrate**: `RunStore` (durable runs), `ToolExecutor` + `RunReplicator` traits |
 | `ingest::pipeline` | validate → episodic → auto-embed (batched) → semantic index |
 | `storage` (+ `tiering`) | `StorageBackend` (local FS / S3-MinIO) + hot/warm/cold tiering |
-| `engine` | `StrataEngine` — wires everything; `memory_search`, `run_agent`, `run_workflow`, `run_dispatch_once`, … |
+| `engine` | `EcphoriaEngine` — wires everything; `memory_search`, `run_agent`, `run_workflow`, `run_dispatch_once`, … |
 
-### `strata-gateway` — protocols
+### `ecphoria-gateway` — protocols
 `rest` (axum), `pg_wire` (pgwire, tenant-auth: password = API key/JWT), `grpc` (tonic, shard-aware),
 `mcp` (Streamable HTTP), `llm_proxy` (OpenAI-compatible + auto-RAG), `auth` (API key / JWT HS256 /
 OIDC RS256, RBAC, rate-limit, audit), `cluster` (`leader_forward`, `shard_route`, `raft_routes`).
 
-### `strata-cluster` — distribution
+### `ecphoria-cluster` — distribution
 `raft::{types,store,network,server,tls}` (openraft 0.9; **gRPC + MessagePack** transport),
 `coordinator` (`ClusterCoordinator`, `client_write`, `CoordinatorRunReplicator`), `shard`
 (`ShardRouter`, `reconcile_plan`, `scale_plan`, `ShardedCluster`), `replication::snapshot`.
 
-### `strata-server` / `strata-cli`
+### `ecphoria-server` / `ecphoria-cli`
 Thin binary wiring / HTTP admin CLI. The **k8s operator** lives standalone in `ops/operator/`
 (outside the workspace).
 
@@ -194,15 +194,15 @@ Built on the memory substrate; this is the P2 platform.
 | **Tool-gateway** | register/list/call **downstream MCP servers**; injected into the loop via `ToolExecutor` so agents call external tools (governed by auth/RBAC/audit) | `rest::tool_gateway` + `runtime::tools` |
 | **HITL** | `run_request_approval`/`run_resolve_approval`; `WaitingApproval` + a state key; `run_resume` continues after approval | `engine.rs` |
 | **Workflows** | `run_workflow`: DAG of sub-agents (Kahn topo-sort, `parent_run_id`) | `engine.rs` |
-| **RunDispatcher** | leader-gated background loop that **auto-resumes runs orphaned by a crash/failover** (`run_dispatch_once`) | `strata-server/main.rs` |
+| **RunDispatcher** | leader-gated background loop that **auto-resumes runs orphaned by a crash/failover** (`run_dispatch_once`) | `ecphoria-server/main.rs` |
 | **Triggers** | `trigger_register` + `fire_triggers`; the webhook handler fires matching triggers → starts runs | `engine.rs` + `rest` |
 | **Idempotency** | tool calls carry `_idempotency_key = run_id:tool:<n>` (stable across resume) | `drive_agent_loop` |
 
-Metrics: `strata_runs_created_total`, `strata_runs_completed_total{status}`, `strata_run_steps_total{type}`.
+Metrics: `ecphoria_runs_created_total`, `ecphoria_runs_completed_total{status}`, `ecphoria_run_steps_total{type}`.
 
 ---
 
-## 6. Cluster / HA (`strata-cluster`)
+## 6. Cluster / HA (`ecphoria-cluster`)
 
 Multi-node via Raft (openraft 0.9). **Every mutation is proposed as an `AppRequest` through the log**
 and applied deterministically on every node, so committed writes survive leader failover.
@@ -218,7 +218,7 @@ and applied deterministically on every node, so committed writes survive leader 
           │ commit → apply on ALL nodes (deterministic)                   │
    ┌──────▼───────┐            ┌──────────────┐            ┌──────────────┐
    │  apply →      │            │  Follower 1  │            │  Follower 2  │
-   │  StrataEngine │            │  apply →eng. │            │  apply →eng. │
+   │  EcphoriaEngine │            │  apply →eng. │            │  apply →eng. │
    └──────────────┘            └──────────────┘            └──────────────┘
 ```
 
@@ -246,7 +246,7 @@ drain-then-delete) which the **k8s operator** (`ops/operator/`) applies.
 
 ---
 
-## 7. Protocols & auth (`strata-gateway`)
+## 7. Protocols & auth (`ecphoria-gateway`)
 
 | Protocol | Port | Notes |
 |----------|------|-------|

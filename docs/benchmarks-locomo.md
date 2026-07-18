@@ -1,12 +1,12 @@
 # LoCoMo evaluation — reproducible baseline
 
-Strata ships a LoCoMo-style harness (`crates/strata-core/examples/locomo_eval.rs`) and a converter
-for the real public datasets (`crates/strata-core/examples/locomo_convert.rs`). This page records
+Ecphoria ships a LoCoMo-style harness (`crates/ecphoria-core/examples/locomo_eval.rs`) and a converter
+for the real public datasets (`crates/ecphoria-core/examples/locomo_convert.rs`). This page records
 **reproducible** runs on the real LoCoMo dataset (snap-research/locomo — 10 conversations, 1986 QA).
 
 We publish the **repro recipe** and the numbers *our exact config* produces — **not** a leaderboard
 claim. The numbers below are a deliberate *conservative floor* (see Caveats); treat them as a
-regression baseline and a starting point, not as Strata's ceiling.
+regression baseline and a starting point, not as Ecphoria's ceiling.
 
 ## Reproduce
 
@@ -15,7 +15,7 @@ Ollama for embeddings, and downloads the dataset for you:
 
 ```bash
 make bench-smoke   # validate the whole pipeline in minutes (1 conversation, 5 QA)
-make bench         # full 10-conversation overnight run → /tmp/strata-bench/results-<ts>.txt
+make bench         # full 10-conversation overnight run → /tmp/ecphoria-bench/results-<ts>.txt
 ```
 
 See [ops/bench/README.md](../ops/bench/README.md) for knobs (`CONVS`, `EXTRACTION`, `EVAL_MODEL`, …)
@@ -24,23 +24,23 @@ and the self-judge-bias caveat. The manual, provider-agnostic recipe below produ
 ```bash
 # 1. Convert the real dataset into the harness schema
 curl -sL https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json -o locomo10.json
-cargo run -p strata-core --example locomo_convert -- locomo10.json > locomo.json
+cargo run -p ecphoria-core --example locomo_convert -- locomo10.json > locomo.json
 
 # 2. Retrieval metrics — full, hybrid (BM25 + vector) + graph expansion + auto-graph
 #    (~11 min on a laptop CPU with Ollama nomic-embed-text)
 LOCOMO_PATH=locomo.json \
-  STRATA_EMBEDDING__PROVIDER=ollama STRATA_EMBEDDING__MODEL=nomic-embed-text \
-  STRATA_COGNITION__GRAPH_EXPANSION=1 STRATA_COGNITION__AUTO_GRAPH=1 \
-  cargo run -p strata-core --example locomo_eval
+  ECPHORIA_EMBEDDING__PROVIDER=ollama ECPHORIA_EMBEDDING__MODEL=nomic-embed-text \
+  ECPHORIA_COGNITION__GRAPH_EXPANSION=1 ECPHORIA_COGNITION__AUTO_GRAPH=1 \
+  cargo run -p ecphoria-core --example locomo_eval
 
 # 3. End-to-end QA accuracy (token-F1): add an answerer (+ optional LLM reranker)
 #    NB: the LLM reranker is ~140 s/query on a local 7B model — use a small slice
 LOCOMO_PATH=locomo_slice.json \
-  STRATA_EMBEDDING__PROVIDER=ollama STRATA_EMBEDDING__MODEL=nomic-embed-text \
-  STRATA_RERANK__PROVIDER=llm STRATA_RERANK__BACKEND=ollama STRATA_RERANK__MODEL=glm-4.7-flash:latest \
-  STRATA_EVAL__PROVIDER=ollama STRATA_EVAL__MODEL=glm-4.7-flash:latest \
-  STRATA_COGNITION__GRAPH_EXPANSION=1 STRATA_COGNITION__AUTO_GRAPH=1 \
-  cargo run -p strata-core --example locomo_eval
+  ECPHORIA_EMBEDDING__PROVIDER=ollama ECPHORIA_EMBEDDING__MODEL=nomic-embed-text \
+  ECPHORIA_RERANK__PROVIDER=llm ECPHORIA_RERANK__BACKEND=ollama ECPHORIA_RERANK__MODEL=glm-4.7-flash:latest \
+  ECPHORIA_EVAL__PROVIDER=ollama ECPHORIA_EVAL__MODEL=glm-4.7-flash:latest \
+  ECPHORIA_COGNITION__GRAPH_EXPANSION=1 ECPHORIA_COGNITION__AUTO_GRAPH=1 \
+  cargo run -p ecphoria-core --example locomo_eval
 ```
 
 ### With Claude (Anthropic) — extraction + answerer/judge
@@ -50,18 +50,18 @@ the judge). Set your Anthropic API key and pick a model. Use a cheaper model for
 extraction and a stronger one for the judge if you like.
 
 ```bash
-export STRATA_EMBEDDING__ANTHROPIC_API_KEY=sk-ant-...
+export ECPHORIA_EMBEDDING__ANTHROPIC_API_KEY=sk-ant-...
 LOCOMO_PATH=locomo.json \
-  STRATA_EMBEDDING__PROVIDER=ollama STRATA_EMBEDDING__MODEL=nomic-embed-text \
-  STRATA_COGNITION__EXTRACTION=llm \
-  STRATA_COGNITION__EXTRACTION_PROVIDER=anthropic STRATA_COGNITION__EXTRACTION_MODEL=claude-haiku-4-5 \
-  STRATA_EVAL__PROVIDER=anthropic STRATA_EVAL__MODEL=claude-sonnet-5 \
-  STRATA_COGNITION__GRAPH_EXPANSION=1 STRATA_COGNITION__AUTO_GRAPH=1 \
-  cargo run -p strata-core --example locomo_eval
+  ECPHORIA_EMBEDDING__PROVIDER=ollama ECPHORIA_EMBEDDING__MODEL=nomic-embed-text \
+  ECPHORIA_COGNITION__EXTRACTION=llm \
+  ECPHORIA_COGNITION__EXTRACTION_PROVIDER=anthropic ECPHORIA_COGNITION__EXTRACTION_MODEL=claude-haiku-4-5 \
+  ECPHORIA_EVAL__PROVIDER=anthropic ECPHORIA_EVAL__MODEL=claude-sonnet-5 \
+  ECPHORIA_COGNITION__GRAPH_EXPANSION=1 ECPHORIA_COGNITION__AUTO_GRAPH=1 \
+  cargo run -p ecphoria-core --example locomo_eval
 ```
 
 For a fast, high-quality reranker instead of the ~140 s/query LLM reranker, build with the local
-cross-encoder: `--features rerank-local` + `STRATA_RERANK__PROVIDER=cross_encoder`.
+cross-encoder: `--features rerank-local` + `ECPHORIA_RERANK__PROVIDER=cross_encoder`.
 
 ## Results
 
@@ -93,7 +93,7 @@ embedding round-trip).
 
 1. **Raw turns, no LLM fact extraction.** This run stores each conversation turn verbatim
    (`extraction=none`). Mem0/Zep extract *atomic facts* at ingest, which both compresses and
-   normalizes the text — the single biggest lever. Strata's `extraction=llm` path exists, but a
+   normalizes the text — the single biggest lever. Ecphoria's `extraction=llm` path exists, but a
    full-dataset LLM-extraction run is ~5882 LLM calls (hours) and was not run here.
 2. **Strict metrics.** `recall` = the gold answer appearing as a substring of a retrieved memory;
    `QA-F1` = bag-of-words token-F1. Published leaderboards (~66% Mem0 / ~68% Zep) use an **LLM
@@ -117,13 +117,13 @@ embedding round-trip).
 
 | env | effect |
 |---|---|
-| `STRATA_EMBEDDING__PROVIDER` / `__MODEL` | hybrid retrieval (BM25 + vector) |
-| `STRATA_RERANK__PROVIDER=llm` / `__MODEL` | second-stage LLM reranking (slow — see latency note) |
-| `STRATA_COGNITION__GRAPH_EXPANSION=1` | query-time knowledge-graph expansion |
-| `STRATA_COGNITION__AUTO_GRAPH=1` | deterministic auto-population of graph edges from each memory |
-| `STRATA_COGNITION__EXTRACTION=llm` (+ `__EXTRACTION_PROVIDER` / `__EXTRACTION_MODEL`) | **LLM fact extraction** at ingest — distils each turn into atomic facts |
-| `STRATA_EVAL__PROVIDER` / `__MODEL` | end-to-end QA answerer (token-F1) |
-| `STRATA_EVAL__JUDGE=1` | add an **LLM judge** (`QA-judge` column) — the leniency-matched, leaderboard-comparable metric |
+| `ECPHORIA_EMBEDDING__PROVIDER` / `__MODEL` | hybrid retrieval (BM25 + vector) |
+| `ECPHORIA_RERANK__PROVIDER=llm` / `__MODEL` | second-stage LLM reranking (slow — see latency note) |
+| `ECPHORIA_COGNITION__GRAPH_EXPANSION=1` | query-time knowledge-graph expansion |
+| `ECPHORIA_COGNITION__AUTO_GRAPH=1` | deterministic auto-population of graph edges from each memory |
+| `ECPHORIA_COGNITION__EXTRACTION=llm` (+ `__EXTRACTION_PROVIDER` / `__EXTRACTION_MODEL`) | **LLM fact extraction** at ingest — distils each turn into atomic facts |
+| `ECPHORIA_EVAL__PROVIDER` / `__MODEL` | end-to-end QA answerer (token-F1) |
+| `ECPHORIA_EVAL__JUDGE=1` | add an **LLM judge** (`QA-judge` column) — the leniency-matched, leaderboard-comparable metric |
 
 **Extraction sanity check** (Ollama `glm-4.7-flash`): on a 3-turn / 4-QA micro set,
 `extraction=llm` split the 3 multi-fact turns into **7 atomic memories**, and the run reported

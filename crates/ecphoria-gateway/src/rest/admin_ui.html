@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ecphoria Admin</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#c9d1d9; --accent:#58a6ff; --muted:#8b949e; --ok:#3fb950; --err:#f85149; --warn:#d29922; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background:var(--bg); color:var(--fg); }
+  header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0 8px 0 0; color:var(--accent); }
+  input, button, textarea, select { font:inherit; background:var(--panel); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:5px 9px; }
+  input { min-width:210px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); color:var(--accent); }
+  button.danger:hover { border-color:var(--err); color:var(--err); }
+  nav { display:flex; gap:2px; padding:6px 16px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  nav button { background:none; border:1px solid transparent; }
+  nav button.active { border-color:var(--border); color:var(--accent); }
+  main { padding:16px; max-width:1200px; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  .row { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; align-items:flex-start; }
+  .grow { flex:1; }
+  textarea { width:100%; min-height:64px; resize:vertical; }
+  pre { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:10px; overflow:auto; max-height:52vh; white-space:pre-wrap; word-break:break-word; margin:6px 0; }
+  table { border-collapse:collapse; width:100%; margin:6px 0; }
+  th, td { border:1px solid var(--border); padding:5px 8px; text-align:left; vertical-align:top; }
+  th { color:var(--muted); }
+  .muted { color:var(--muted); }
+  .ok { color:var(--ok); } .err { color:var(--err); } .warn { color:var(--warn); }
+  .card { border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:12px; background:#0f141a; }
+  .card h3 { margin:0 0 6px; font-size:13px; }
+  .card .desc { color:var(--muted); margin-bottom:8px; }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; }
+  .stat { border:1px solid var(--border); border-radius:8px; padding:10px 14px; min-width:130px; background:#0f141a; }
+  .stat .k { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  .stat .v { font-size:20px; margin-top:2px; }
+  a { color:var(--accent); cursor:pointer; }
+  .pill { padding:1px 7px; border-radius:10px; border:1px solid var(--border); font-size:11px; }
+  .pill.running,.pill.pending { color:var(--warn); border-color:var(--warn); }
+  .pill.completed,.pill.active { color:var(--ok); border-color:var(--ok); }
+  .pill.failed,.pill.cancelled { color:var(--err); border-color:var(--err); }
+  .pill.waitingapproval,.pill.waiting_approval { color:var(--accent); border-color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>◆ Ecphoria Admin</h1>
+  <input id="url" value="" placeholder="http://localhost:8432" />
+  <input id="key" placeholder="API key / JWT (if auth enabled)" />
+  <button onclick="connect()">Connect</button>
+  <span id="status" class="muted">not connected</span>
+  <span class="grow"></span>
+  <a href="/metrics" target="_blank">/metrics</a>
+</header>
+<nav id="nav"></nav>
+<main>
+  <section id="overview" class="panel active">
+    <div class="row"><button onclick="loadOverview()">Refresh</button></div>
+    <div id="ov-stats" class="stats"></div>
+    <h3>Cluster</h3><pre id="ov-cluster" class="muted">—</pre>
+  </section>
+
+  <section id="memory" class="panel">
+    <div class="row">
+      <input id="mem-q" class="grow" placeholder="semantic search query" />
+      <input id="mem-tenant" placeholder="tenant (default)" />
+      <input id="mem-user" placeholder="user_id (optional)" />
+      <input id="mem-k" type="number" value="10" style="min-width:70px" />
+      <button onclick="memSearch()">Search</button>
+    </div>
+    <div id="mem-out"></div>
+    <div class="card">
+      <h3>Detail — provenance &amp; bi-temporal history</h3>
+      <div class="desc">Click <b>why?</b> or <b>history</b> on a result, or 👍/👎 to give feedback.</div>
+      <pre id="mem-detail" class="muted">select a memory</pre>
+    </div>
+    <div class="card">
+      <h3>Add memory</h3>
+      <div class="row">
+        <input id="ma-content" class="grow" placeholder="content (fact)" />
+        <input id="ma-user" placeholder="user_id" />
+        <input id="ma-subject" placeholder="subject (optional)" />
+        <button onclick="memAdd()">Add</button>
+      </div>
+      <pre id="ma-out" class="muted">—</pre>
+    </div>
+  </section>
+
+  <section id="graph" class="panel">
+    <p class="muted">Explore the bi-temporal knowledge graph around an entity.</p>
+    <div class="row">
+      <input id="g-entity" class="grow" placeholder="entity (e.g. Alice)" />
+      <input id="g-depth" type="number" value="1" style="min-width:70px" title="hops" />
+      <button onclick="graphExplore()">Explore</button>
+    </div>
+    <div id="g-out"></div>
+    <div class="card">
+      <h3>Add edge</h3>
+      <div class="row">
+        <input id="ge-src" placeholder="src" />
+        <input id="ge-rel" placeholder="relation" />
+        <input id="ge-dst" placeholder="dst" />
+        <label class="muted"><input id="ge-sup" type="checkbox" style="min-width:auto" /> supersede</label>
+        <button onclick="graphLink()">Link</button>
+      </div>
+      <pre id="ge-out" class="muted">—</pre>
+    </div>
+  </section>
+
+  <section id="contradictions" class="panel">
+    <p class="muted">Human-in-the-loop review queue — subjects with more than one active memory
+      (requires <code>cognition.contradiction_review</code>). Keep one; the rest are superseded.</p>
+    <div class="row">
+      <input id="c-user" placeholder="user_id (optional)" />
+      <button onclick="loadContradictions()">Refresh queue</button>
+    </div>
+    <div id="c-out"></div>
+  </section>
+
+  <section id="runs" class="panel">
+    <div class="row">
+      <button onclick="listRuns()">Refresh runs</button>
+      <span class="grow"></span>
+      <input id="ra-agent" value="assistant" style="min-width:120px" />
+      <input id="ra-q" class="grow" placeholder="ask the agent a question…" />
+      <button onclick="runAgent()">Run agent</button>
+    </div>
+    <div id="runs-out"></div>
+    <div class="row">
+      <div class="grow"><h3>Run detail</h3><pre id="run-detail" class="muted">select a run</pre></div>
+      <div class="grow"><h3>Trace</h3><pre id="run-trace" class="muted">—</pre></div>
+    </div>
+    <div id="run-actions" class="row"></div>
+  </section>
+
+  <section id="sql" class="panel">
+    <textarea id="sql-q">SELECT source, event_type, ts FROM episodic ORDER BY ts DESC LIMIT 20</textarea>
+    <div class="row"><button onclick="runSql()">Run query</button><span class="muted">SELECT-only, per-tenant scoped</span></div>
+    <div id="sql-out"></div>
+  </section>
+
+  <section id="sessions" class="panel">
+    <p class="muted">Recall a conversation session's events by id.</p>
+    <div class="row"><input id="sess-id" class="grow" placeholder="session_id" /><button onclick="recallSession()">Recall</button></div>
+    <pre id="sess-recall" class="muted">—</pre>
+  </section>
+
+  <section id="registry" class="panel">
+    <div class="row"><button onclick="listTriggers()">Triggers</button><button onclick="listTools()">MCP tools</button></div>
+    <pre id="reg-out" class="muted">—</pre>
+  </section>
+
+  <section id="ops" class="panel">
+    <p class="muted">Operational actions. Edit the JSON body where shown, then Run. Destructive actions are marked.</p>
+    <div id="ops-cards"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function base() { return ($("url").value || "http://localhost:8432").replace(/\/+$/, ""); }
+function headers() { const h = { "Content-Type": "application/json" }; const k = $("key").value.trim(); if (k) h["Authorization"] = "Bearer " + k; return h; }
+async function api(method, path, body) {
+  const r = await fetch(base() + path, { method, headers: headers(), body: body !== undefined ? JSON.stringify(body) : undefined });
+  const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
+  if (!r.ok) throw new Error(typeof j === "object" ? JSON.stringify(j) : (j || r.status));
+  return j;
+}
+const esc = (v) => String(v == null ? "" : typeof v === "object" ? JSON.stringify(v) : v)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+function table(rows) {
+  if (!rows || !rows.length) return '<p class="muted">no rows</p>';
+  const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  return "<table><thead><tr>" + cols.map((c) => `<th>${c}</th>`).join("") + "</tr></thead><tbody>" +
+    rows.map((r) => "<tr>" + cols.map((c) => `<td>${esc(r[c])}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
+}
+const pill = (s) => `<span class="pill ${esc(String(s || "").toLowerCase())}">${esc(s)}</span>`;
+const errBox = (el, e) => (el.innerHTML = `<pre class="err">${esc(e.message || e)}</pre>`);
+
+// ---- tabs ----
+const TABS = [["overview","Overview"],["memory","Memory"],["graph","Graph"],["contradictions","Contradictions"],["runs","Agent runs"],["sql","SQL"],["sessions","Sessions"],["registry","Triggers/Tools"],["ops","Admin ops"]];
+$("nav").innerHTML = TABS.map(([id,label],i)=>`<button data-tab="${id}" class="${i===0?"active":""}">${label}</button>`).join("");
+document.querySelectorAll("nav button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach((x) => x.classList.remove("active"));
+  document.querySelectorAll(".panel").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active"); $(b.dataset.tab).classList.add("active");
+});
+
+// Delegated listeners — run rows/actions carry their data in escaped data-* attributes rather than
+// inline onclick handlers, so server-supplied ids/status can never be interpolated into executable JS.
+$("runs-out").addEventListener("click", (e) => {
+  const a = e.target.closest("a[data-run-id]");
+  if (a) openRun(a.dataset.runId);
+});
+$("run-actions").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const body = b.dataset.approve !== undefined ? { approve: b.dataset.approve === "true" } : undefined;
+  runAct($("run-actions").dataset.runId, b.dataset.act, body);
+});
+
+// ---- connect / overview ----
+async function connect() {
+  try { const h = await api("GET", "/health"); $("status").innerHTML = `<span class="ok">✓ ${esc(h.status||"ok")} ${esc(h.version||"")}</span>`; loadOverview(); }
+  catch (e) { $("status").innerHTML = `<span class="err">✗ ${esc(e.message)}</span>`; }
+}
+function parseMetric(text, name) { const m = text.match(new RegExp("^" + name + "(?:\\{[^}]*\\})?\\s+([0-9.eE+-]+)", "m")); return m ? Number(m[1]) : null; }
+async function loadOverview() {
+  const stats = [];
+  try {
+    const rows = (await api("POST", "/api/v1/query", { sql: "SELECT count(*) n FROM episodic" })).rows;
+    stats.push(["episodic events", rows && rows[0] ? rows[0].n : "—"]);
+  } catch { stats.push(["episodic events", "n/a"]); }
+  try { const m = await (await fetch(base() + "/metrics")).text();
+    stats.push(["runs created", parseMetric(m, "ecphoria_runs_created_total") ?? "—"]);
+    stats.push(["runs completed", parseMetric(m, "ecphoria_runs_completed_total") ?? "—"]);
+    stats.push(["embed failures", parseMetric(m, "ecphoria_memory_embed_failures_total") ?? 0]);
+    const leader = parseMetric(m, "ecphoria_raft_is_leader"); if (leader != null) stats.push(["raft leader", leader ? "yes" : "no"]);
+  } catch {}
+  $("ov-stats").innerHTML = stats.map(([k,v]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
+  try { $("ov-cluster").textContent = JSON.stringify(await api("GET", "/cluster/status"), null, 2); }
+  catch (e) { $("ov-cluster").textContent = "single-node (no /cluster/status): " + (e.message||e); }
+}
+
+// ---- memory ----
+async function memSearch() {
+  const body = { query: $("mem-q").value, k: Number($("mem-k").value) || 10 };
+  const t = $("mem-tenant").value.trim(); if (t) body.tenant_id = t;
+  const u = $("mem-user").value.trim(); if (u) body.user_id = u;
+  try { const j = await api("POST", "/api/v1/memories/search", body);
+    const rows = (j.results || []);
+    if (!rows.length) { $("mem-out").innerHTML = '<p class="muted">no results</p>'; return; }
+    $("mem-out").innerHTML = "<table><thead><tr><th>content</th><th>subject</th><th>score</th><th>actions</th></tr></thead><tbody>" +
+      rows.map((h) => { const m = h.memory || h; const id = esc(m.id);
+        return `<tr><td>${esc(m.content)}</td><td>${esc(m.subject)}</td><td>${(h.score||0).toFixed(3)}</td>` +
+          `<td><a data-mem-why="${id}">why?</a> · <a data-mem-hist="${id}">history</a> · ` +
+          `<a data-mem-fb="${id}" data-verdict="helpful">👍</a> <a data-mem-fb="${id}" data-verdict="wrong">👎</a></td></tr>`;
+      }).join("") + "</tbody></table>";
+  } catch (e) { errBox($("mem-out"), e); }
+}
+// Delegated memory actions (ids in data-* attrs, never interpolated into executable JS).
+$("mem-out").addEventListener("click", async (e) => {
+  const el = e.target.closest("a[data-mem-why],a[data-mem-hist],a[data-mem-fb]");
+  if (!el) return;
+  const d = $("mem-detail");
+  try {
+    if (el.dataset.memWhy) { d.textContent = "loading provenance…"; d.textContent = JSON.stringify(await api("GET", "/api/v1/memories/" + el.dataset.memWhy + "/provenance"), null, 2); }
+    else if (el.dataset.memHist) { d.textContent = "loading history…"; d.textContent = JSON.stringify(await api("GET", "/api/v1/memories/" + el.dataset.memHist + "/history"), null, 2); }
+    else if (el.dataset.memFb) { d.textContent = JSON.stringify(await api("POST", "/api/v1/memories/" + el.dataset.memFb + "/feedback", { verdict: el.dataset.verdict }), null, 2); memSearch(); }
+  } catch (err) { d.innerHTML = `<span class="err">${esc(err.message)}</span>`; }
+});
+async function memAdd() {
+  const body = { content: $("ma-content").value };
+  const u = $("ma-user").value.trim(); if (u) body.user_id = u;
+  const s = $("ma-subject").value.trim(); if (s) body.subject = s;
+  try { $("ma-out").textContent = JSON.stringify(await api("POST", "/api/v1/memories", body), null, 2); }
+  catch (e) { $("ma-out").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+// ---- graph ----
+async function graphExplore() {
+  const entity = $("g-entity").value.trim(); if (!entity) return;
+  const depth = Number($("g-depth").value) || 1;
+  try { const j = await api("GET", `/api/v1/memories/graph?entity=${encodeURIComponent(entity)}&depth=${depth}&limit=200`);
+    $("g-out").innerHTML = table((j.edges || []).map((e) => ({ src: e.src, relation: e.relation, dst: e.dst, valid_from: e.valid_from, valid_to: e.valid_to || "" })));
+  } catch (e) { errBox($("g-out"), e); }
+}
+async function graphLink() {
+  const body = { src: $("ge-src").value, relation: $("ge-rel").value, dst: $("ge-dst").value, supersede: $("ge-sup").checked };
+  try { $("ge-out").textContent = JSON.stringify(await api("POST", "/api/v1/memories/link", body), null, 2); graphExplore(); }
+  catch (e) { $("ge-out").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+// ---- contradictions (HITL) ----
+async function loadContradictions() {
+  const u = $("c-user").value.trim();
+  try { const j = await api("GET", "/api/v1/memories/contradictions" + (u ? "?user_id=" + encodeURIComponent(u) : ""));
+    const groups = (j.contradictions || []);
+    if (!groups.length) { $("c-out").innerHTML = '<p class="muted">no contradictions — the queue is empty.</p>'; return; }
+    $("c-out").innerHTML = groups.map((g) => `<div class="card"><h3>subject: ${esc(g.subject)} <span class="muted">(${g.memories.length} active)</span></h3>` +
+      "<table><thead><tr><th>content</th><th>importance</th><th>keep this</th></tr></thead><tbody>" +
+      g.memories.map((m) => `<tr><td>${esc(m.content)}</td><td>${esc(m.importance)}</td>` +
+        `<td><button data-c-keep="${esc(m.id)}" data-c-subject="${esc(g.subject)}" data-c-user="${esc(u)}">keep</button></td></tr>`).join("") +
+      "</tbody></table></div>").join("");
+  } catch (e) { errBox($("c-out"), e); }
+}
+$("c-out").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-c-keep]"); if (!b) return;
+  const body = { subject: b.dataset.cSubject, keep_id: b.dataset.cKeep };
+  if (b.dataset.cUser) body.user_id = b.dataset.cUser;
+  try { await api("POST", "/api/v1/memories/contradictions/resolve", body); loadContradictions(); }
+  catch (err) { errBox($("c-out"), err); }
+});
+
+// ---- runs + HITL ----
+async function listRuns() {
+  try { const j = await api("GET", "/api/v1/runs?limit=50");
+    const rows = (j.runs || []);
+    $("runs-out").innerHTML = "<table><thead><tr><th>id</th><th>agent</th><th>status</th><th>created</th></tr></thead><tbody>" +
+      rows.map((r) => `<tr><td><a data-run-id="${esc(r.id)}">${esc(String(r.id).slice(0,8))}…</a></td><td>${esc(r.agent_id)}</td><td>${pill(r.status)}</td><td>${esc(r.created_at)}</td></tr>`).join("") + "</tbody></table>";
+  } catch (e) { errBox($("runs-out"), e); }
+}
+async function openRun(id) {
+  try {
+    const r = (await api("GET", "/api/v1/runs/" + id)).run || await api("GET", "/api/v1/runs/" + id);
+    $("run-detail").textContent = JSON.stringify(r, null, 2);
+    const t = await api("GET", "/api/v1/runs/" + id + "/trace");
+    $("run-trace").textContent = JSON.stringify(t.steps || t, null, 2);
+    const st = String(r.status || "").toLowerCase();
+    const acts = [];
+    if (st === "waitingapproval" || st === "waiting_approval") {
+      acts.push(`<button data-act="/approve" data-approve="true">Approve</button>`);
+      acts.push(`<button class="danger" data-act="/approve" data-approve="false">Reject</button>`);
+    }
+    acts.push(`<button data-act="/resume">Resume</button>`);
+    acts.push(`<button class="danger" data-act="/cancel">Cancel</button>`);
+    $("run-actions").dataset.runId = id;
+    $("run-actions").innerHTML = acts.join(" ");
+  } catch (e) { errBox($("run-detail"), e); }
+}
+async function runAct(id, suffix, body) {
+  try { await api("POST", "/api/v1/runs/" + id + suffix, body); openRun(id); listRuns(); }
+  catch (e) { errBox($("run-detail"), e); }
+}
+async function runAgent() {
+  $("runs-out").innerHTML = '<p class="muted">running agent…</p>';
+  try { await api("POST", "/api/v1/agents/run", { agent_id: $("ra-agent").value, question: $("ra-q").value }); listRuns(); }
+  catch (e) { errBox($("runs-out"), e); }
+}
+
+// ---- sql ----
+async function runSql() {
+  try { const j = await api("POST", "/api/v1/query", { sql: $("sql-q").value }); $("sql-out").innerHTML = table(j.rows || []); }
+  catch (e) { errBox($("sql-out"), e); }
+}
+
+// ---- sessions ----
+async function recallSession() {
+  const id = $("sess-id").value.trim(); if (!id) return;
+  try { $("sess-recall").textContent = JSON.stringify(await api("GET", "/api/v1/sessions/" + id + "/recall"), null, 2); }
+  catch (e) { $("sess-recall").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+// ---- triggers / tools ----
+async function listTriggers() { try { $("reg-out").textContent = JSON.stringify(await api("GET", "/api/v1/triggers"), null, 2); } catch (e) { $("reg-out").innerHTML = `<span class="err">${esc(e.message)}</span>`; } }
+async function listTools() { try { $("reg-out").textContent = JSON.stringify(await api("GET", "/api/v1/tools"), null, 2); } catch (e) { $("reg-out").innerHTML = `<span class="err">${esc(e.message)}</span>`; } }
+
+// ---- admin ops (data-driven) ----
+const OPS = [
+  { name: "Enforce retention", method: "POST", path: "/api/v1/admin/retention", desc: "Delete events past their per-source / default retention." },
+  { name: "Retention policies", method: "GET", path: "/api/v1/admin/retention/policies", desc: "List per-source retention policies." },
+  { name: "Set retention policy", method: "PUT", path: "/api/v1/admin/retention/policies", desc: "Set a per-source retention (days).", body: { source: "github", days: 90 } },
+  { name: "Backup", method: "POST", path: "/api/v1/admin/backup", desc: "Snapshot all four stores to the data dir." },
+  { name: "Restore", method: "POST", path: "/api/v1/admin/restore", desc: "Restore all stores from a backup directory.", body: { path: "./data/backups/<stamp>" }, danger: true },
+  { name: "Reindex vectors", method: "POST", path: "/api/v1/admin/reindex", desc: "Rebuild the vector index from persisted embeddings." },
+  { name: "Memory decay", method: "POST", path: "/api/v1/admin/memory/decay", desc: "Forget low-value memories by time-decayed importance." },
+  { name: "Memory consolidate", method: "POST", path: "/api/v1/admin/memory/consolidate", desc: "Fold a scope's low-importance tail into one summary memory.", body: { user_id: "alice", keep: 50 } },
+  { name: "Consolidate similar", method: "POST", path: "/api/v1/admin/memory/consolidate-similar", desc: "Fold semantically-similar memory clusters into abstractions.", body: { user_id: "alice", threshold: 0.92 } },
+  { name: "Distill session", method: "POST", path: "/api/v1/sessions/SESSION_ID/distill", desc: "Consolidate a closed session's events into memory (edit the id in the path)." },
+  { name: "Rebalance shards", method: "POST", path: "/api/v1/admin/rebalance", desc: "Recompute shard placement (cluster/sharded only).", body: {} },
+  { name: "Export tenant", method: "GET", path: "/api/v1/admin/tenants/default/export", desc: "Export a tenant's data (edit the tenant in the path)." },
+  { name: "Delete tenant (GDPR)", method: "DELETE", path: "/api/v1/admin/tenants/default", desc: "Erase ALL data for a tenant across every store.", danger: true },
+  { name: "Delete user (GDPR)", method: "DELETE", path: "/api/v1/admin/users/alice", desc: "Erase a user's memories + vectors within the token's tenant (edit the user id).", danger: true },
+  { name: "Audit log", method: "GET", path: "/api/v1/admin/audit?limit=50", desc: "Query the durable auth/audit log (requires auth enabled)." },
+];
+$("ops-cards").innerHTML = OPS.map((op, i) => `
+  <div class="card">
+    <h3>${esc(op.name)} <span class="muted">${op.method} ${esc(op.path)}</span></h3>
+    <div class="desc">${esc(op.desc)}</div>
+    <div class="row">
+      <input id="op-path-${i}" class="grow" value="${esc(op.path)}" />
+      ${op.body !== undefined ? `<button class="${op.danger ? "danger" : ""}" onclick="runOp(${i},true)">Run</button>` : `<button class="${op.danger ? "danger" : ""}" onclick="runOp(${i},false)">Run</button>`}
+    </div>
+    ${op.body !== undefined ? `<textarea id="op-body-${i}">${esc(JSON.stringify(op.body, null, 2))}</textarea>` : ""}
+    <pre id="op-out-${i}" class="muted">—</pre>
+  </div>`).join("");
+async function runOp(i, hasBody) {
+  const op = OPS[i]; const out = $("op-out-" + i); const path = $("op-path-" + i).value;
+  if (op.danger && !confirm(op.name + " — this is destructive. Continue?")) return;
+  let body;
+  if (hasBody) { try { body = JSON.parse($("op-body-" + i).value); } catch (e) { out.innerHTML = `<span class="err">invalid JSON: ${esc(e.message)}</span>`; return; } }
+  out.textContent = "running…";
+  try { out.textContent = JSON.stringify(await api(op.method, path, body), null, 2); }
+  catch (e) { out.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+if (!$("url").value) $("url").value = location.origin;
+connect();
+</script>
+</body>
+</html>

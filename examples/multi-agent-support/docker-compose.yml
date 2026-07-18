@@ -1,14 +1,14 @@
 services:
-  strata:
-    image: ghcr.io/varga-foundation/strata:latest
+  ecphoria:
+    image: ghcr.io/varga-foundation/ecphoria:latest
     ports:
       - "8432:8432"
       - "5432:5432"
     environment:
-      STRATA_EMBEDDING__PROVIDER: ollama
-      STRATA_EMBEDDING__OLLAMA_URL: http://ollama:11434
+      ECPHORIA_EMBEDDING__PROVIDER: ollama
+      ECPHORIA_EMBEDDING__OLLAMA_URL: http://ollama:11434
     volumes:
-      - strata-data:/data
+      - ecphoria-data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8432/health"]
       interval: 5s
@@ -26,32 +26,32 @@ services:
     build: .
     command: python -m agents.triage
     depends_on:
-      strata:
+      ecphoria:
         condition: service_healthy
     environment:
-      STRATA_URL: http://strata:8432
+      ECPHORIA_URL: http://ecphoria:8432
       POLL_INTERVAL: "2"
 
   support-l1:
     build: .
     command: python -m agents.support_l1
     depends_on:
-      strata:
+      ecphoria:
         condition: service_healthy
     environment:
-      STRATA_URL: http://strata:8432
+      ECPHORIA_URL: http://ecphoria:8432
       POLL_INTERVAL: "2"
 
   escalation-l2:
     build: .
     command: python -m agents.escalation_l2
     depends_on:
-      strata:
+      ecphoria:
         condition: service_healthy
     environment:
-      STRATA_URL: http://strata:8432
+      ECPHORIA_URL: http://ecphoria:8432
       POLL_INTERVAL: "2"
 
 volumes:
-  strata-data:
+  ecphoria-data:
   ollama-data:

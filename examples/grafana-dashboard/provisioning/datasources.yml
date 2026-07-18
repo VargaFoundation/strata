@@ -1,11 +1,11 @@
 apiVersion: 1
 
 datasources:
-  - name: Strata
+  - name: Ecphoria
     type: postgres
-    uid: strata-pg
-    url: strata:5432
-    database: strata
+    uid: ecphoria-pg
+    url: ecphoria:5432
+    database: ecphoria
     user: postgres
     jsonData:
       sslmode: disable
@@ -14,6 +14,6 @@ datasources:
 
   - name: Prometheus
     type: prometheus
-    uid: strata-prom
+    uid: ecphoria-prom
     url: http://prometheus:9090
     isDefault: false

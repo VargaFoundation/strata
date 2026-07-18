@@ -1,12 +1,12 @@
 # NOTE: This operator is intentionally NOT part of the Cargo workspace and is NOT committed to the
 # repo's build — it cannot be integration-tested without a live Kubernetes cluster. Its decision
-# logic mirrors the workspace's `strata_cluster::reconcile_plan` (which IS unit-tested + committed).
+# logic mirrors the workspace's `ecphoria_cluster::reconcile_plan` (which IS unit-tested + committed).
 # Build/run it in an environment that has a cluster (kind/k3d/minikube or real).
 # Standalone (not a workspace member) — its own empty workspace table detaches it from the repo root.
 [workspace]
 
 [package]
-name = "strata-operator"
+name = "ecphoria-operator"
 version = "0.1.0"
 edition = "2021"
 

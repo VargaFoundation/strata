@@ -1,2 +1,0 @@
-crewai>=0.30
-strata-client>=0.2.0

@@ -1,5 +1,5 @@
 [package]
-name = "strata-integration-tests"
+name = "ecphoria-integration-tests"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -7,13 +7,13 @@ publish = false
 
 # Empty lib to satisfy Cargo; all tests are in tests/*.rs
 [lib]
-name = "strata_integration_tests"
+name = "ecphoria_integration_tests"
 path = "src/lib.rs"
 
 [dev-dependencies]
-strata-core.workspace = true
-strata-gateway.workspace = true
-strata-cluster.workspace = true
+ecphoria-core.workspace = true
+ecphoria-gateway.workspace = true
+ecphoria-cluster.workspace = true
 
 tokio.workspace = true
 axum.workspace = true

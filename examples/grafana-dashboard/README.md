@@ -1,6 +1,6 @@
 # Grafana Dashboard for AI Agents
 
-A ready-to-import Grafana dashboard that connects to Strata via its PostgreSQL wire protocol and Prometheus metrics. Visualize agent activity, event timelines, and API performance in real time.
+A ready-to-import Grafana dashboard that connects to Ecphoria via its PostgreSQL wire protocol and Prometheus metrics. Visualize agent activity, event timelines, and API performance in real time.
 
 ## What You'll See
 
@@ -37,7 +37,7 @@ cd examples/grafana-dashboard
 docker compose up -d
 ```
 
-Then open [http://localhost:3000](http://localhost:3000) — login with `admin` / `strata`.
+Then open [http://localhost:3000](http://localhost:3000) — login with `admin` / `ecphoria`.
 
 The dashboard auto-provisions and the seed container injects 50 sample events so you see data immediately. Auto-refresh is set to 30s.
 
@@ -45,25 +45,25 @@ The dashboard auto-provisions and the seed container injects 50 sample events so
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| Strata | 8432 (HTTP), 5432 (PG wire) | Context lake |
+| Ecphoria | 8432 (HTTP), 5432 (PG wire) | Context lake |
 | Grafana | 3000 | Dashboard UI |
 | Prometheus | 9090 | Metrics scraping |
 
 ## How It Works
 
-- **SQL panels** connect to Strata's PG wire interface (port 5432) using the PostgreSQL datasource. Strata routes SQL to DuckDB, which supports full analytical queries.
-- **Prometheus panels** scrape Strata's `/metrics` endpoint for request rates and latency histograms.
+- **SQL panels** connect to Ecphoria's PG wire interface (port 5432) using the PostgreSQL datasource. Ecphoria routes SQL to DuckDB, which supports full analytical queries.
+- **Prometheus panels** scrape Ecphoria's `/metrics` endpoint for request rates and latency histograms.
 - The dashboard is provisioned automatically via Grafana's file-based provisioning.
 
 ## Import into Existing Grafana
 
 If you already have Grafana running:
 
-1. Add a PostgreSQL datasource pointing to your Strata instance (port 5432)
+1. Add a PostgreSQL datasource pointing to your Ecphoria instance (port 5432)
 2. Import `dashboards/ai-agents.json` via Grafana UI (Dashboards > Import)
-3. Select the Strata datasource when prompted
+3. Select the Ecphoria datasource when prompted
 
-For Prometheus panels, also add a Prometheus datasource scraping Strata's `:8432/metrics`.
+For Prometheus panels, also add a Prometheus datasource scraping Ecphoria's `:8432/metrics`.
 
 ## Customization
 

@@ -1,21 +1,21 @@
-# @strata/client
+# @ecphoria/client
 
-TypeScript/JavaScript client for the [Strata](https://github.com/VargaFoundation/strata) context lake.
+TypeScript/JavaScript client for the [Ecphoria](https://github.com/VargaFoundation/ecphoria) context lake.
 
 Zero runtime dependencies — uses the native `fetch` API (Node 18+, Deno, Bun, browsers).
 
 ## Install
 
 ```bash
-npm install @strata/client
+npm install @ecphoria/client
 ```
 
 ## Quick Start
 
 ```ts
-import { StrataClient } from "@strata/client";
+import { EcphoriaClient } from "@ecphoria/client";
 
-const client = new StrataClient({ url: "http://localhost:8432" });
+const client = new EcphoriaClient({ url: "http://localhost:8432" });
 
 // Ingest events
 await client.ingest("my-app", [
@@ -49,7 +49,7 @@ const cluster = await client.clusterStatus();
 ## Authentication
 
 ```ts
-const client = new StrataClient({
+const client = new EcphoriaClient({
   url: "http://localhost:8432",
   apiKey: "your-api-key",
 });

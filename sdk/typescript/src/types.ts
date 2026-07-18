@@ -1,6 +1,6 @@
-/** Configuration options for the Strata client. */
-export interface StrataClientOptions {
-  /** Base URL of the Strata server (default: "http://localhost:8432"). */
+/** Configuration options for the Ecphoria client. */
+export interface EcphoriaClientOptions {
+  /** Base URL of the Ecphoria server (default: "http://localhost:8432"). */
   url?: string;
   /** API key for Bearer authentication. */
   apiKey?: string;
@@ -100,8 +100,8 @@ export interface ClusterStatus {
   [key: string]: unknown;
 }
 
-/** Error returned by the Strata API. */
-export interface StrataApiError {
+/** Error returned by the Ecphoria API. */
+export interface EcphoriaApiError {
   code: string;
   message: string;
   request_id?: string;

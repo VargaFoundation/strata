@@ -1,15 +1,15 @@
-//! Strata sharding operator (controller).
+//! Ecphoria sharding operator (controller).
 //!
-//! Reconciles a `StrataShardPlan` custom resource: keeps the number of shard StatefulSets equal to
+//! Reconciles a `EcphoriaShardPlan` custom resource: keeps the number of shard StatefulSets equal to
 //! `spec.shards`, and after scaling, drives tenant data movements so each tenant lives on its
 //! consistent-hash-owning shard.
 //!
 //! Status: compiles + unit-tested (decision logic) AND the live apply loop has been **exercised
-//! end-to-end on a real Kubernetes cluster** (Docker Desktop / k8s 1.34): applying a `StrataShardPlan`
-//! with `shards: 2` cloned `<release>-shard-0` into `<release>-shard-1` (with `STRATA_CLUSTER__SHARD_INDEX=1`);
+//! end-to-end on a real Kubernetes cluster** (Docker Desktop / k8s 1.34): applying a `EcphoriaShardPlan`
+//! with `shards: 2` cloned `<release>-shard-0` into `<release>-shard-1` (with `ECPHORIA_CLUSTER__SHARD_INDEX=1`);
 //! patching back to `shards: 1` deleted the drained StatefulSet. Order is safe (up: create-then-move;
 //! down: drain-then-delete). The decision logic mirrors the workspace's unit-tested
-//! `strata_cluster::{reconcile_plan, scale_plan}`. Run `strata-operator --crd | kubectl apply -f -` to
+//! `ecphoria_cluster::{reconcile_plan, scale_plan}`. Run `ecphoria-operator --crd | kubectl apply -f -` to
 //! install the CRD, then run the controller.
 
 use std::collections::BTreeMap;
@@ -27,12 +27,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// `kubectl apply` a CRD for this, e.g. group strata.io/v1, kind StrataShardPlan.
+/// `kubectl apply` a CRD for this, e.g. group ecphoria.io/v1, kind EcphoriaShardPlan.
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[kube(
-    group = "strata.io",
+    group = "ecphoria.io",
     version = "v1",
-    kind = "StrataShardPlan",
+    kind = "EcphoriaShardPlan",
     namespaced,
     status = "ShardPlanStatus"
 )]
@@ -69,8 +69,8 @@ pub struct ShardPlanStatus {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Pure decision logic — mirror of strata_cluster::{ShardRouter, reconcile_plan}.
-// Kept inline so the operator builds without the heavy strata-cluster dep tree.
+// Pure decision logic — mirror of ecphoria_cluster::{ShardRouter, reconcile_plan}.
+// Kept inline so the operator builds without the heavy ecphoria-cluster dep tree.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq, Eq)]
@@ -112,7 +112,7 @@ fn shard_for(ring: &BTreeMap<u64, usize>, shards: usize, key: &str) -> usize {
 }
 
 /// Tenants whose owning shard changes from `actual` → `desired` shards. Mirrors the tested
-/// `strata_cluster::reconcile_plan`.
+/// `ecphoria_cluster::reconcile_plan`.
 pub fn reconcile_moves(desired: usize, actual: usize, tenants: &[String]) -> Vec<ShardMove> {
     let (a, d) = (actual.max(1), desired.max(1));
     let (ra, rd) = (ring(a, 128), ring(d, 128));
@@ -140,7 +140,7 @@ struct Ctx {
     reporter: Reporter,
 }
 
-async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, kube::Error> {
+async fn reconcile(plan: Arc<EcphoriaShardPlan>, ctx: Arc<Ctx>) -> Result<Action, kube::Error> {
     let ns = plan.namespace().unwrap_or_else(|| "default".into());
     let desired = plan.spec.shards.max(1);
     let sts: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
@@ -163,7 +163,7 @@ async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, 
     let tenants = discovered.clone().unwrap_or_default();
     let moves = reconcile_moves(desired, actual, &tenants);
 
-    // Apply the change with the SAFE ordering (mirrors strata_cluster::scale_plan): scale-UP creates
+    // Apply the change with the SAFE ordering (mirrors ecphoria_cluster::scale_plan): scale-UP creates
     // the new shard StatefulSets BEFORE moving data onto them; scale-DOWN drains (moves) data OFF the
     // doomed shards BEFORE deleting them — and only DELETES once the drain is verifiably complete.
     let order = desired.cmp(&actual);
@@ -205,7 +205,7 @@ async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, 
     // Update status (best-effort).
     let status =
         serde_json::json!({ "status": { "current_shards": desired, "last_moves": moves.len() } });
-    let plans: Api<StrataShardPlan> = Api::namespaced(ctx.client.clone(), &ns);
+    let plans: Api<EcphoriaShardPlan> = Api::namespaced(ctx.client.clone(), &ns);
     let _ = plans
         .patch_status(
             &plan.name_any(),
@@ -253,15 +253,15 @@ async fn reconcile(plan: Arc<StrataShardPlan>, ctx: Arc<Ctx>) -> Result<Action, 
     Ok(Action::requeue(Duration::from_secs(60)))
 }
 
-fn on_error(_: Arc<StrataShardPlan>, err: &kube::Error, _: Arc<Ctx>) -> Action {
+fn on_error(_: Arc<EcphoriaShardPlan>, err: &kube::Error, _: Arc<Ctx>) -> Action {
     tracing::error!(error = %err, "reconcile error");
     Action::requeue(Duration::from_secs(15))
 }
 
 /// Scale UP: create the new shard StatefulSets `<release>-shard-<actual..desired>` by cloning
-/// shard-0's spec and setting each one's `STRATA_CLUSTER__SHARD_INDEX`. Server-side apply is
+/// shard-0's spec and setting each one's `ECPHORIA_CLUSTER__SHARD_INDEX`. Server-side apply is
 /// idempotent, so re-running is safe. Call BEFORE moving data (the shards must exist first).
-async fn scale_up(sts: &Api<StatefulSet>, plan: &StrataShardPlan, actual: usize, desired: usize) {
+async fn scale_up(sts: &Api<StatefulSet>, plan: &EcphoriaShardPlan, actual: usize, desired: usize) {
     let template = format!("{}-shard-0", plan.spec.release);
     let base = match sts.get(&template).await {
         Ok(b) => b,
@@ -285,7 +285,7 @@ async fn scale_up(sts: &Api<StatefulSet>, plan: &StrataShardPlan, actual: usize,
         match sts
             .patch(
                 &name,
-                &PatchParams::apply("strata-operator").force(),
+                &PatchParams::apply("ecphoria-operator").force(),
                 &Patch::Apply(&s),
             )
             .await
@@ -298,7 +298,7 @@ async fn scale_up(sts: &Api<StatefulSet>, plan: &StrataShardPlan, actual: usize,
 
 /// Scale DOWN: delete the drained shard StatefulSets `<release>-shard-<desired..actual>`. Call AFTER
 /// moving data off them (see `reconcile`), so no live data is lost.
-async fn scale_down(sts: &Api<StatefulSet>, plan: &StrataShardPlan, desired: usize, actual: usize) {
+async fn scale_down(sts: &Api<StatefulSet>, plan: &EcphoriaShardPlan, desired: usize, actual: usize) {
     for i in desired..actual {
         let name = format!("{}-shard-{i}", plan.spec.release);
         match sts.delete(&name, &Default::default()).await {
@@ -311,14 +311,14 @@ async fn scale_down(sts: &Api<StatefulSet>, plan: &StrataShardPlan, desired: usi
 }
 
 /// Discover the tenants to place across shards: query shard 0's SQL API for `DISTINCT tenant_id`;
-/// fall back to the comma-separated `strata.io/tenants` annotation when the query is unavailable.
+/// fall back to the comma-separated `ecphoria.io/tenants` annotation when the query is unavailable.
 ///
 /// Returns `None` when the tenant set could NOT be determined (SQL query unavailable AND no
 /// annotation). The caller must not scale down in that case — an undetermined set is not the same
 /// as "no tenants", and deleting a shard on an unverifiable drain would orphan data.
 async fn discover_tenants(
     ctx: &Ctx,
-    plan: &StrataShardPlan,
+    plan: &EcphoriaShardPlan,
     token: Option<&str>,
 ) -> Option<Vec<String>> {
     if let Some(base) = plan.spec.shard_base_urls.first() {
@@ -354,7 +354,7 @@ async fn discover_tenants(
     }
     // SQL unavailable → fall back to the annotation IF present (also an authoritative list); a
     // missing annotation leaves the set undetermined → `None`.
-    plan.annotations().get("strata.io/tenants").map(|s| {
+    plan.annotations().get("ecphoria.io/tenants").map(|s| {
         s.split(',')
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
@@ -364,7 +364,7 @@ async fn discover_tenants(
 
 /// Resolve the admin bearer token: from the referenced Secret when set (preferred), else the inline
 /// `admin_token`. Returns `None` if neither is set or the Secret/key can't be read.
-async fn resolve_admin_token(ctx: &Ctx, plan: &StrataShardPlan) -> Option<String> {
+async fn resolve_admin_token(ctx: &Ctx, plan: &EcphoriaShardPlan) -> Option<String> {
     if let Some(sref) = &plan.spec.admin_token_secret {
         let ns = plan.namespace().unwrap_or_else(|| "default".into());
         let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
@@ -384,14 +384,14 @@ async fn resolve_admin_token(ctx: &Ctx, plan: &StrataShardPlan) -> Option<String
     plan.spec.admin_token.clone()
 }
 
-/// Drive tenant data movements via each source shard's Strata admin rebalance API.
+/// Drive tenant data movements via each source shard's Ecphoria admin rebalance API.
 ///
 /// Returns `true` only if EVERY move was confirmed successful — the caller must treat `false` as
 /// "drain incomplete" and NOT delete the source shard (else that tenant's data is orphaned on a
 /// deleted shard). An unaddressable source (no base URL) counts as a failure, not a silent skip.
 async fn apply_moves(
     ctx: &Ctx,
-    plan: &StrataShardPlan,
+    plan: &EcphoriaShardPlan,
     moves: &[ShardMove],
     token: Option<&str>,
 ) -> bool {
@@ -435,7 +435,7 @@ fn safe_to_delete_after_drain(tenants_known: bool, all_moves_confirmed: bool) ->
     tenants_known && all_moves_confirmed
 }
 
-/// Set `STRATA_CLUSTER__SHARD_INDEX` on the StatefulSet's first container (so the new shard hashes
+/// Set `ECPHORIA_CLUSTER__SHARD_INDEX` on the StatefulSet's first container (so the new shard hashes
 /// keys as its own partition).
 fn set_shard_index_env(s: &mut StatefulSet, shard: usize) {
     use k8s_openapi::api::core::v1::EnvVar;
@@ -454,12 +454,12 @@ fn set_shard_index_env(s: &mut StatefulSet, shard: usize) {
     let val = shard.to_string();
     if let Some(e) = env
         .iter_mut()
-        .find(|e| e.name == "STRATA_CLUSTER__SHARD_INDEX")
+        .find(|e| e.name == "ECPHORIA_CLUSTER__SHARD_INDEX")
     {
         e.value = Some(val);
     } else {
         env.push(EnvVar {
-            name: "STRATA_CLUSTER__SHARD_INDEX".to_string(),
+            name: "ECPHORIA_CLUSTER__SHARD_INDEX".to_string(),
             value: Some(val),
             ..Default::default()
         });
@@ -476,7 +476,7 @@ mod lease {
     use k8s_openapi::chrono::{Duration, Utc};
     use kube::api::{ObjectMeta, PostParams};
 
-    pub const NAME: &str = "strata-operator";
+    pub const NAME: &str = "ecphoria-operator";
     pub const TTL_SECONDS: i32 = 15;
 
     pub fn identity() -> String {
@@ -486,7 +486,7 @@ mod lease {
             .unwrap_or_else(|| format!("operator-{}", std::process::id()))
     }
     pub fn namespace() -> String {
-        std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "strata-system".into())
+        std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "ecphoria-system".into())
     }
 
     /// Try to acquire or renew the lease; returns true iff we hold it after this call.
@@ -575,11 +575,11 @@ async fn shutdown_signal() {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    // `strata-operator --crd` prints the CustomResourceDefinition (JSON, which `kubectl apply -f -`
+    // `ecphoria-operator --crd` prints the CustomResourceDefinition (JSON, which `kubectl apply -f -`
     // accepts) so you can install the CRD before running the controller.
     if std::env::args().any(|a| a == "--crd") {
         use kube::CustomResourceExt;
-        println!("{}", serde_json::to_string_pretty(&StrataShardPlan::crd())?);
+        println!("{}", serde_json::to_string_pretty(&EcphoriaShardPlan::crd())?);
         return Ok(());
     }
 
@@ -611,12 +611,12 @@ async fn main() -> Result<()> {
         })
     };
 
-    let plans: Api<StrataShardPlan> = Api::all(client.clone());
+    let plans: Api<EcphoriaShardPlan> = Api::all(client.clone());
     let ctx = Arc::new(Ctx {
         client,
         http: reqwest::Client::new(),
         reporter: Reporter {
-            controller: "strata-operator".into(),
+            controller: "ecphoria-operator".into(),
             instance: Some(id.clone()),
         },
     });

@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/strata-core",
-    "crates/strata-gateway",
-    "crates/strata-cluster",
-    "crates/strata-cli",
-    "strata-server",
+    "crates/ecphoria-core",
+    "crates/ecphoria-gateway",
+    "crates/ecphoria-cluster",
+    "crates/ecphoria-cli",
+    "ecphoria-server",
     "tests/integration",
 ]
 
@@ -14,15 +14,15 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
-repository = "https://github.com/VargaFoundation/strata"
+repository = "https://github.com/VargaFoundation/ecphoria"
 description = "The open-source context lake for AI agents"
 
 [workspace.dependencies]
 # Internal crates
-strata-core = { path = "crates/strata-core" }
-strata-gateway = { path = "crates/strata-gateway" }
-strata-cluster = { path = "crates/strata-cluster" }
-strata-cli = { path = "crates/strata-cli" }
+ecphoria-core = { path = "crates/ecphoria-core" }
+ecphoria-gateway = { path = "crates/ecphoria-gateway" }
+ecphoria-cluster = { path = "crates/ecphoria-cluster" }
+ecphoria-cli = { path = "crates/ecphoria-cli" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

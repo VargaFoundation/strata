@@ -1,19 +1,19 @@
-# ServiceAccount + least-privilege ClusterRole for the operator. It watches StrataShardPlan across
+# ServiceAccount + least-privilege ClusterRole for the operator. It watches EcphoriaShardPlan across
 # namespaces (Api::all) and creates/patches/deletes shard StatefulSets, so the role is cluster-scoped.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: strata-operator
-  namespace: strata-system
+  name: ecphoria-operator
+  namespace: ecphoria-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: strata-operator
+  name: ecphoria-operator
 rules:
   # The custom resource it reconciles (+ its status subresource).
-  - apiGroups: ["strata.io"]
-    resources: ["stratashardplans", "stratashardplans/status"]
+  - apiGroups: ["ecphoria.io"]
+    resources: ["ecphoriashardplans", "ecphoriashardplans/status"]
     verbs: ["get", "list", "watch", "update", "patch"]
   # Shard StatefulSets it clones on scale-up and deletes on scale-down.
   - apiGroups: ["apps"]
@@ -35,12 +35,12 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: strata-operator
+  name: ecphoria-operator
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: strata-operator
+  name: ecphoria-operator
 subjects:
   - kind: ServiceAccount
-    name: strata-operator
-    namespace: strata-system
+    name: ecphoria-operator
+    namespace: ecphoria-system

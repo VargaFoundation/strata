@@ -1,0 +1,79 @@
+# Ecphoria Context Lake — Default Configuration
+# Override any setting with ECPHORIA_ prefixed environment variables.
+# Nested keys use double underscore: ECPHORIA_STORAGE__ENGINE=s3
+
+[storage]
+data_dir = "./data"
+engine = "local"               # "local" | "s3"
+
+[storage.s3]
+endpoint = ""
+bucket = "ecphoria"
+access_key = ""
+secret_key = ""
+region = "us-east-1"
+
+[memory.episodic]
+default_retention_days = 365
+
+[memory.semantic]
+index_dir = "./data/vectors"
+default_dimension = 768
+metric = "cosine"              # "cosine" | "l2" | "ip"
+
+[memory.state]
+db_path = "./data/state.db"
+
+[memory.cognition]
+# db_path = "./data/memories.duckdb"
+# contradiction_review = false   # true → contradictions queue for human review instead of auto-superseding
+# decay_interval_secs = 0        # >0 → leader forgets decayed memories on this interval (0 = off)
+
+[embedding]
+provider = "ollama"            # "ollama" | "openai" | "local" | "none"
+# "local" = in-process ONNX embeddings (no sidecar) — build with `--features embed-local`.
+#   Then set model to one of: bge-small-en (384) | bge-base-en (768) | all-minilm (384) |
+#   multilingual-e5-small (384) | nomic-embed (768), and set `dimension` to match.
+model = "nomic-embed-text"
+dimension = 768
+batch_size = 64
+ollama_url = "http://localhost:11434"
+openai_api_key = ""
+
+[query]
+max_rows = 10000
+timeout_ms = 30000
+
+[gateway]
+# Local-dev posture: loopback binds + no auth. To expose Ecphoria on a network you MUST either
+# enable authentication or explicitly opt out (see below) — the server refuses to start
+# unauthenticated on a non-loopback bind otherwise.
+listen = "127.0.0.1:8432"
+pg_listen = "127.0.0.1:5432"
+grpc_listen = "127.0.0.1:9432"
+mcp_enabled = true
+llm_proxy_enabled = false
+auth_enabled = false
+# TLS for the PG wire listener (encrypts the password = API key in transit). Set both paths:
+#   [gateway.pg_tls]
+#   cert_path = "/etc/ecphoria/tls/pg.crt"
+#   key_path  = "/etc/ecphoria/tls/pg.key"
+# Production posture — bind all interfaces and require keys:
+#   listen = "0.0.0.0:8432"
+#   auth_enabled = true
+#   api_keys = ["sha256:<64-hex-of-secret>@<tenant>:<role>"]   # or "<secret>@<tenant>:<role>"
+# Generate a key + its digest:  KEY=$(openssl rand -hex 32); echo -n "$KEY" | sha256sum
+# Explicit opt-out on a trusted, isolated network ONLY:
+#   allow_insecure = true
+# Webhook signature verification (per vendor: github/slack/sentry/pagerduty):
+#   webhook_secrets = ["github=<hmac>", "slack=<signing-secret>"]
+#   webhook_require_signature = true   # fail-closed: reject sources with no configured secret
+# Outbound CDC: mirror every memory change (upserted/superseded/expired) as JSON POST to a
+# downstream system (search index, warehouse, event bus). Leader-gated in cluster mode.
+#   cdc_sink_url = "https://collector.internal/ecphoria-cdc"
+
+[cluster]
+enabled = false
+node_id = 1
+listen = "0.0.0.0:9433"
+peers = []

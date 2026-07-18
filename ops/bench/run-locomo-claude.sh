@@ -18,7 +18,7 @@
 #   EVAL_MODEL=sonnet        Claude model for the answerer + judge (via the CLI)
 #   EMBED_MODEL=nomic-embed-text
 #   RERANK=cross_encoder     cross_encoder (fast, local ONNX) | none | llm
-#   DATA_DIR=/tmp/strata-bench
+#   DATA_DIR=/tmp/ecphoria-bench
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -29,7 +29,7 @@ EXTRACTION_MODEL="${EXTRACTION_MODEL:-glm-4.7-flash:latest}"
 EVAL_MODEL="${EVAL_MODEL:-sonnet}"
 EMBED_MODEL="${EMBED_MODEL:-nomic-embed-text}"
 RERANK="${RERANK:-cross_encoder}"
-DATA_DIR="${DATA_DIR:-/tmp/strata-bench}"
+DATA_DIR="${DATA_DIR:-/tmp/ecphoria-bench}"
 mkdir -p "$DATA_DIR"
 
 # ── 1. dataset ───────────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ if [ ! -f "$DATA_DIR/locomo.json" ]; then
   echo "▶ downloading + converting LoCoMo (snap-research/locomo, 10 convos / 1986 QA)…"
   curl -sL https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json \
     -o "$DATA_DIR/locomo10.json"
-  cargo build --release -p strata-core --example locomo_convert
+  cargo build --release -p ecphoria-core --example locomo_convert
   ./target/release/examples/locomo_convert "$DATA_DIR/locomo10.json" > "$DATA_DIR/locomo.json"
 fi
 # QA_LIMIT>0 caps questions per conversation (for a quick smoke run; 0 = all).
@@ -57,7 +57,7 @@ PY
 FEATURES=""
 [ "$RERANK" = "cross_encoder" ] && FEATURES="--features rerank-local"
 echo "▶ building the eval example ($FEATURES)…"
-cargo build --release -p strata-core --example locomo_eval $FEATURES
+cargo build --release -p ecphoria-core --example locomo_eval $FEATURES
 
 # ── 3. preflight ─────────────────────────────────────────────────────────────
 echo "▶ preflight…"
@@ -83,13 +83,13 @@ RERANK_PROVIDER="none"
 
 env \
   LOCOMO_PATH="$DATA_DIR/run.json" \
-  STRATA_EMBEDDING__PROVIDER=ollama STRATA_EMBEDDING__MODEL="$EMBED_MODEL" \
-  STRATA_COGNITION__EXTRACTION="$EXTRACTION" \
-  STRATA_COGNITION__EXTRACTION_PROVIDER="$EXTRACTION_PROVIDER" \
-  STRATA_COGNITION__EXTRACTION_MODEL="$EXTRACTION_MODEL" \
-  STRATA_RERANK__PROVIDER="$RERANK_PROVIDER" STRATA_RERANK__BACKEND=ollama STRATA_RERANK__MODEL="$EXTRACTION_MODEL" \
-  STRATA_EVAL__PROVIDER=claude-cli STRATA_EVAL__MODEL="$EVAL_MODEL" STRATA_EVAL__JUDGE=1 \
-  STRATA_COGNITION__GRAPH_EXPANSION=1 STRATA_COGNITION__AUTO_GRAPH=1 \
+  ECPHORIA_EMBEDDING__PROVIDER=ollama ECPHORIA_EMBEDDING__MODEL="$EMBED_MODEL" \
+  ECPHORIA_COGNITION__EXTRACTION="$EXTRACTION" \
+  ECPHORIA_COGNITION__EXTRACTION_PROVIDER="$EXTRACTION_PROVIDER" \
+  ECPHORIA_COGNITION__EXTRACTION_MODEL="$EXTRACTION_MODEL" \
+  ECPHORIA_RERANK__PROVIDER="$RERANK_PROVIDER" ECPHORIA_RERANK__BACKEND=ollama ECPHORIA_RERANK__MODEL="$EXTRACTION_MODEL" \
+  ECPHORIA_EVAL__PROVIDER=claude-cli ECPHORIA_EVAL__MODEL="$EVAL_MODEL" ECPHORIA_EVAL__JUDGE=1 \
+  ECPHORIA_COGNITION__GRAPH_EXPANSION=1 ECPHORIA_COGNITION__AUTO_GRAPH=1 \
   ./target/release/examples/locomo_eval 2>&1 | tee "$OUT"
 
 echo "▶ done → $OUT"

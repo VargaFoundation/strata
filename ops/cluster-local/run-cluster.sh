@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bring up a local N-node Strata Raft cluster (default 3) as background processes on one host.
+# Bring up a local N-node Ecphoria Raft cluster (default 3) as background processes on one host.
 #
 # Every listener is on its own configurable port so nodes never collide on localhost:
 #   node i (1-based):  HTTP = HTTP_BASE+(i-1)   PG = PG_BASE+(i-1)
@@ -14,10 +14,10 @@
 #   HTTP_BASE=28001 ops/cluster-local/run-cluster.sh
 set -euo pipefail
 
-BIN="${STRATA_BIN:-./target/release/strata-server}"
+BIN="${ECPHORIA_BIN:-./target/release/ecphoria-server}"
 # Resolve to an absolute path: each node runs from its own working dir for data isolation.
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
-RUN_DIR="${RUN_DIR:-/tmp/strata-cluster}"
+RUN_DIR="${RUN_DIR:-/tmp/ecphoria-cluster}"
 NODES="${NODES:-3}"
 HOST="${HOST:-127.0.0.1}"
 
@@ -28,8 +28,8 @@ GRPC_BASE="${GRPC_BASE:-19001}"
 RAFT_BASE="${RAFT_BASE:-19101}"
 
 if [[ ! -x "$BIN" ]]; then
-  echo "strata-server binary not found at '$BIN'." >&2
-  echo "Build it first: cargo build --release --bin strata-server" >&2
+  echo "ecphoria-server binary not found at '$BIN'." >&2
+  echo "Build it first: cargo build --release --bin ecphoria-server" >&2
   exit 1
 fi
 
@@ -57,14 +57,14 @@ for i in $(seq 1 "$NODES"); do
     cd "$nodedir"
     # Throwaway localhost/CI cluster with auth off → opt out of the secure-by-default startup guard
     # (it otherwise refuses to serve unauthenticated on a non-loopback 0.0.0.0 bind).
-    STRATA_CLUSTER__ENABLED=true \
-    STRATA_CLUSTER__NODE_ID="$i" \
-    STRATA_CLUSTER__LISTEN="0.0.0.0:${raft}" \
-    STRATA_CLUSTER__PEERS="$PEERS" \
-    STRATA_GATEWAY__LISTEN="0.0.0.0:${http}" \
-    STRATA_GATEWAY__PG_LISTEN="0.0.0.0:${pg}" \
-    STRATA_GATEWAY__GRPC_LISTEN="0.0.0.0:${grpc}" \
-    STRATA_GATEWAY__ALLOW_INSECURE="${STRATA_GATEWAY__ALLOW_INSECURE:-true}" \
+    ECPHORIA_CLUSTER__ENABLED=true \
+    ECPHORIA_CLUSTER__NODE_ID="$i" \
+    ECPHORIA_CLUSTER__LISTEN="0.0.0.0:${raft}" \
+    ECPHORIA_CLUSTER__PEERS="$PEERS" \
+    ECPHORIA_GATEWAY__LISTEN="0.0.0.0:${http}" \
+    ECPHORIA_GATEWAY__PG_LISTEN="0.0.0.0:${pg}" \
+    ECPHORIA_GATEWAY__GRPC_LISTEN="0.0.0.0:${grpc}" \
+    ECPHORIA_GATEWAY__ALLOW_INSECURE="${ECPHORIA_GATEWAY__ALLOW_INSECURE:-true}" \
     exec "$BIN" >"$nodedir/server.log" 2>&1
   ) &
   echo "$!" >"$RUN_DIR/node-$i.pid"

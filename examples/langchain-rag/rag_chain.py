@@ -1,5 +1,5 @@
 """
-RAG pipeline: Strata retriever → prompt → LLM → answer with sources.
+RAG pipeline: Ecphoria retriever → prompt → LLM → answer with sources.
 
 Usage:
     python rag_chain.py                          # Uses Ollama (default)
@@ -15,9 +15,9 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
-from strata_retriever import StrataRetriever
+from ecphoria_retriever import EcphoriaRetriever
 
-STRATA_URL = os.environ.get("STRATA_URL", "http://localhost:8432")
+ECPHORIA_URL = os.environ.get("ECPHORIA_URL", "http://localhost:8432")
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama")
 
 RAG_PROMPT = ChatPromptTemplate.from_template("""\
@@ -72,8 +72,8 @@ def print_sources(docs) -> None:
 
 
 def main() -> None:
-    retriever = StrataRetriever(
-        strata_url=STRATA_URL,
+    retriever = EcphoriaRetriever(
+        ecphoria_url=ECPHORIA_URL,
         k=5,
         source_filter="langchain-rag",
     )
@@ -86,7 +86,7 @@ def main() -> None:
         | StrOutputParser()
     )
 
-    print(f"RAG pipeline ready (LLM: {LLM_PROVIDER}, Strata: {STRATA_URL})")
+    print(f"RAG pipeline ready (LLM: {LLM_PROVIDER}, Ecphoria: {ECPHORIA_URL})")
     print("Type a question (or 'quit' to exit).\n")
 
     while True:

@@ -1,12 +1,12 @@
-# Multi-Agent Customer Support with Strata
+# Multi-Agent Customer Support with Ecphoria
 
-Three autonomous agents collaborate through shared memory to triage, resolve, and escalate customer support tickets — all backed by Strata.
+Three autonomous agents collaborate through shared memory to triage, resolve, and escalate customer support tickets — all backed by Ecphoria.
 
 ## Architecture
 
 ```
                          ┌──────────────────────────────────────┐
-  Support Tickets        │              Strata                  │
+  Support Tickets        │              Ecphoria                  │
   ──────────────►        │  ┌──────────┬──────────┬──────────┐  │
                          │  │ Episodic │ Semantic │  State   │  │
 ┌──────────┐  ingest     │  │ (events) │ (search) │ (ticket  │  │
@@ -32,10 +32,10 @@ Three autonomous agents collaborate through shared memory to triage, resolve, an
 ## How It Works
 
 1. **Triage Agent** — Polls for new tickets, classifies priority (critical/high/medium/low) and category (billing/account/technical/general), routes to L1 or L2
-2. **L1 Support Agent** — Searches Strata's semantic memory for similar past resolutions. Auto-resolves if similarity > 0.8, otherwise escalates
+2. **L1 Support Agent** — Searches Ecphoria's semantic memory for similar past resolutions. Auto-resolves if similarity > 0.8, otherwise escalates
 3. **L2 Escalation Agent** — Gathers full context (original ticket + triage info + L1 attempt), packages everything for human review
 
-All agents share state through Strata's key-value store and communicate by ingesting events into the episodic timeline.
+All agents share state through Ecphoria's key-value store and communicate by ingesting events into the episodic timeline.
 
 ## Quick Start
 
@@ -46,14 +46,14 @@ cd examples/multi-agent-support
 docker compose up
 ```
 
-This starts Strata, Ollama (for embeddings), and all three agents.
+This starts Ecphoria, Ollama (for embeddings), and all three agents.
 
 ### Without Docker
 
 ```bash
-# Start Strata
-docker run -d --name strata -p 8432:8432 -p 5432:5432 \
-  ghcr.io/varga-foundation/strata:latest
+# Start Ecphoria
+docker run -d --name ecphoria -p 8432:8432 -p 5432:5432 \
+  ghcr.io/varga-foundation/ecphoria:latest
 
 # Install deps
 pip install -r requirements.txt

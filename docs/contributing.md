@@ -1,4 +1,4 @@
-# Contributing to Strata
+# Contributing to Ecphoria
 
 ## Development Setup
 
@@ -11,8 +11,8 @@
 ### Clone and Build
 
 ```bash
-git clone https://github.com/VargaFoundation/strata.git
-cd strata
+git clone https://github.com/VargaFoundation/ecphoria.git
+cd ecphoria
 cargo build
 ```
 
@@ -20,7 +20,7 @@ First build takes several minutes (DuckDB and USearch compile from source).
 
 ### Disk usage / build artifacts
 
-Strata links heavy native dependencies (bundled DuckDB, ONNX Runtime via the optional embedding
+Ecphoria links heavy native dependencies (bundled DuckDB, ONNX Runtime via the optional embedding
 features, the AWS SDK, protobuf). `target/` grows fast, and across many builds + feature
 combinations + the separate `ops/operator` workspace it can accumulate to **hundreds of GB** and
 saturate a disk. Two guardrails keep this in check:
@@ -46,7 +46,7 @@ cargo test --workspace
 ### Run the Server
 
 ```bash
-cargo run --bin strata-server
+cargo run --bin ecphoria-server
 ```
 
 ## Project Structure
@@ -54,11 +54,11 @@ cargo run --bin strata-server
 ```
 Cargo.toml                 Workspace root
 ├── crates/
-│   ├── strata-core/       Core engine (no protocol knowledge)
-│   ├── strata-gateway/    Protocol layer (REST, PG wire, MCP, etc.)
-│   ├── strata-cluster/    Distributed mode (Raft consensus)
-│   └── strata-cli/        CLI admin tool
-├── strata-server/         Main binary
+│   ├── ecphoria-core/       Core engine (no protocol knowledge)
+│   ├── ecphoria-gateway/    Protocol layer (REST, PG wire, MCP, etc.)
+│   ├── ecphoria-cluster/    Distributed mode (Raft consensus)
+│   └── ecphoria-cli/        CLI admin tool
+├── ecphoria-server/         Main binary
 ├── tests/integration/     Integration tests
 ├── docs/                  Documentation
 └── deploy/                Docker, Helm charts
@@ -90,13 +90,13 @@ Each crate has its own `CLAUDE.md` with specific guidance.
 
 - TOML deserialization with `serde`
 - All config structs derive `Debug, Clone, Deserialize` and implement `Default`
-- Environment variable overrides via `STRATA_` prefix
+- Environment variable overrides via `ECPHORIA_` prefix
 
 ### Testing
 
 - Unit tests in `#[cfg(test)] mod tests` at the bottom of each file
 - Integration tests in `tests/integration/`
-- Run single crate: `cargo test -p strata-core`
+- Run single crate: `cargo test -p ecphoria-core`
 - Run all: `cargo test --workspace`
 
 ### Naming
@@ -104,7 +104,7 @@ Each crate has its own `CLAUDE.md` with specific guidance.
 - `snake_case` for functions, variables, modules
 - `PascalCase` for types, traits, enums
 - `SCREAMING_SNAKE_CASE` for constants
-- Crate prefix: `strata-` (Cargo) / `strata_` (Rust)
+- Crate prefix: `ecphoria-` (Cargo) / `ecphoria_` (Rust)
 
 ## Making Changes
 
@@ -140,22 +140,22 @@ When making changes, identify which crate owns the feature:
 
 | Change | Crate |
 |--------|-------|
-| New memory operation | `strata-core` |
-| New REST endpoint | `strata-gateway` |
-| New CLI command | `strata-cli` |
-| Consensus logic | `strata-cluster` |
-| Config loading | `strata-server` |
-| New protocol handler | `strata-gateway` |
+| New memory operation | `ecphoria-core` |
+| New REST endpoint | `ecphoria-gateway` |
+| New CLI command | `ecphoria-cli` |
+| Consensus logic | `ecphoria-cluster` |
+| Config loading | `ecphoria-server` |
+| New protocol handler | `ecphoria-gateway` |
 
-If a change touches the public API of `strata-core`, update both `strata-core` and `strata-gateway`.
+If a change touches the public API of `ecphoria-core`, update both `ecphoria-core` and `ecphoria-gateway`.
 
 ### Adding a New Feature
 
 1. Identify the owning crate
 2. Add types/structs in the appropriate module
 3. Write unit tests
-4. If adding an API endpoint, add it in `strata-gateway/src/rest/`
-5. If adding a CLI command, add it in `strata-cli/src/commands/`
+4. If adding an API endpoint, add it in `ecphoria-gateway/src/rest/`
+5. If adding a CLI command, add it in `ecphoria-cli/src/commands/`
 6. Update the relevant `CLAUDE.md`
 7. Run all checks before submitting
 
@@ -165,7 +165,7 @@ See [architecture.md](architecture.md) for detailed design documentation.
 
 Key principles:
 - **Dependencies flow downward**: core → gateway → server (never sideways)
-- **Core has no protocol knowledge**: `strata-core` knows nothing about HTTP, gRPC, or MCP
+- **Core has no protocol knowledge**: `ecphoria-core` knows nothing about HTTP, gRPC, or MCP
 - **Single binary**: everything compiles into one executable
 - **Convention over configuration**: sensible defaults, minimal required config
 

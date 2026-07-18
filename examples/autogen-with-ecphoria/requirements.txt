@@ -1,0 +1,2 @@
+pyautogen>=0.2
+ecphoria-client>=0.2.0

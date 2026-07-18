@@ -1,0 +1,36 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- if .Values.sharding.enabled }}
+{{- $root := . }}
+{{- range $shard := until (int .Values.sharding.shards) }}
+---
+# One PDB PER SHARD: each shard is an independent Raft group, so the disruption budget must be
+# scoped per shard. A single fleet-wide PDB (selector without the shard label) could permit evicting
+# a whole shard's quorum at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ecphoria.fullname" $root }}-shard-{{ $shard }}
+  labels:
+    {{- include "ecphoria.labels" $root | nindent 4 }}
+    ecphoria.io/shard: "{{ $shard }}"
+spec:
+  minAvailable: {{ $root.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "ecphoria.selectorLabels" $root | nindent 6 }}
+      ecphoria.io/shard: "{{ $shard }}"
+{{- end }}
+{{- else }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ecphoria.fullname" . }}
+  labels:
+    {{- include "ecphoria.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "ecphoria.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- end }}

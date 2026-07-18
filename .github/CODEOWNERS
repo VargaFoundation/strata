@@ -7,9 +7,9 @@
 *                       @VargaFoundation/maintainers
 
 # Security-critical boundaries — extra scrutiny.
-/crates/strata-gateway/src/auth/          @VargaFoundation/maintainers
-/crates/strata-core/src/memory/episodic.rs @VargaFoundation/maintainers
-/crates/strata-cluster/                    @VargaFoundation/maintainers
+/crates/ecphoria-gateway/src/auth/          @VargaFoundation/maintainers
+/crates/ecphoria-core/src/memory/episodic.rs @VargaFoundation/maintainers
+/crates/ecphoria-cluster/                    @VargaFoundation/maintainers
 /.github/workflows/                        @VargaFoundation/maintainers
 /SECURITY.md                               @VargaFoundation/maintainers
 /docs/threat-model.md                      @VargaFoundation/maintainers

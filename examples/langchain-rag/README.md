@@ -1,12 +1,12 @@
-# RAG Pipeline with LangChain + Strata
+# RAG Pipeline with LangChain + Ecphoria
 
-A complete Retrieval-Augmented Generation pipeline that ingests documents into Strata, retrieves relevant chunks via semantic search, and generates answers using an LLM.
+A complete Retrieval-Augmented Generation pipeline that ingests documents into Ecphoria, retrieves relevant chunks via semantic search, and generates answers using an LLM.
 
 ## Architecture
 
 ```
                     ┌──────────────────────────────────────────┐
-                    │                 Strata                    │
+                    │                 Ecphoria                    │
  Documents          │  ┌─────────────────┬──────────────────┐  │
  ─────────►ingest.py──►│ Episodic Store  │  Semantic Store   │  │
  (.md/.txt)         │  │ (DuckDB)        │  (USearch HNSW)   │  │
@@ -18,7 +18,7 @@ A complete Retrieval-Augmented Generation pipeline that ingests documents into S
                     ┌───────────┼──────────────────┼────────────┐
                     │ rag_chain.py                              │
                     │           │                  │            │
-                    │  Question ▼    StrataRetriever▼           │
+                    │  Question ▼    EcphoriaRetriever▼           │
                     │  ─────► Prompt + Context ─────► LLM      │
                     │                                ─────►    │
                     │                                Answer    │
@@ -27,19 +27,19 @@ A complete Retrieval-Augmented Generation pipeline that ingests documents into S
 
 ## Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) (to run Strata)
+- [Docker](https://docs.docker.com/get-docker/) (to run Ecphoria)
 - Python 3.10+
 - [Ollama](https://ollama.ai/) running locally (default) or an OpenAI API key
 
 ## Quick Start
 
-**1. Start Strata with Ollama for embeddings**
+**1. Start Ecphoria with Ollama for embeddings**
 
 ```bash
-docker run -d --name strata -p 8432:8432 -p 5432:5432 \
-  -e STRATA_EMBEDDING__PROVIDER=ollama \
-  -e STRATA_EMBEDDING__OLLAMA_URL=http://host.docker.internal:11434 \
-  ghcr.io/varga-foundation/strata:latest
+docker run -d --name ecphoria -p 8432:8432 -p 5432:5432 \
+  -e ECPHORIA_EMBEDDING__PROVIDER=ollama \
+  -e ECPHORIA_EMBEDDING__OLLAMA_URL=http://host.docker.internal:11434 \
+  ghcr.io/varga-foundation/ecphoria:latest
 ```
 
 **2. Install dependencies**
@@ -56,7 +56,7 @@ python ingest.py
 ```
 
 ```
-Ingesting 3 files from sample_docs into Strata (http://localhost:8432)
+Ingesting 3 files from sample_docs into Ecphoria (http://localhost:8432)
 
   product-faq.md: 6 chunks ingested
   troubleshooting.md: 7 chunks ingested
@@ -72,7 +72,7 @@ python rag_chain.py
 ```
 
 ```
-RAG pipeline ready (LLM: ollama, Strata: http://localhost:8432)
+RAG pipeline ready (LLM: ollama, Ecphoria: http://localhost:8432)
 Type a question (or 'quit' to exit).
 
 Question: What are the API rate limits for the Pro plan?
@@ -88,7 +88,7 @@ X-RateLimit-Reset) are included in every API response.
 
 ## How Embed-and-Search Works
 
-The `StrataRetriever` calls Strata's `/api/v1/embed-and-search` endpoint, which:
+The `EcphoriaRetriever` calls Ecphoria's `/api/v1/embed-and-search` endpoint, which:
 
 1. **Embeds** your query text using the configured provider (Ollama or OpenAI)
 2. **Searches** the USearch HNSW index for the k-nearest vectors
@@ -104,24 +104,24 @@ export OPENAI_API_KEY=sk-...
 python rag_chain.py
 ```
 
-For OpenAI embeddings on the Strata side:
+For OpenAI embeddings on the Ecphoria side:
 
 ```bash
-docker run -d --name strata -p 8432:8432 -p 5432:5432 \
-  -e STRATA_EMBEDDING__PROVIDER=openai \
-  -e STRATA_EMBEDDING__OPENAI_API_KEY=sk-... \
-  ghcr.io/varga-foundation/strata:latest
+docker run -d --name ecphoria -p 8432:8432 -p 5432:5432 \
+  -e ECPHORIA_EMBEDDING__PROVIDER=openai \
+  -e ECPHORIA_EMBEDDING__OPENAI_API_KEY=sk-... \
+  ghcr.io/varga-foundation/ecphoria:latest
 ```
 
 ## Customization
 
 | What | How |
 |------|-----|
-| Change number of results | `StrataRetriever(k=10)` |
-| Filter by source | `StrataRetriever(source_filter="my-docs")` |
+| Change number of results | `EcphoriaRetriever(k=10)` |
+| Filter by source | `EcphoriaRetriever(source_filter="my-docs")` |
 | Ingest custom directory | `python ingest.py /path/to/docs` |
 | Change LLM model | `OLLAMA_MODEL=mistral python rag_chain.py` |
-| Change Strata URL | `STRATA_URL=http://my-server:8432 python rag_chain.py` |
+| Change Ecphoria URL | `ECPHORIA_URL=http://my-server:8432 python rag_chain.py` |
 
 ## Ingest Your Own Documents
 
@@ -133,4 +133,4 @@ python ingest.py /path/to/your/documents
 python rag_chain.py
 ```
 
-The ingestion script splits files into paragraph-based chunks and stores each chunk as an episodic event with metadata (filename, chunk index). Strata auto-embeds them for semantic search.
+The ingestion script splits files into paragraph-based chunks and stores each chunk as an episodic event with metadata (filename, chunk index). Ecphoria auto-embeds them for semantic search.

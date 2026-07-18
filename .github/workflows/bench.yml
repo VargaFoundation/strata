@@ -24,7 +24,7 @@ jobs:
       - uses: Mozilla-Actions/sccache-action@v0.0.6
 
       - name: Run benchmarks
-        run: cargo bench -p strata-core -- --output-format bencher | tee bench-output.txt
+        run: cargo bench -p ecphoria-core -- --output-format bencher | tee bench-output.txt
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"

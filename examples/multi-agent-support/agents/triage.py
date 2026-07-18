@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .shared import POLL_INTERVAL, StrataClient
+from .shared import POLL_INTERVAL, EcphoriaClient
 
 log = logging.getLogger("triage")
 
@@ -41,7 +41,7 @@ def classify_category(text: str) -> str:
     return "general"
 
 
-async def process_ticket(client: StrataClient, ticket: dict) -> None:
+async def process_ticket(client: EcphoriaClient, ticket: dict) -> None:
     ticket_id = ticket.get("id", "unknown")
     content = ticket.get("payload", {}).get("content", "")
     subject = ticket.get("payload", {}).get("subject", "")
@@ -77,10 +77,10 @@ async def process_ticket(client: StrataClient, ticket: dict) -> None:
     }])
 
 
-async def run(client: StrataClient | None = None) -> None:
+async def run(client: EcphoriaClient | None = None) -> None:
     own_client = client is None
     if own_client:
-        client = StrataClient()
+        client = EcphoriaClient()
 
     log.info("Triage agent started — polling for new tickets")
     seen: set[str] = set()

@@ -1,21 +1,21 @@
-<h1 align="center">Strata</h1>
+<h1 align="center">Ecphoria</h1>
 <p align="center">
   <strong>The open-source memory engine for AI agents — self-hostable and benchmarkable.</strong><br>
   Bi-temporal memories with dedup, contradiction resolution, and hybrid search — in a single Rust binary.
 </p>
 
 <p align="center">
-  <a href="https://github.com/VargaFoundation/strata/actions/workflows/ci.yml"><img src="https://github.com/VargaFoundation/strata/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/VargaFoundation/strata/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://github.com/VargaFoundation/ecphoria/actions/workflows/ci.yml"><img src="https://github.com/VargaFoundation/ecphoria/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/VargaFoundation/ecphoria/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
 </p>
 
 ---
 
-AI agents lose their memory every time you restart them. Strata fixes that — and
+AI agents lose their memory every time you restart them. Ecphoria fixes that — and
 unlike a bare vector DB, it does the *intelligent* part of memory for you.
 
 Most "agent memory" intelligence (Mem0, Zep) lives behind a cloud API or a paywalled
-graph. Strata is the **genuinely open, self-hostable, benchmarkable** alternative:
+graph. Ecphoria is the **genuinely open, self-hostable, benchmarkable** alternative:
 the smarts run in your own single Rust binary, on your own infrastructure.
 
 ### Memory intelligence (the part that's hard)
@@ -33,10 +33,10 @@ the smarts run in your own single Rust binary, on your own infrastructure.
   completion provider is configured; otherwise stores the text deterministically.
 - **Mem0-compatible API + MCP-native** — drop-in `memories` REST endpoints and memory tools
   for Claude / Cursor / any MCP client.
-- **Benchmarkable** — `cargo run -p strata-core --example locomo_eval` runs a LoCoMo-style eval
+- **Benchmarkable** — `cargo run -p ecphoria-core --example locomo_eval` runs a LoCoMo-style eval
   reporting **recall@{1,3,5}, MRR, and ingest/query p50/p95**. Runs offline (pure-Rust BM25) out
   of the box; point it at a real export with a provider for hybrid numbers:
-  `LOCOMO_PATH=your-locomo.json STRATA_EMBEDDING__PROVIDER=ollama cargo run -p strata-core --example locomo_eval`.
+  `LOCOMO_PATH=your-locomo.json ECPHORIA_EMBEDDING__PROVIDER=ollama cargo run -p ecphoria-core --example locomo_eval`.
   We don't publish leaderboard numbers we can't reproduce — run it on your data and see.
 
 ### Built on a unified three-store substrate
@@ -51,19 +51,19 @@ PostgreSQL wire-compatible. MCP-native. Self-hosted. Raft-clustered for HA.
 
 ## Quick Start (3 minutes)
 
-**1. Start Strata** (10 seconds)
+**1. Start Ecphoria** (10 seconds)
 ```bash
-# Strata is secure by default: exposing it on the network requires an API key.
-export STRATA_API_KEY=$(openssl rand -hex 32)
+# Ecphoria is secure by default: exposing it on the network requires an API key.
+export ECPHORIA_API_KEY=$(openssl rand -hex 32)
 
-docker run -d --name strata \
+docker run -d --name ecphoria \
   -p 5432:5432 -p 8432:8432 \
-  -v strata-data:/data \
-  -e STRATA_GATEWAY__AUTH_ENABLED=true \
-  -e STRATA_GATEWAY__API_KEYS="$STRATA_API_KEY" \
-  ghcr.io/vargafoundation/strata:latest
+  -v ecphoria-data:/data \
+  -e ECPHORIA_GATEWAY__AUTH_ENABLED=true \
+  -e ECPHORIA_GATEWAY__API_KEYS="$ECPHORIA_API_KEY" \
+  ghcr.io/vargafoundation/ecphoria:latest
 
-AUTH="Authorization: Bearer $STRATA_API_KEY"
+AUTH="Authorization: Bearer $ECPHORIA_API_KEY"
 ```
 
 **2. Ingest events** (30 seconds)
@@ -82,7 +82,7 @@ curl -X POST localhost:8432/api/v1/ingest \
 **3. Query with SQL** (30 seconds)
 ```bash
 # The PG password is your API key.
-PGPASSWORD="$STRATA_API_KEY" psql -h localhost -p 5432 -U strata -c \
+PGPASSWORD="$ECPHORIA_API_KEY" psql -h localhost -p 5432 -U ecphoria -c \
   "SELECT source, event_type, payload->>'customer_id' as customer, ts
    FROM episodic ORDER BY ts DESC LIMIT 10;"
 ```
@@ -127,29 +127,29 @@ curl -H "$AUTH" localhost:8432/api/v1/memories/<id>/history
 ```
 
 Running purely on your own machine? Bind loopback instead of exposing ports and skip auth:
-Strata refuses to start unauthenticated on a non-loopback interface unless you explicitly set
-`STRATA_GATEWAY__ALLOW_INSECURE=true` (trusted, isolated networks only).
+Ecphoria refuses to start unauthenticated on a non-loopback interface unless you explicitly set
+`ECPHORIA_GATEWAY__ALLOW_INSECURE=true` (trusted, isolated networks only).
 
 All three memory types plus the cognition layer, running and queryable in under 3 minutes.
 
 → **Connecting Claude?** See [docs/connect-claude.md](docs/connect-claude.md) — REST + tool-use
 (recommended), MCP (Claude Code native / Claude Desktop via `mcp-remote`), or the auto-RAG proxy.
 
-## Why Strata?
+## Why Ecphoria?
 
 You're building AI agents. They need memory. Today you're wiring together
 Postgres + pgvector + Redis + an embedding service + glue code.
 
-Strata replaces all of that:
+Ecphoria replaces all of that:
 
 ```
 Before:  PostgreSQL + pgvector + Redis + embedding API + glue code
-After:   docker run ghcr.io/vargafoundation/strata   (one container, API key required)
+After:   docker run ghcr.io/vargafoundation/ecphoria   (one container, API key required)
 ```
 
 ### Comparison
 
-| | DIY stack | Strata | Mem0 | Zep | Pinecone |
+| | DIY stack | Ecphoria | Mem0 | Zep | Pinecone |
 |---|---|---|---|---|---|
 | Services to deploy | 3+ | **1** | Cloud/Self-hosted | Cloud/Self-hosted | Cloud only |
 | Open source | Varies | **Apache 2.0** | Partial | Partial | No |
@@ -165,13 +165,13 @@ After:   docker run ghcr.io/vargafoundation/strata   (one container, API key req
 ## Python SDK
 
 ```bash
-pip install strata-client
+pip install ecphoria-client
 ```
 
 ```python
-from strata import StrataClient
+from ecphoria import EcphoriaClient
 
-async with StrataClient("http://localhost:8432") as client:
+async with EcphoriaClient("http://localhost:8432") as client:
     # Ingest events
     await client.ingest("my-app", [
         {"event_type": "user.signup", "user_id": "u1", "plan": "pro"}
@@ -190,13 +190,13 @@ async with StrataClient("http://localhost:8432") as client:
 ## TypeScript SDK
 
 ```bash
-npm install @strata/client
+npm install @ecphoria/client
 ```
 
 ```typescript
-import { StrataClient } from '@strata/client';
+import { EcphoriaClient } from '@ecphoria/client';
 
-const client = new StrataClient('http://localhost:8432');
+const client = new EcphoriaClient('http://localhost:8432');
 
 await client.ingest('my-app', [
   { event_type: 'user.signup', user_id: 'u1' }
@@ -209,9 +209,9 @@ const state = await client.stateGet('bot-1', 'context');
 ## LangChain
 
 ```python
-from langchain_strata import StrataRetriever
+from langchain_ecphoria import EcphoriaRetriever
 
-retriever = StrataRetriever(url="http://localhost:8432", k=5)
+retriever = EcphoriaRetriever(url="http://localhost:8432", k=5)
 docs = retriever.get_relevant_documents("billing issue")
 ```
 
@@ -222,7 +222,7 @@ Built-in MCP server. Add to Claude Desktop, Cursor, or VS Code:
 ```json
 {
   "mcpServers": {
-    "strata": {
+    "ecphoria": {
       "url": "http://localhost:8432/mcp"
     }
   }
@@ -234,7 +234,7 @@ Your AI agents can then query, ingest, and manage state directly via MCP tools.
 ## LLM Proxy (Auto-RAG)
 
 OpenAI-compatible endpoint that automatically enriches prompts with relevant
-context from Strata's memory stores:
+context from Ecphoria's memory stores:
 
 ```bash
 curl -X POST localhost:8432/v1/chat/completions \
@@ -245,7 +245,7 @@ curl -X POST localhost:8432/v1/chat/completions \
   }'
 ```
 
-Strata automatically:
+Ecphoria automatically:
 1. Embeds the user query
 2. Searches semantic memory for relevant knowledge
 3. Pulls recent episodic events
@@ -272,7 +272,7 @@ Strata automatically:
 - **Session distillation** — consolidate a closed session's events into durable memory
 - **Event tracing** — parent_id, trace_id, tags for causal chains
 - **Auth & RBAC** — API keys (hashed at rest), JWT, OIDC, role-based access
-- **Secure by default** — refuses to start unauthenticated on a public bind; `strata doctor` config lint
+- **Secure by default** — refuses to start unauthenticated on a public bind; `ecphoria doctor` config lint
 - **Self-hosted** — data never leaves your servers
 - **GDPR-ready** — retention, per-tenant + per-user erasure, backup/restore with integrity manifest
 - **Single binary** — Docker, Compose, Kubernetes
@@ -285,39 +285,39 @@ Strata automatically:
 
 | Mode | Command | Best for |
 |------|---------|----------|
-| Docker | `docker run ghcr.io/vargafoundation/strata` | Dev, small prod |
+| Docker | `docker run ghcr.io/vargafoundation/ecphoria` | Dev, small prod |
 | Compose | `docker compose up` | Teams, full stack |
 | Cluster | `docker compose -f deploy/docker-compose.cluster.yml up` | HA testing |
-| Kubernetes | `helm install strata deploy/helm/strata/` | Production HA |
+| Kubernetes | `helm install ecphoria deploy/helm/ecphoria/` | Production HA |
 | Render | Blueprint at [`render.yaml`](render.yaml) (New + → Blueprint) | One-click hosted |
 
 ## Documentation
 
 - [Agentic platform](docs/agentic-platform.md) — runs, agent loop, HITL, workflows, triggers, tools
-- [Migrate from Mem0](docs/migrate-from-mem0.md) — 1:1 mapping + what Strata adds for free
+- [Migrate from Mem0](docs/migrate-from-mem0.md) — 1:1 mapping + what Ecphoria adds for free
 - [LoCoMo benchmarks](docs/benchmarks-locomo.md) — reproducible eval recipe + measured baseline
 - [Web Explorer](examples/web-ui/) — single-file UI for SQL, memory search, and run traces
 
 ## Full Dev Stack
 
 ```bash
-git clone https://github.com/VargaFoundation/strata.git
-cd strata
-export STRATA_API_KEY=$(openssl rand -hex 32)   # compose refuses to start without one
+git clone https://github.com/VargaFoundation/ecphoria.git
+cd ecphoria
+export ECPHORIA_API_KEY=$(openssl rand -hex 32)   # compose refuses to start without one
 docker compose up -d
 ```
 
-Starts Strata + MinIO (S3 storage) + Ollama (local embeddings).
+Starts Ecphoria + MinIO (S3 storage) + Ollama (local embeddings).
 
 ## Project Structure
 
 ```
 crates/
-  strata-core/       Core engine: memories, query, storage, ingest, embedding
-  strata-gateway/    Protocols: PostgreSQL wire, REST, gRPC, MCP, LLM proxy
-  strata-cluster/    Raft consensus, replication, leader forwarding
-  strata-cli/        CLI admin tool
-strata-server/       Main binary
+  ecphoria-core/       Core engine: memories, query, storage, ingest, embedding
+  ecphoria-gateway/    Protocols: PostgreSQL wire, REST, gRPC, MCP, LLM proxy
+  ecphoria-cluster/    Raft consensus, replication, leader forwarding
+  ecphoria-cli/        CLI admin tool
+ecphoria-server/       Main binary
 sdk/
   python/            Python SDK + LangChain/LlamaIndex integrations
   typescript/        TypeScript SDK

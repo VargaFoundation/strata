@@ -1,3 +1,3 @@
-module github.com/VargaFoundation/strata/sdk/go
+module github.com/VargaFoundation/ecphoria/sdk/go
 
 go 1.21

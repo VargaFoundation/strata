@@ -16,11 +16,11 @@ is the local ONNX cross-encoder.
 CONVS=1 QA_LIMIT=5 EXTRACTION=none ops/bench/run-locomo-claude.sh
 
 # 2) Full overnight run (all 10 conversations, extraction=llm). Detach + watch the log:
-nohup ops/bench/run-locomo-claude.sh > /tmp/strata-bench/run.log 2>&1 &
-tail -f /tmp/strata-bench/run.log
+nohup ops/bench/run-locomo-claude.sh > /tmp/ecphoria-bench/run.log 2>&1 &
+tail -f /tmp/ecphoria-bench/run.log
 ```
 
-Results (the per-category table) are teed to `/tmp/strata-bench/results-<timestamp>.txt`.
+Results (the per-category table) are teed to `/tmp/ecphoria-bench/results-<timestamp>.txt`.
 
 ## Knobs (env vars)
 | Var | Default | Meaning |

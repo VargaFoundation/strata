@@ -1,15 +1,15 @@
-# Strata rebalancing operator (design)
+# Ecphoria rebalancing operator (design)
 
 Scaling write throughput means changing the number of shards (independent Raft groups). When the
 shard count changes, a fraction of tenants must move to a different shard. A Kubernetes **operator**
-automates this. This document describes its design and what Strata already provides.
+automates this. This document describes its design and what Ecphoria already provides.
 
-## What Strata provides (built + tested)
+## What Ecphoria provides (built + tested)
 
 - **Routing:** the gateway routes each request to its tenant's shard at runtime
-  (`crates/strata-gateway/src/cluster/shard_route.rs`); admin is served locally; `/admin/audit`
+  (`crates/ecphoria-gateway/src/cluster/shard_route.rs`); admin is served locally; `/admin/audit`
   scatter-gathers across shards.
-- **Reconcile brain (pure, unit-tested):** `strata_cluster::reconcile_plan(desired, actual, tenants)`
+- **Reconcile brain (pure, unit-tested):** `ecphoria_cluster::reconcile_plan(desired, actual, tenants)`
   returns a `ReconcilePlan { scale_to, moves: Vec<ShardMove> }` — the shard count to scale to and the
   exact tenant→shard movements (consistent hashing keeps the set small). This is the operator's core
   decision, testable without a cluster.
@@ -17,12 +17,12 @@ automates this. This document describes its design and what Strata already provi
   memories between shard engines (and removes only those memories from the source — not its episodic
   events/state).
 - **Helm:** `sharding.enabled` renders N StatefulSets `…-shard-<i>` + per-shard headless services,
-  with `STRATA_CLUSTER__SHARD_INDEX` / `__SHARD_BASE_URLS` per pod.
+  with `ECPHORIA_CLUSTER__SHARD_INDEX` / `__SHARD_BASE_URLS` per pod.
 
 ## Operator reconcile loop
 
 ```
-watch the desired shard count (a CR field, e.g. StrataCluster.spec.shards, or a ConfigMap value)
+watch the desired shard count (a CR field, e.g. EcphoriaCluster.spec.shards, or a ConfigMap value)
 on change or periodically:
   actual  = count of `…-shard-*` StatefulSets
   tenants = list of active tenants (from any shard: `SELECT DISTINCT tenant_id`)
@@ -43,7 +43,7 @@ events + state, not just memories).
 ## Implementation options
 
 - **kube-rs (Rust):** reuse `reconcile_plan` directly; controller-runtime via `kube`. Same language.
-- **kubebuilder (Go):** call a Strata admin endpoint for the plan/migrations.
+- **kubebuilder (Go):** call a Ecphoria admin endpoint for the plan/migrations.
 
 ## Honest status
 

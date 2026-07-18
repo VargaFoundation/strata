@@ -1,11 +1,11 @@
 services:
-  strata:
-    image: ghcr.io/varga-foundation/strata:latest
+  ecphoria:
+    image: ghcr.io/varga-foundation/ecphoria:latest
     ports:
       - "8432:8432"
       - "5432:5432"
     volumes:
-      - strata-data:/data
+      - ecphoria-data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8432/health"]
       interval: 5s
@@ -18,14 +18,14 @@ services:
       - "3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: strata
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_UID: strata-ai-agents
+      GF_SECURITY_ADMIN_PASSWORD: ecphoria
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_UID: ecphoria-ai-agents
     volumes:
       - ./dashboards:/var/lib/grafana/dashboards
       - ./provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
       - ./provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
     depends_on:
-      strata:
+      ecphoria:
         condition: service_healthy
 
   prometheus:
@@ -35,18 +35,18 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     depends_on:
-      - strata
+      - ecphoria
 
   seed:
     image: curlimages/curl:latest
     depends_on:
-      strata:
+      ecphoria:
         condition: service_healthy
     volumes:
       - ./seed.sh:/seed.sh
     entrypoint: ["sh", "/seed.sh"]
     environment:
-      STRATA_URL: http://strata:8432
+      ECPHORIA_URL: http://ecphoria:8432
 
 volumes:
-  strata-data:
+  ecphoria-data:

@@ -3,8 +3,8 @@
 Criterion microbenchmarks for the hot paths. Run locally:
 
 ```bash
-cargo bench -p strata-core --bench engine
-# quick pass: cargo bench -p strata-core --bench engine -- --sample-size 10 --measurement-time 2
+cargo bench -p ecphoria-core --bench engine
+# quick pass: cargo bench -p ecphoria-core --bench engine -- --sample-size 10 --measurement-time 2
 ```
 
 CI runs these on every PR (`.github/workflows/bench.yml`) and posts a comparison.

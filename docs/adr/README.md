@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This directory documents the key architectural decisions behind Strata's design. Each ADR follows the standard format: Context, Decision, Consequences.
+This directory documents the key architectural decisions behind Ecphoria's design. Each ADR follows the standard format: Context, Decision, Consequences.
 
 | ADR | Title | Status |
 |-----|-------|--------|

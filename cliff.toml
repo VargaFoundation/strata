@@ -1,7 +1,7 @@
 [changelog]
 header = """
 # Changelog\n
-All notable changes to Strata will be documented in this file.\n
+All notable changes to Ecphoria will be documented in this file.\n
 """
 body = """
 {% if version %}\

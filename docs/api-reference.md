@@ -1,6 +1,6 @@
 # API Reference
 
-Strata exposes multiple protocol interfaces. All access the same underlying engine.
+Ecphoria exposes multiple protocol interfaces. All access the same underlying engine.
 
 ## REST API
 
@@ -37,12 +37,12 @@ GET /metrics
 ```
 
 Returns Prometheus text format with counters and histograms:
-- `strata_episodic_events_ingested_total` — total events ingested
-- `strata_episodic_append_duration_seconds` — ingest latency histogram
-- `strata_episodic_queries_total` — total SQL queries executed
-- `strata_episodic_query_duration_seconds` — query latency histogram
-- `strata_rest_requests_total{endpoint="..."}` — REST requests by endpoint
-- `strata_rest_request_duration_seconds{endpoint="..."}` — REST latency by endpoint
+- `ecphoria_episodic_events_ingested_total` — total events ingested
+- `ecphoria_episodic_append_duration_seconds` — ingest latency histogram
+- `ecphoria_episodic_queries_total` — total SQL queries executed
+- `ecphoria_episodic_query_duration_seconds` — query latency histogram
+- `ecphoria_rest_requests_total{endpoint="..."}` — REST requests by endpoint
+- `ecphoria_rest_request_duration_seconds{endpoint="..."}` — REST latency by endpoint
 
 ### Query
 
@@ -107,7 +107,7 @@ POST /api/v1/webhook/{source}
 Content-Type: application/json
 ```
 
-The payload is normalized into Strata events based on the source.
+The payload is normalized into Ecphoria events based on the source.
 
 ### Semantic Search
 
@@ -220,7 +220,7 @@ These are used for inter-node Raft communication and should not be called by cli
 
 ## PostgreSQL Wire Protocol
 
-Strata speaks the PostgreSQL wire protocol on port 5432. Connect with any PostgreSQL client.
+Ecphoria speaks the PostgreSQL wire protocol on port 5432. Connect with any PostgreSQL client.
 
 ```bash
 psql -h localhost -p 5432
@@ -256,7 +256,7 @@ ORDER BY cnt DESC;
 
 ## MCP (Model Context Protocol)
 
-Strata includes a built-in MCP server at `/mcp` using Streamable HTTP (SSE) transport.
+Ecphoria includes a built-in MCP server at `/mcp` using Streamable HTTP (SSE) transport.
 
 ### Configuration
 
@@ -265,7 +265,7 @@ Add to Claude Desktop, VS Code, Cursor, or any MCP client:
 ```json
 {
   "mcpServers": {
-    "strata": {
+    "ecphoria": {
       "url": "http://localhost:8432/mcp"
     }
   }
@@ -276,9 +276,9 @@ Add to Claude Desktop, VS Code, Cursor, or any MCP client:
 
 | URI | Description |
 |-----|-------------|
-| `strata://episodic` | Append-only event store |
-| `strata://semantic` | Vector embedding store |
-| `strata://state` | Agent key-value state |
+| `ecphoria://episodic` | Append-only event store |
+| `ecphoria://semantic` | Vector embedding store |
+| `ecphoria://state` | Agent key-value state |
 
 ### Tools
 
@@ -317,7 +317,7 @@ Request (same as OpenAI API):
 }
 ```
 
-Strata automatically:
+Ecphoria automatically:
 1. Extracts the last user message
 2. Queries episodic memory for recent relevant events
 3. Prepends context to the system prompt
@@ -332,19 +332,19 @@ Provider detection:
 ## CLI Commands
 
 ```bash
-strata status                          # Server health check
-strata query "SELECT ..."              # Execute SQL
-strata ingest --source X --file Y      # Bulk ingest from file
-strata export --entity ID              # GDPR data export
-strata backup --target s3://...        # Trigger backup
-strata restore --from s3://...         # Restore from backup
+ecphoria status                          # Server health check
+ecphoria query "SELECT ..."              # Execute SQL
+ecphoria ingest --source X --file Y      # Bulk ingest from file
+ecphoria export --entity ID              # GDPR data export
+ecphoria backup --target s3://...        # Trigger backup
+ecphoria restore --from s3://...         # Restore from backup
 ```
 
 ### Global Options
 
 | Option | Env Var | Default | Description |
 |--------|---------|---------|-------------|
-| `--url` | `STRATA_URL` | `http://localhost:8432` | Server URL |
+| `--url` | `ECPHORIA_URL` | `http://localhost:8432` | Server URL |
 
 ## Error Responses
 

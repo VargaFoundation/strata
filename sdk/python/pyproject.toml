@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "strata-client"
+name = "ecphoria-client"
 version = "0.3.0"
-description = "Python client for the Strata context lake"
+description = "Python client for the Ecphoria context lake"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
@@ -16,8 +16,8 @@ dependencies = [
 keywords = ["ai", "agents", "context-lake", "memory", "vector-search"]
 
 [project.urls]
-Homepage = "https://github.com/VargaFoundation/strata"
-Documentation = "https://github.com/VargaFoundation/strata/tree/main/sdk/python"
+Homepage = "https://github.com/VargaFoundation/ecphoria"
+Documentation = "https://github.com/VargaFoundation/ecphoria/tree/main/sdk/python"
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -25,6 +25,6 @@ langchain = ["langchain-core>=0.1"]
 llama-index = ["llama-index-core>=0.10"]
 
 [tool.pytest.ini_options]
-# Make `import strata` work in-repo without an editable install.
+# Make `import ecphoria` work in-repo without an editable install.
 pythonpath = ["."]
 testpaths = ["tests"]

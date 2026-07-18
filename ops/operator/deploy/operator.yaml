@@ -1,15 +1,15 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: strata-system
+  name: ecphoria-system
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: strata-operator
-  namespace: strata-system
+  name: ecphoria-operator
+  namespace: ecphoria-system
   labels:
-    app: strata-operator
+    app: ecphoria-operator
 spec:
   # Leader election (a coordination.k8s.io Lease) makes >1 replica safe — only the lease holder
   # reconciles. Bump replicas for HA; RollingUpdate then gives zero-downtime handover.
@@ -18,13 +18,13 @@ spec:
     type: RollingUpdate
   selector:
     matchLabels:
-      app: strata-operator
+      app: ecphoria-operator
   template:
     metadata:
       labels:
-        app: strata-operator
+        app: ecphoria-operator
     spec:
-      serviceAccountName: strata-operator
+      serviceAccountName: ecphoria-operator
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -32,11 +32,11 @@ spec:
           type: RuntimeDefault
       containers:
         - name: operator
-          image: ghcr.io/vargafoundation/strata-operator:latest
+          image: ghcr.io/vargafoundation/ecphoria-operator:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: RUST_LOG
-              value: "info,strata_operator=debug"
+              value: "info,ecphoria_operator=debug"
             # Downward API → the leader-election Lease identity + namespace.
             - name: POD_NAME
               valueFrom:

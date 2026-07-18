@@ -51,7 +51,7 @@ jobs:
       # embed-local/rerank-local pull fastembed → ort, which downloads a native onnxruntime binary at
       # build time (needs network — not buildable in an offline sandbox). Compile-check them here so
       # the feature-gated code can't rot. `cargo check` is enough to type-check against fastembed.
-      - run: cargo check -p strata-core --features embed-local,rerank-local
+      - run: cargo check -p ecphoria-core --features embed-local,rerank-local
 
   test:
     name: Test
@@ -68,7 +68,7 @@ jobs:
       # Guard the optional `otlp` feature (not in the default build) — run its mock-collector export
       # test so the exporter wiring can't rot. (The `embed-local`/`rerank-local` backends download a
       # native onnxruntime binary at build time; they're compile-guarded in the dedicated job below.)
-      - run: cargo test -p strata-server --features otlp telemetry
+      - run: cargo test -p ecphoria-server --features otlp telemetry
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
@@ -157,11 +157,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - run: helm lint deploy/helm/strata
+      - run: helm lint deploy/helm/ecphoria
       # Render with defaults, and with the optional features on, to catch template errors.
-      - run: helm template strata deploy/helm/strata >/dev/null
+      - run: helm template ecphoria deploy/helm/ecphoria >/dev/null
       - run: >-
-          helm template strata deploy/helm/strata
+          helm template ecphoria deploy/helm/ecphoria
           --set ingress.enabled=true --set autoscaling.enabled=true
           --set serviceMonitor.enabled=true --set prometheusRule.enabled=true
           --set sharding.enabled=true >/dev/null
@@ -181,8 +181,8 @@ jobs:
           RUSTC_WRAPPER: "sccache"
       - uses: actions/upload-artifact@v4
         with:
-          name: strata-server
-          path: target/release/strata-server
+          name: ecphoria-server
+          path: target/release/ecphoria-server
 
   cluster-ha:
     name: Cluster HA (real 3-node failover)
@@ -192,9 +192,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: strata-server
+          name: ecphoria-server
           path: target/release
-      - run: chmod +x target/release/strata-server ops/cluster-local/*.sh
+      - run: chmod +x target/release/ecphoria-server ops/cluster-local/*.sh
       # Form a real 3-node Raft cluster as separate processes, then prove a durable run created on the
       # leader survives KILLING the leader (re-election + replication). Exercises the production
       # start_raft path over real sockets — the coverage the in-process tests can't give.
@@ -207,7 +207,7 @@ jobs:
         run: ops/cluster-local/stop-cluster.sh || true
       - name: Node logs on failure
         if: failure()
-        run: tail -n 100 /tmp/strata-cluster/node-*/server.log 2>/dev/null || true
+        run: tail -n 100 /tmp/ecphoria-cluster/node-*/server.log 2>/dev/null || true
 
   cluster-sharded:
     name: "Cluster sharded (2 groups: routing + isolation)"
@@ -217,9 +217,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: strata-server
+          name: ecphoria-server
           path: target/release
-      - run: chmod +x target/release/strata-server ops/cluster-local/*.sh
+      - run: chmod +x target/release/ecphoria-server ops/cluster-local/*.sh
       # Form TWO independent Raft groups (2 shards × 3 replicas) as separate processes and prove the
       # three multi-Raft properties the single-group test can't: each shard elects its own leader,
       # a tenant written via one shard's gateway is readable via the other (cross-shard reverse-proxy
@@ -233,7 +233,7 @@ jobs:
           ops/cluster-local/sharding-test.sh
       - name: Stop cluster
         if: always()
-        run: RUN_DIR=/tmp/strata-sharded ops/cluster-local/stop-cluster.sh || true
+        run: RUN_DIR=/tmp/ecphoria-sharded ops/cluster-local/stop-cluster.sh || true
       - name: Node logs on failure
         if: failure()
-        run: tail -n 100 /tmp/strata-sharded/shard-*/server.log 2>/dev/null || true
+        run: tail -n 100 /tmp/ecphoria-sharded/shard-*/server.log 2>/dev/null || true
