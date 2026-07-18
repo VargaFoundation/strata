@@ -156,7 +156,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
       - run: helm lint deploy/helm/ecphoria
       # Render with defaults, and with the optional features on, to catch template errors.
       - run: helm template ecphoria deploy/helm/ecphoria >/dev/null
