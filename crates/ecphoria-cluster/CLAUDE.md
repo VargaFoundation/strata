@@ -124,11 +124,16 @@ the leader-forward 307 has no usable Location). Middleware order: `auth → shar
 Tenant-deletion routes by the path tenant. Verified by unit tests + a single-process reverse-proxy
 e2e test (`crates/ecphoria-gateway/src/cluster/shard_route.rs`).
 
-**Admin endpoints** are served **locally** (not tenant-routed) since they're cluster-wide concerns;
-`/admin/audit` **scatter-gathers** every shard's audit log into one cluster-wide view (marker-guarded
-to avoid recursion). The exception is `DELETE /admin/tenants/{id}`, which routes by the path tenant.
-**MCP + LLM-proxy** are shard-routed by tenant too. **Rate-limiting** is skipped on reverse-proxied
-requests (origin pod already counted them).
+**Admin endpoints** are served **locally** (not tenant-routed) since they're cluster-wide concerns.
+The cluster-wide **writes** — `/admin/backup`, `/admin/reindex`, `/admin/retention` — and the
+`/admin/audit` read **scatter-gather** across every shard (marker-guarded to avoid recursion, see
+`scatter_admin` in `rest/handlers.rs`): one call runs the op on this shard AND fans out to every peer
+shard, returning a **per-shard breakdown** (`{cluster, partial, shards:[{shard,status,result}]}`); a
+shard that fails yields HTTP **207**, never a silent 200 that would hide an un-backed-up shard. Backup
+stays N per-shard artifacts (each shard's data lives on its own pods) — the response is a manifest.
+The exception is `DELETE /admin/tenants/{id}`, which routes by the path tenant. **MCP + LLM-proxy** are
+shard-routed by tenant too. **Rate-limiting** is skipped on reverse-proxied requests (origin pod
+already counted them).
 
 **Validated on a live multi-process sharded cluster** (`ops/cluster-local/run-sharded.sh` +
 `sharding-test.sh`, wired into CI as the `cluster-sharded` job / `make cluster-sharded`): 2 shards ×
@@ -140,7 +145,14 @@ proxy bug the root-mounted unit test could not: the shard layer is a `route_laye
 (full `/api/v1/...`), else every cross-shard request 404s. Fixed + regression-tested
 (`proxy_preserves_full_path_under_nest`).
 
-**Known limits (documented, not bugs):** (1) admin **writes** that span shards (backup, reindex,
-retention) run per-shard — hit each shard, or use the operator. (2) **gRPC + PG wire** are separate
-listeners → not yet shard-routed. (3) A cross-shard write landing on a destination follower relies on
-the proxy's bounded 307-retry + Service balancing to reach the leader.
+**Known limits (documented, not bugs):** (1) **gRPC + PG-wire** are separate listeners and are
+**reject-with-owner**, not reverse-proxied: a request for a tenant this shard doesn't own is rejected
+with the owning shard's address (safe — never serves wrong data — but the raw client must reconnect).
+This affects only raw gRPC/`psql`/native-driver clients; the official **REST SDKs (Go/Python/TS) are
+already transparent** (REST is reverse-proxied). Recommended front for sharded PG: a tenant-aware
+pooler (pgcat). An in-process PG-wire proxy is deliberately **not** built — it would reimplement
+pgbouncer/pgcat. (2) A cross-shard write landing on a destination follower relies on the proxy's
+bounded 307-retry + Service balancing to reach the leader.
+
+*(Formerly-listed limit "admin writes run per-shard" is now mitigated — see the scatter-gather
+paragraph above.)*

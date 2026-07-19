@@ -266,6 +266,39 @@ Ecphoria loads configuration from three sources (in order of precedence):
 | `cluster.listen` | `ECPHORIA_CLUSTER__LISTEN` | `0.0.0.0:9433` | Raft RPC listen address |
 | `cluster.peers` | `ECPHORIA_CLUSTER__PEERS` | `[]` | Comma-separated peer addresses |
 
+## Sharded operations (multi-Raft)
+
+When `cluster.shards > 1`, each shard is an independent Raft group owning a disjoint slice of tenants
+(consistent-hash routing). A few operator notes:
+
+**Cluster-wide admin.** `POST /api/v1/admin/backup`, `/admin/reindex`, and `/admin/retention`
+**scatter-gather** across all shards: one call runs the op on the receiving shard *and* fans out to
+every peer shard, returning a per-shard breakdown:
+
+```json
+{
+  "cluster": true,
+  "partial": false,
+  "shards": [
+    { "shard": 0, "status": "ok", "result": { "deleted": 42 } },
+    { "shard": 1, "status": "ok", "result": { "deleted": 17 } }
+  ]
+}
+```
+
+If any shard fails, the response is **HTTP 207 (Multi-Status)** with `"partial": true` and a
+`"status": "error"` entry for that shard — never a silent `200`. Note that **backup remains N
+per-shard artifacts** (each shard's data lives on its own pods); the response is the manifest of
+where each landed. For scheduled jobs, run a CronJob per shard StatefulSet, or point each shard's
+backup at its own S3 prefix.
+
+**Protocol routing.** REST, MCP, and the LLM proxy are **transparently reverse-proxied** to a
+tenant's owning shard, so the official SDKs (Go/Python/TS, all REST) and Claude/MCP clients need no
+special handling. **gRPC and PostgreSQL-wire** are *reject-with-owner* instead: a raw client
+connecting to the wrong shard for its tenant gets a clear error naming the owning shard's address and
+must reconnect (never wrong data). For a transparent sharded PostgreSQL front, put a tenant-aware
+pooler such as **pgcat** in front of the shard Services.
+
 ## Production Checklist
 
 Security controls are summarized here; see [security.md](security.md) and

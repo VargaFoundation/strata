@@ -30,6 +30,77 @@ fn api_ok(body: serde_json::Value) -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }
 
+/// Header marking a forwarded admin sub-request in the cluster-wide scatter-gather (prevents fan-out
+/// recursion). Matches the marker the audit fan-out uses.
+const SHARD_FWD_HEADER: &str = "x-ecphoria-shard-forwarded";
+
+/// Run an admin write **cluster-wide**. Each shard owns a disjoint slice of tenants, and the
+/// shard-routing middleware serves `/admin/*` locally — so a bare `backup`/`reindex`/`retention` only
+/// touches the receiving shard. `local` already holds THIS shard's result; in sharded mode (and
+/// unless this call is itself a forwarded sub-request) this re-invokes the same admin endpoint on
+/// every OTHER shard — marked so they run locally and don't recurse — and returns a per-shard
+/// breakdown. Single-shard or forwarded → returns `local` unchanged (backward compatible). A shard
+/// that fails yields HTTP 207 (Multi-Status) with `partial: true`, never a silent 200 that would
+/// hide an un-backed-up / un-pruned shard.
+async fn scatter_admin(
+    shard: Option<Extension<crate::cluster::shard_route::ShardRoutingState>>,
+    headers: &axum::http::HeaderMap,
+    endpoint: &str,
+    local: serde_json::Value,
+) -> Response {
+    let Some(Extension(s)) = shard else {
+        return api_ok(local);
+    };
+    // Not sharded, or this is already a forwarded sub-request → single-shard result (back-compat).
+    if s.router.shards() <= 1 || headers.contains_key(SHARD_FWD_HEADER) {
+        return api_ok(local);
+    }
+
+    let mut shards = vec![serde_json::json!({
+        "shard": s.my_shard, "status": "ok", "result": local
+    })];
+    let mut partial = false;
+    for (i, base) in s.base_urls.iter().enumerate() {
+        if i == s.my_shard {
+            continue;
+        }
+        let url = format!("{}{}", base.trim_end_matches('/'), endpoint);
+        let mut rb = s.http.post(&url).header(SHARD_FWD_HEADER, "1");
+        if let Some(auth) = headers.get("authorization") {
+            rb = rb.header("authorization", auth.clone());
+        }
+        let entry = match rb.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(v) => serde_json::json!({ "shard": i, "status": "ok", "result": v }),
+                    Err(e) => {
+                        partial = true;
+                        serde_json::json!({ "shard": i, "status": "error", "error": e.to_string() })
+                    }
+                }
+            }
+            Ok(resp) => {
+                partial = true;
+                serde_json::json!({
+                    "shard": i, "status": "error", "error": format!("HTTP {}", resp.status().as_u16())
+                })
+            }
+            Err(e) => {
+                partial = true;
+                serde_json::json!({ "shard": i, "status": "error", "error": e.to_string() })
+            }
+        };
+        shards.push(entry);
+    }
+
+    let body = serde_json::json!({ "cluster": true, "partial": partial, "shards": shards });
+    if partial {
+        (StatusCode::MULTI_STATUS, Json(body)).into_response()
+    } else {
+        api_ok(body)
+    }
+}
+
 /// Configured webhook signature verification (layered as an Extension).
 ///
 /// Holds a per-source secret map plus an optional global default, and a fail-closed toggle.
@@ -767,20 +838,27 @@ pub async fn retention_policies(
 }
 
 /// Enforce data retention policy — delete events older than configured retention period.
-pub async fn enforce_retention(State(engine): State<Arc<EcphoriaEngine>>) -> Response {
+pub async fn enforce_retention(
+    State(engine): State<Arc<EcphoriaEngine>>,
+    shard: Option<Extension<crate::cluster::shard_route::ShardRoutingState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     metrics::counter!("ecphoria_rest_requests_total", "endpoint" => "retention").increment(1);
 
-    match engine.enforce_retention().await {
-        Ok(deleted) => api_ok(serde_json::json!({
+    let local = match engine.enforce_retention().await {
+        Ok(deleted) => serde_json::json!({
             "deleted": deleted,
             "retention_days": engine.config().memory.episodic.default_retention_days,
-        })),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "RETENTION_ERROR",
-            e.to_string(),
-        ),
-    }
+        }),
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "RETENTION_ERROR",
+                e.to_string(),
+            )
+        }
+    };
+    scatter_admin(shard, &headers, "/api/v1/admin/retention", local).await
 }
 
 /// Trigger a backup of all stores to the configured data directory.
@@ -952,40 +1030,54 @@ fn urlencoding(s: &str) -> String {
 }
 
 /// Re-embed events left unembedded (e.g. provider was down at ingest). Admin; closes cross-store gap.
-pub async fn reindex(State(engine): State<Arc<EcphoriaEngine>>) -> Response {
+pub async fn reindex(
+    State(engine): State<Arc<EcphoriaEngine>>,
+    shard: Option<Extension<crate::cluster::shard_route::ShardRoutingState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     metrics::counter!("ecphoria_rest_requests_total", "endpoint" => "reindex").increment(1);
-    match engine.reindex_unembedded(10_000).await {
+    let local = match engine.reindex_unembedded(10_000).await {
         Ok(reindexed) => {
             let pending = engine.unembedded_count().await.unwrap_or(0);
-            api_ok(serde_json::json!({ "reindexed": reindexed, "pending": pending }))
+            serde_json::json!({ "reindexed": reindexed, "pending": pending })
         }
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "REINDEX_ERROR",
-            e.to_string(),
-        ),
-    }
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "REINDEX_ERROR",
+                e.to_string(),
+            )
+        }
+    };
+    scatter_admin(shard, &headers, "/api/v1/admin/reindex", local).await
 }
 
-pub async fn backup(State(engine): State<Arc<EcphoriaEngine>>) -> Response {
+pub async fn backup(
+    State(engine): State<Arc<EcphoriaEngine>>,
+    shard: Option<Extension<crate::cluster::shard_route::ShardRoutingState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     metrics::counter!("ecphoria_rest_requests_total", "endpoint" => "backup").increment(1);
 
     let backup_dir = std::path::PathBuf::from(&engine.config().storage.data_dir).join("backups");
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let target = backup_dir.join(&timestamp);
 
-    match engine.backup(&target).await {
-        Ok(()) => api_ok(serde_json::json!({
+    let local = match engine.backup(&target).await {
+        Ok(()) => serde_json::json!({
             "status": "ok",
             "path": target.to_string_lossy(),
             "timestamp": timestamp,
-        })),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "BACKUP_ERROR",
-            e.to_string(),
-        ),
-    }
+        }),
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BACKUP_ERROR",
+                e.to_string(),
+            )
+        }
+    };
+    scatter_admin(shard, &headers, "/api/v1/admin/backup", local).await
 }
 
 /// Restore all stores from a backup directory. **Destructive** — overwrites current data. Admin-only
@@ -2935,6 +3027,105 @@ mod tests {
 
     fn hex_encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn shard_state(base_urls: Vec<String>) -> crate::cluster::shard_route::ShardRoutingState {
+        crate::cluster::shard_route::ShardRoutingState {
+            router: Arc::new(ecphoria_cluster::ShardRouter::new(base_urls.len(), 128)),
+            my_shard: 0,
+            base_urls: Arc::new(base_urls),
+            http: reqwest::Client::new(),
+            forward_secret: None,
+        }
+    }
+
+    /// Cluster-wide admin: the receiving shard's result plus each peer shard's result are aggregated
+    /// into one per-shard breakdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scatter_admin_aggregates_all_shards() {
+        use axum::{routing::post, Json, Router};
+
+        // Mock peer "shard 1": responds to the forwarded admin call with its own local result, and
+        // asserts it received the recursion-guard marker.
+        let app = Router::new().route(
+            "/api/v1/admin/retention",
+            post(|headers: axum::http::HeaderMap| async move {
+                assert!(
+                    headers.contains_key(SHARD_FWD_HEADER),
+                    "peer must get the marker"
+                );
+                Json(serde_json::json!({ "deleted": 5 }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let state = shard_state(vec!["http://127.0.0.1:1".into(), format!("http://{addr}")]);
+        let resp = scatter_admin(
+            Some(Extension(state)),
+            &axum::http::HeaderMap::new(),
+            "/api/v1/admin/retention",
+            serde_json::json!({ "deleted": 3 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["partial"], false);
+        let shards = body["shards"].as_array().unwrap();
+        assert_eq!(shards.len(), 2);
+        assert_eq!(shards[0]["result"]["deleted"], 3); // this shard (0)
+        assert_eq!(shards[1]["result"]["deleted"], 5); // peer shard (1)
+    }
+
+    /// A shard that is unreachable yields HTTP 207 with `partial: true` — never a silent 200 that
+    /// would hide an un-backed-up / un-pruned shard.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scatter_admin_partial_failure_is_207() {
+        // base_urls[1] points at a closed port → the peer call fails.
+        let state = shard_state(vec![
+            "http://127.0.0.1:1".into(),
+            "http://127.0.0.1:2".into(),
+        ]);
+        let resp = scatter_admin(
+            Some(Extension(state)),
+            &axum::http::HeaderMap::new(),
+            "/api/v1/admin/backup",
+            serde_json::json!({ "status": "ok" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::MULTI_STATUS);
+        let body = body_json(resp).await;
+        assert_eq!(body["partial"], true);
+        assert_eq!(body["shards"][0]["status"], "ok"); // local shard succeeded
+        assert_eq!(body["shards"][1]["status"], "error"); // peer unreachable
+    }
+
+    /// A forwarded sub-request (marker present) returns its single-shard result unchanged — this is
+    /// what prevents fan-out recursion and preserves the single-shard response shape.
+    #[tokio::test]
+    async fn scatter_admin_forwarded_returns_local() {
+        let state = shard_state(vec!["http://a".into(), "http://b".into()]);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(SHARD_FWD_HEADER, "1".parse().unwrap());
+        let resp = scatter_admin(
+            Some(Extension(state)),
+            &headers,
+            "/api/v1/admin/retention",
+            serde_json::json!({ "deleted": 7 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["deleted"], 7); // raw single-shard result, no "shards" wrapper
+        assert!(body.get("shards").is_none());
     }
 
     #[test]
