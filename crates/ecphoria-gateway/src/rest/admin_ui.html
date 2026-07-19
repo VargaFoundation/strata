@@ -103,6 +103,11 @@
       <input id="g-depth" type="number" value="1" style="min-width:70px" title="hops" />
       <button onclick="graphExplore()">Explore</button>
     </div>
+    <div class="row">
+      <input id="g-asof" placeholder="as-of (RFC3339, optional)" title="temporal snapshot" />
+      <button onclick="graphCentrality()">Centrality (PageRank)</button>
+      <button onclick="graphCommunities()">Communities</button>
+    </div>
     <div id="g-out"></div>
     <div class="card">
       <h3>Add edge</h3>
@@ -303,6 +308,20 @@ async function graphExplore() {
   const depth = Number($("g-depth").value) || 1;
   try { const j = await api("GET", `/api/v1/memories/graph?entity=${encodeURIComponent(entity)}&depth=${depth}&limit=200`);
     $("g-out").innerHTML = table((j.edges || []).map((e) => ({ src: e.src, relation: e.relation, dst: e.dst, valid_from: e.valid_from, valid_to: e.valid_to || "" })));
+  } catch (e) { errBox($("g-out"), e); }
+}
+function asofQ() { const v = $("g-asof").value.trim(); return v ? "?as_of=" + encodeURIComponent(v) : ""; }
+async function graphCentrality() {
+  try { const j = await api("GET", "/api/v1/memories/graph/centrality" + asofQ());
+    const rows = (j.nodes || []).map((n) => ({ node: n.node, pagerank: n.pagerank.toFixed(4), in: n.in_degree, out: n.out_degree }));
+    $("g-out").innerHTML = "<h3>Centrality (top by PageRank)</h3>" + table(rows);
+  } catch (e) { errBox($("g-out"), e); }
+}
+async function graphCommunities() {
+  try { const j = await api("GET", "/api/v1/memories/graph/communities" + asofQ());
+    const comms = (j.communities || []);
+    $("g-out").innerHTML = "<h3>Communities (" + comms.length + ")</h3>" +
+      comms.map((c, i) => `<div class="card"><b>#${i + 1}</b> <span class="muted">(${c.length})</span><div>${c.map(esc).join(", ")}</div></div>`).join("");
   } catch (e) { errBox($("g-out"), e); }
 }
 async function graphLink() {

@@ -321,6 +321,25 @@ pub struct MemoryEdgesQuery {
     pub limit: Option<usize>,
 }
 
+/// Query params for graph analytics (centrality, communities). `as_of` = RFC3339 for a temporal
+/// (bi-temporal) snapshot; omit for the current graph.
+#[derive(Debug, serde::Deserialize)]
+pub struct GraphAnalyticsQuery {
+    #[serde(default)]
+    pub as_of: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Query params for a shortest-path graph query.
+#[derive(Debug, serde::Deserialize)]
+pub struct GraphPathQuery {
+    pub src: String,
+    pub dst: String,
+    #[serde(default)]
+    pub as_of: Option<String>,
+}
+
 /// Query params for uploading a multimodal attachment (body = the blob bytes).
 #[derive(Debug, serde::Deserialize)]
 pub struct AttachmentUploadQuery {

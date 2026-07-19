@@ -2384,6 +2384,99 @@ pub async fn memory_edges(
     }
 }
 
+fn parse_as_of(s: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    s.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc))
+}
+
+/// Node centrality (degree + PageRank) over the knowledge graph, optionally **as-of** a time.
+///
+/// GET /api/v1/memories/graph/centrality?as_of=<rfc3339>&limit=N
+pub async fn graph_centrality(
+    State(engine): State<Arc<EcphoriaEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Query(q): axum::extract::Query<GraphAnalyticsQuery>,
+) -> Response {
+    metrics::counter!("ecphoria_rest_requests_total", "endpoint" => "graph_centrality")
+        .increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    match engine
+        .graph_centrality(&tenant, parse_as_of(q.as_of.as_deref()))
+        .await
+    {
+        Ok(mut nodes) => {
+            if let Some(l) = q.limit {
+                nodes.truncate(l);
+            }
+            api_ok(serde_json::json!({ "nodes": nodes, "count": nodes.len() }))
+        }
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GRAPH_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// Shortest directed path between two entities, optionally as-of.
+///
+/// GET /api/v1/memories/graph/path?src=A&dst=B&as_of=<rfc3339>
+pub async fn graph_path(
+    State(engine): State<Arc<EcphoriaEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Query(q): axum::extract::Query<GraphPathQuery>,
+) -> Response {
+    metrics::counter!("ecphoria_rest_requests_total", "endpoint" => "graph_path").increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    match engine
+        .graph_path(&tenant, &q.src, &q.dst, parse_as_of(q.as_of.as_deref()))
+        .await
+    {
+        Ok(path) => api_ok(serde_json::json!({
+            "src": q.src, "dst": q.dst,
+            "path": path, "reachable": path.is_some(),
+        })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GRAPH_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
+/// Community detection (connected components), optionally as-of.
+///
+/// GET /api/v1/memories/graph/communities?as_of=<rfc3339>
+pub async fn graph_communities(
+    State(engine): State<Arc<EcphoriaEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Query(q): axum::extract::Query<GraphAnalyticsQuery>,
+) -> Response {
+    metrics::counter!("ecphoria_rest_requests_total", "endpoint" => "graph_communities")
+        .increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    match engine
+        .graph_communities(&tenant, parse_as_of(q.as_of.as_deref()))
+        .await
+    {
+        Ok(comms) => api_ok(serde_json::json!({ "communities": comms, "count": comms.len() })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "GRAPH_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
 /// Upload a multimodal attachment — the raw request body is the blob, the `Content-Type` header its
 /// type. Optional query: `memory_id` (link to a memory), `filename`, and `caption` (also stores a
 /// searchable memory citing the attachment, so its content is retrievable via hybrid search).

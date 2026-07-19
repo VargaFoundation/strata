@@ -53,6 +53,9 @@ LLM proxy) into calls on `ecphoria_core::EcphoriaEngine`. Also handles authentic
 | POST | `/api/v1/memories/{id}/feedback` | feedback loop (helpful/wrong/obsolete) | Yes* | **Working** |
 | GET | `/api/v1/memories/watch` | WebSocket memory CDC stream (upserted/superseded/expired) | Yes* | **Working** |
 | GET | `/api/v1/memories/edges` | list all knowledge-graph edges (bulk view / Obsidian export) | Yes* | **Working** |
+| GET | `/api/v1/memories/graph/centrality` | degree + PageRank per node (`?as_of` temporal, `?limit`) | Yes* | **Working** |
+| GET | `/api/v1/memories/graph/path` | shortest directed path (`?src&dst&as_of`) | Yes* | **Working** |
+| GET | `/api/v1/memories/graph/communities` | community detection (connected components, `?as_of`) | Yes* | **Working** |
 | POST | `/api/v1/attachments` | upload a multimodal blob (body=bytes; `?memory_id&filename&caption`) | Yes* | **Working** |
 | GET | `/api/v1/attachments` | list attachments (`?memory_id`) | Yes* | **Working** |
 | GET/DELETE | `/api/v1/attachments/{id}` | download bytes (stored Content-Type) / delete | Yes* | **Working** |

@@ -1673,6 +1673,23 @@ impl MemoryStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// All edges regardless of state (active + superseded), with their validity windows — the input
+    /// for **as-of** temporal graph analytics (filter by `valid_from`/`valid_to` in the caller).
+    pub async fn list_edges_all(&self, tenant: &str, limit: usize) -> crate::Result<Vec<Edge>> {
+        let db = self.read_conn();
+        let mut stmt = db
+            .prepare(
+                "SELECT id, src, relation, dst, weight, source_memory_id, valid_from::VARCHAR, \
+                 valid_to::VARCHAR, state, invalidated_by FROM memory_edges \
+                 WHERE tenant_id = ? ORDER BY valid_from LIMIT ?",
+            )
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        let rows = stmt
+            .query_map(duckdb::params![tenant, limit as i64], edge_from_row)
+            .map_err(|e| crate::Error::Query(e.to_string()))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// Export the `memories` table to a DuckDB `EXPORT DATABASE` directory (backup/snapshot).
     pub fn export_to(&self, dir: &Path) -> crate::Result<()> {
         let db = self.write_db.lock();

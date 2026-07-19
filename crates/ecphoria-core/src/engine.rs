@@ -3401,6 +3401,69 @@ impl EcphoriaEngine {
             .await
     }
 
+    /// Edge triples `(src, dst, weight)` for graph analytics. With `as_of = None` this is the
+    /// currently-active graph; with `Some(t)` it is the graph **as it was at time `t`** (bi-temporal:
+    /// edges whose validity window contains `t`) — the temporal analytics Obsidian-class tools lack.
+    async fn graph_triples(
+        &self,
+        tenant: &str,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<(String, String, f64)>> {
+        let cap = self.config.query.max_rows;
+        let edges = match as_of {
+            None => self.memory_store.list_edges(tenant, cap).await?,
+            Some(t) => self
+                .memory_store
+                .list_edges_all(tenant, cap)
+                .await?
+                .into_iter()
+                .filter(|e| {
+                    e.valid_from.map(|f| f <= t).unwrap_or(true)
+                        && e.valid_to.map(|to| to > t).unwrap_or(true)
+                })
+                .collect(),
+        };
+        Ok(edges
+            .into_iter()
+            .map(|e| (e.src, e.dst, e.weight as f64))
+            .collect())
+    }
+
+    /// Degree centrality + PageRank per graph node (optionally **as-of** a time). Ranks the most
+    /// central entities in the knowledge graph.
+    pub async fn graph_centrality(
+        &self,
+        tenant: &str,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<crate::memory::graph_analytics::NodeCentrality>> {
+        let triples = self.graph_triples(tenant, as_of).await?;
+        Ok(crate::memory::graph_analytics::centrality(&triples))
+    }
+
+    /// Shortest directed path between two entities (optionally as-of). None if unreachable.
+    pub async fn graph_path(
+        &self,
+        tenant: &str,
+        src: &str,
+        dst: &str,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Option<Vec<String>>> {
+        let triples = self.graph_triples(tenant, as_of).await?;
+        Ok(crate::memory::graph_analytics::shortest_path(
+            &triples, src, dst,
+        ))
+    }
+
+    /// Community detection (connected components on the undirected projection), optionally as-of.
+    pub async fn graph_communities(
+        &self,
+        tenant: &str,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<Vec<String>>> {
+        let triples = self.graph_triples(tenant, as_of).await?;
+        Ok(crate::memory::graph_analytics::communities(&triples))
+    }
+
     /// Store a multimodal attachment (image / PDF / audio) — its blob goes to the configured storage
     /// backend (local dir or S3), its metadata to the cognition DB — optionally linked to a memory.
     /// Pair with a caption memory (`memory_add` citing the returned id in metadata) to make the
@@ -4470,6 +4533,47 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn graph_analytics_centrality_path_communities() {
+        let engine = EcphoriaEngine::new(inmem_config()).await.unwrap();
+        // Cluster 1: a,b,c all point at hub; hub → z. Cluster 2: x → y (disjoint).
+        for (s, d) in [
+            ("a", "hub"),
+            ("b", "hub"),
+            ("c", "hub"),
+            ("hub", "z"),
+            ("x", "y"),
+        ] {
+            engine
+                .memory_link("default", s, "rel", d, None)
+                .await
+                .unwrap();
+        }
+
+        // Centrality: hub has in-degree 3.
+        let c = engine.graph_centrality("default", None).await.unwrap();
+        let hub = c.iter().find(|n| n.node == "hub").unwrap();
+        assert_eq!(hub.in_degree, 3);
+        assert_eq!(hub.out_degree, 1);
+
+        // Shortest directed path a → z.
+        assert_eq!(
+            engine.graph_path("default", "a", "z", None).await.unwrap(),
+            Some(vec!["a".into(), "hub".into(), "z".into()])
+        );
+        assert!(engine
+            .graph_path("default", "z", "a", None)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Two communities: {a,b,c,hub,z} and {x,y}.
+        let comms = engine.graph_communities("default", None).await.unwrap();
+        assert_eq!(comms.len(), 2);
+        assert_eq!(comms[0].len(), 5);
+        assert_eq!(comms[1], vec!["x".to_string(), "y".to_string()]);
     }
 
     #[tokio::test]

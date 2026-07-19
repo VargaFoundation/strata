@@ -219,6 +219,18 @@ pub fn router_with_engine_and_auth(
             axum::routing::get(handlers::memory_edges),
         )
         .route(
+            "/memories/graph/centrality",
+            axum::routing::get(handlers::graph_centrality),
+        )
+        .route(
+            "/memories/graph/path",
+            axum::routing::get(handlers::graph_path),
+        )
+        .route(
+            "/memories/graph/communities",
+            axum::routing::get(handlers::graph_communities),
+        )
+        .route(
             "/attachments",
             axum::routing::post(handlers::attachment_upload).get(handlers::attachment_list),
         )
