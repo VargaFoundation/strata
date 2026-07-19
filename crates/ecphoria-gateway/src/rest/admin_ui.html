@@ -43,6 +43,12 @@
   .pill.completed,.pill.active { color:var(--ok); border-color:var(--ok); }
   .pill.failed,.pill.cancelled { color:var(--err); border-color:var(--err); }
   .pill.waitingapproval,.pill.waiting_approval { color:var(--accent); border-color:var(--accent); }
+  .tl { border-left:2px solid var(--border); margin:4px 0 4px 6px; padding-left:12px; }
+  .tl-row { position:relative; padding:6px 0; }
+  .tl-row::before { content:""; position:absolute; left:-17px; top:11px; width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .tl-row.active::before { background:var(--ok); }
+  .tl-row .when { color:var(--muted); font-size:11px; }
+  .tl-row .body { margin-top:2px; white-space:pre-wrap; }
 </style>
 </head>
 <body>
@@ -70,11 +76,12 @@
       <input id="mem-user" placeholder="user_id (optional)" />
       <input id="mem-k" type="number" value="10" style="min-width:70px" />
       <button onclick="memSearch()">Search</button>
+      <button onclick="memBrowse()">Browse recent</button>
     </div>
     <div id="mem-out"></div>
     <div class="card">
       <h3>Detail — provenance &amp; bi-temporal history</h3>
-      <div class="desc">Click <b>why?</b> or <b>history</b> on a result, or 👍/👎 to give feedback.</div>
+      <div class="desc"><b>Search</b> or <b>Browse recent</b>, then per row: <b>why?</b> (provenance), <b>history</b> (bi-temporal timeline), <b>files</b> (attachments), 👍/👎 (feedback), or <b>delete</b>.</div>
       <pre id="mem-detail" class="muted">select a memory</pre>
     </div>
     <div class="card">
@@ -226,30 +233,60 @@ async function loadOverview() {
 }
 
 // ---- memory ----
+// Shared row renderer for both search results ([{memory,score}]) and browse ([memory]).
+function memRowsHTML(items) {
+  return "<table><thead><tr><th>content</th><th>subject</th><th>score</th><th>actions</th></tr></thead><tbody>" +
+    items.map((h) => { const m = h.memory || h; const id = esc(m.id);
+      const score = (h.score != null) ? h.score.toFixed(3) : "—";
+      return `<tr><td>${esc(m.content)}</td><td>${esc(m.subject)}</td><td>${score}</td>` +
+        `<td><a data-mem-why="${id}">why?</a> · <a data-mem-hist="${id}">history</a> · <a data-mem-files="${id}">files</a> · ` +
+        `<a data-mem-fb="${id}" data-verdict="helpful">👍</a> <a data-mem-fb="${id}" data-verdict="wrong">👎</a> · ` +
+        `<a class="err" data-mem-del="${id}">delete</a></td></tr>`;
+    }).join("") + "</tbody></table>";
+}
 async function memSearch() {
   const body = { query: $("mem-q").value, k: Number($("mem-k").value) || 10 };
   const t = $("mem-tenant").value.trim(); if (t) body.tenant_id = t;
   const u = $("mem-user").value.trim(); if (u) body.user_id = u;
   try { const j = await api("POST", "/api/v1/memories/search", body);
     const rows = (j.results || []);
-    if (!rows.length) { $("mem-out").innerHTML = '<p class="muted">no results</p>'; return; }
-    $("mem-out").innerHTML = "<table><thead><tr><th>content</th><th>subject</th><th>score</th><th>actions</th></tr></thead><tbody>" +
-      rows.map((h) => { const m = h.memory || h; const id = esc(m.id);
-        return `<tr><td>${esc(m.content)}</td><td>${esc(m.subject)}</td><td>${(h.score||0).toFixed(3)}</td>` +
-          `<td><a data-mem-why="${id}">why?</a> · <a data-mem-hist="${id}">history</a> · ` +
-          `<a data-mem-fb="${id}" data-verdict="helpful">👍</a> <a data-mem-fb="${id}" data-verdict="wrong">👎</a></td></tr>`;
-      }).join("") + "</tbody></table>";
+    $("mem-out").innerHTML = rows.length ? memRowsHTML(rows) : '<p class="muted">no results</p>';
   } catch (e) { errBox($("mem-out"), e); }
+}
+// Browse recent memories without a query — the curation entry point.
+async function memBrowse() {
+  let path = "/api/v1/memories?limit=50";
+  const t = $("mem-tenant").value.trim(); if (t) path += "&tenant_id=" + encodeURIComponent(t);
+  const u = $("mem-user").value.trim(); if (u) path += "&user_id=" + encodeURIComponent(u);
+  try { const j = await api("GET", path);
+    const rows = (j.memories || []);
+    $("mem-out").innerHTML = rows.length ? memRowsHTML(rows) : '<p class="muted">no memories</p>';
+  } catch (e) { errBox($("mem-out"), e); }
+}
+// Render a memory's bi-temporal history as a timeline (the differentiator Obsidian can't do).
+function renderTimeline(hist) {
+  const vs = hist.history || hist.versions || (Array.isArray(hist) ? hist : []);
+  if (!vs.length) return '<span class="muted">no history</span>';
+  return '<div class="tl">' + vs.map((v) => {
+    const active = String(v.state || "").toLowerCase() === "active";
+    const to = v.valid_to || "now";
+    return `<div class="tl-row ${active ? "active" : ""}">` +
+      `<span class="pill ${esc(String(v.state || "").toLowerCase())}">${esc(v.state || "")}</span> ` +
+      `<span class="when">v${esc(v.version)} · ${esc(v.valid_from)} → ${esc(to)}</span>` +
+      `<div class="body">${esc(v.content)}</div></div>`;
+  }).join("") + '</div>';
 }
 // Delegated memory actions (ids in data-* attrs, never interpolated into executable JS).
 $("mem-out").addEventListener("click", async (e) => {
-  const el = e.target.closest("a[data-mem-why],a[data-mem-hist],a[data-mem-fb]");
+  const el = e.target.closest("a[data-mem-why],a[data-mem-hist],a[data-mem-files],a[data-mem-fb],a[data-mem-del]");
   if (!el) return;
   const d = $("mem-detail");
   try {
     if (el.dataset.memWhy) { d.textContent = "loading provenance…"; d.textContent = JSON.stringify(await api("GET", "/api/v1/memories/" + el.dataset.memWhy + "/provenance"), null, 2); }
-    else if (el.dataset.memHist) { d.textContent = "loading history…"; d.textContent = JSON.stringify(await api("GET", "/api/v1/memories/" + el.dataset.memHist + "/history"), null, 2); }
+    else if (el.dataset.memHist) { d.innerHTML = "loading history…"; d.innerHTML = renderTimeline(await api("GET", "/api/v1/memories/" + el.dataset.memHist + "/history")); }
+    else if (el.dataset.memFiles) { d.textContent = "loading attachments…"; d.textContent = JSON.stringify(await api("GET", "/api/v1/attachments?memory_id=" + el.dataset.memFiles), null, 2); }
     else if (el.dataset.memFb) { d.textContent = JSON.stringify(await api("POST", "/api/v1/memories/" + el.dataset.memFb + "/feedback", { verdict: el.dataset.verdict }), null, 2); memSearch(); }
+    else if (el.dataset.memDel) { if (confirm("Delete this memory?")) { await api("DELETE", "/api/v1/memories/" + el.dataset.memDel); d.textContent = "deleted " + el.dataset.memDel; memBrowse(); } }
   } catch (err) { d.innerHTML = `<span class="err">${esc(err.message)}</span>`; }
 });
 async function memAdd() {
