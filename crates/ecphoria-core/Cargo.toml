@@ -28,7 +28,7 @@ async-trait.workspace = true
 # Optional: local cross-encoder reranker backend (feature `rerank-local`).
 # rustls (not the default native-tls) for hf-hub's model download, so `rerank-local` builds without
 # system OpenSSL/pkg-config — consistent with the rest of the workspace (reqwest is rustls-only).
-fastembed = { version = "4", optional = true, default-features = false, features = [
+fastembed = { version = "5", optional = true, default-features = false, features = [
     "ort-download-binaries",
     "hf-hub-rustls-tls",
 ] }
