@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ecphoria"
+version = "0.1.0"
+description = "Embedded Ecphoria agent-memory engine — durable, bi-temporal memory for AI agents, in-process (no server)"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+readme = "README.md"
+keywords = ["ai", "agents", "memory", "embeddings", "knowledge-graph"]
+
+[project.urls]
+Homepage = "https://github.com/VargaFoundation/ecphoria"
+Documentation = "https://docs.varga.foundation/docs/ecphoria"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]

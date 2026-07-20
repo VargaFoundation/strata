@@ -1,0 +1,19 @@
+# Standalone workspace — the Python extension module. Built with maturin, not part of the root
+# `cargo build --workspace`.
+[workspace]
+
+[package]
+name = "ecphoria-python"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Python binding for the embedded Ecphoria agent-memory engine"
+
+[lib]
+name = "ecphoria"
+crate-type = ["cdylib"]
+
+[dependencies]
+ecphoria-core = { path = "../../crates/ecphoria-core" }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }

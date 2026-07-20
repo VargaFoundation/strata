@@ -116,6 +116,25 @@ jobs:
           python -m build      # sdist + wheel must build
           python -m pytest -q  # unit tests (offline; no server required)
 
+  python-binding:
+    name: Python binding (pyo3 build + smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Build the embedded engine as a native Python extension (maturin) and run the smoke test —
+      # the no-server, in-process API. abi3 wheel, so it's portable across CPython ≥ 3.9.
+      - name: Build + smoke
+        working-directory: bindings/python
+        run: |
+          python -m pip install --upgrade pip maturin pytest
+          maturin build --release --out dist
+          pip install --no-index --find-links dist ecphoria
+          python -m pytest -q
+
   typescript-sdk:
     name: TypeScript SDK (build + test)
     runs-on: ubuntu-latest

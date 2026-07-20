@@ -8,6 +8,9 @@ members = [
     "ecphoria-server",
     "tests/integration",
 ]
+# The Python binding is a cdylib on its own workspace (like ops/operator) — built via maturin, not
+# part of `cargo build --workspace`.
+exclude = ["bindings/python"]
 
 [workspace.package]
 version = "0.1.0"
