@@ -2750,6 +2750,42 @@ pub async fn attachment_upload(
         .into_response()
 }
 
+/// Search image attachments by an example image (raw body = query image bytes). Requires an image
+/// embedding backend; returns `[]` otherwise. Tenant-scoped.
+///
+/// POST /api/v1/attachments/search-image?k=N
+pub async fn attachment_search_image(
+    State(engine): State<Arc<EcphoriaEngine>>,
+    auth: Option<Extension<crate::auth::middleware::AuthContext>>,
+    axum::extract::Query(q): axum::extract::Query<AttachmentListQuery>,
+    body: axum::body::Bytes,
+) -> Response {
+    metrics::counter!("ecphoria_rest_requests_total", "endpoint" => "attachment_search_image")
+        .increment(1);
+    let tenant = auth
+        .as_ref()
+        .and_then(|Extension(c)| c.tenant_id.clone())
+        .unwrap_or_else(|| "default".into());
+    if body.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "EMPTY",
+            "query image body is empty".into(),
+        );
+    }
+    match engine
+        .attachment_search_image(&tenant, &body, q.limit.unwrap_or(10))
+        .await
+    {
+        Ok(items) => api_ok(serde_json::json!({ "attachments": items, "count": items.len() })),
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ATTACHMENT_ERROR",
+            e.to_string(),
+        ),
+    }
+}
+
 /// Download an attachment's bytes with its stored `Content-Type`.
 ///
 /// GET /api/v1/attachments/{id}

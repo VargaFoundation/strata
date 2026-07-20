@@ -17,6 +17,8 @@ path = "src/main.rs"
 #   cargo build -p ecphoria-server --release --features embed-local
 embed-local = ["ecphoria-core/embed-local"]
 rerank-local = ["ecphoria-core/rerank-local"]
+# Basic in-process image embedding for multimodal attachment search (pure Rust; no ONNX).
+embed-image = ["ecphoria-core/embed-image"]
 # Export traces to an OTLP collector (Tempo/Grafana/Jaeger) alongside Prometheus metrics. Off by
 # default — pulls the opentelemetry SDK + exporter. Build: cargo build -p ecphoria-server --features otlp
 otlp = [

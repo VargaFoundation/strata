@@ -126,6 +126,9 @@ pub struct EcphoriaEngine {
     authz: parking_lot::RwLock<Arc<dyn crate::authz::AuthzBackend>>,
     /// Storage backend for multimodal attachment blobs (local dir or S3, per `storage.engine`).
     attachments: Arc<dyn crate::storage::StorageBackend>,
+    /// Optional image-embedding backend (multimodal). When set, `image/*` attachments are embedded
+    /// and indexed for image search. Injected via [`Self::set_image_embedding`].
+    image_embedding: parking_lot::RwLock<Option<Arc<dyn crate::embedding::ImageEmbeddingProvider>>>,
 }
 
 impl std::fmt::Debug for EcphoriaEngine {
@@ -473,6 +476,7 @@ impl EcphoriaEngine {
             run_replicator: parking_lot::RwLock::new(None),
             authz: parking_lot::RwLock::new(authz),
             attachments,
+            image_embedding: parking_lot::RwLock::new(None),
         })
     }
 
@@ -3478,8 +3482,11 @@ impl EcphoriaEngine {
     /// Store a multimodal attachment (image / PDF / audio) — its blob goes to the configured storage
     /// backend (local dir or S3), its metadata to the cognition DB — optionally linked to a memory.
     /// Pair with a caption memory (`memory_add` citing the returned id in metadata) to make the
-    /// attachment's content retrievable via hybrid search; a native multimodal-embedding backend is a
-    /// future hook. Returns the attachment record.
+    /// attachment's content retrievable via hybrid search. If an [`ImageEmbeddingProvider`] is wired
+    /// (see [`Self::set_image_embedding`]) and this is an `image/*`, the blob is also embedded and
+    /// indexed so it's searchable by image ([`Self::attachment_search_image`]). Returns the record.
+    ///
+    /// [`ImageEmbeddingProvider`]: crate::embedding::ImageEmbeddingProvider
     pub async fn attachment_put(
         &self,
         tenant: &str,
@@ -3491,6 +3498,12 @@ impl EcphoriaEngine {
         let id = uuid::Uuid::new_v4();
         let key = format!("attachments/{tenant}/{id}");
         let size = bytes.len() as u64;
+        // Keep a cheap (ref-counted) handle for embedding before the blob is moved into storage.
+        let for_embed = content_type
+            .starts_with("image/")
+            .then(|| self.image_embedding.read().clone())
+            .flatten()
+            .map(|provider| (provider, bytes.clone()));
         self.attachments.put(&key, bytes).await?;
         let meta = crate::memory::cognition::AttachmentMeta {
             id,
@@ -3503,7 +3516,64 @@ impl EcphoriaEngine {
             created_at: chrono::Utc::now(),
         };
         self.memory_store.attachment_insert(&meta).await?;
+
+        // Multimodal index (best-effort — a failed embed never fails the upload).
+        if let Some((provider, img)) = for_embed {
+            match provider.embed_image(&img).await {
+                Ok(vec) => {
+                    let entry = crate::memory::semantic::SemanticEntry {
+                        id,
+                        content: meta.filename.clone().unwrap_or_default(),
+                        embedding: vec,
+                        metadata: serde_json::json!({ "tenant_id": tenant, "attachment": true }),
+                    };
+                    if let Err(e) = self.modal.upsert("image", &entry).await {
+                        tracing::warn!(error = %e, "image attachment index failed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "image embedding failed"),
+            }
+        }
         Ok(meta)
+    }
+
+    /// Search image attachments by an example image (requires a wired [`ImageEmbeddingProvider`]).
+    /// Embeds the query image, searches the image index, and returns the matching attachments'
+    /// metadata (tenant-scoped). Empty if no image provider is configured.
+    ///
+    /// [`ImageEmbeddingProvider`]: crate::embedding::ImageEmbeddingProvider
+    pub async fn attachment_search_image(
+        &self,
+        tenant: &str,
+        query: &[u8],
+        k: usize,
+    ) -> Result<Vec<crate::memory::cognition::AttachmentMeta>> {
+        let Some(provider) = self.image_embedding.read().clone() else {
+            return Ok(Vec::new());
+        };
+        let vec = provider.embed_image(query).await?;
+        let hits = self
+            .modal
+            .search("image", &vec, k.min(self.config.query.max_rows))
+            .await?;
+        let mut out = Vec::new();
+        for hit in hits {
+            // attachment_get is tenant-scoped, so this also enforces isolation across tenants.
+            if let Some(meta) = self
+                .memory_store
+                .attachment_get(tenant, hit.entry.id)
+                .await?
+            {
+                out.push(meta);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Wire an image-embedding backend so `image/*` attachments are embedded + indexed for image
+    /// search. Replaces any previous provider.
+    pub fn set_image_embedding(&self, provider: Arc<dyn crate::embedding::ImageEmbeddingProvider>) {
+        *self.image_embedding.write() = Some(provider);
     }
 
     /// Fetch an attachment's metadata + bytes (tenant-scoped). None if absent or the blob is gone.
@@ -4604,6 +4674,58 @@ mod tests {
         assert_eq!(comms.len(), 2);
         assert_eq!(comms[0].len(), 5);
         assert_eq!(comms[1], vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn image_attachment_embeds_and_searches() {
+        // A deterministic stub image embedder (no ONNX): vector keyed on the first byte + length.
+        struct StubImg;
+        #[async_trait::async_trait]
+        impl crate::embedding::ImageEmbeddingProvider for StubImg {
+            async fn embed_image(&self, bytes: &[u8]) -> Result<Vec<f32>> {
+                Ok(vec![
+                    bytes.first().copied().unwrap_or(0) as f32,
+                    bytes.len() as f32,
+                    1.0,
+                    0.0,
+                ])
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+            fn model_name(&self) -> &str {
+                "stub"
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cfg = inmem_config();
+        cfg.storage.data_dir = tmp.path().to_string_lossy().to_string();
+        let engine = EcphoriaEngine::new(cfg).await.unwrap();
+        engine.set_image_embedding(Arc::new(StubImg));
+
+        let red = bytes::Bytes::from_static(&[10u8, 1, 2, 3, 4]);
+        let blue = bytes::Bytes::from_static(&[200u8, 9, 8]);
+        let red_meta = engine
+            .attachment_put("t", None, "image/png", Some("red.png".into()), red.clone())
+            .await
+            .unwrap();
+        engine
+            .attachment_put("t", None, "image/png", Some("blue.png".into()), blue)
+            .await
+            .unwrap();
+
+        // Searching by the red image recalls the red attachment first.
+        let hits = engine.attachment_search_image("t", &red, 2).await.unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].id, red_meta.id);
+
+        // Tenant isolation: another tenant's image search sees nothing here.
+        assert!(engine
+            .attachment_search_image("other", &red, 2)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

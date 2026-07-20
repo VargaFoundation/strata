@@ -52,6 +52,8 @@ jobs:
       # build time (needs network — not buildable in an offline sandbox). Compile-check them here so
       # the feature-gated code can't rot. `cargo check` is enough to type-check against fastembed.
       - run: cargo check -p ecphoria-core --features embed-local,rerank-local
+      # embed-image is pure Rust (no ONNX) — build + test it here too.
+      - run: cargo test -p ecphoria-core --features embed-image image_basic
 
   test:
     name: Test

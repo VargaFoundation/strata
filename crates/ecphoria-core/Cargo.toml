@@ -15,6 +15,10 @@ rerank-local = ["dep:fastembed"]
 # model download). Enable to honor the single-binary promise without an Ollama/OpenAI sidecar:
 # `--features embed-local` + `embedding.provider = "local"`.
 embed-local = ["dep:fastembed"]
+# Basic in-process image embedding (RGB histogram) for multimodal attachment search — pure Rust (the
+# `image` crate), no ONNX/network. A real, offline `ImageEmbeddingProvider`; CLIP is a pluggable
+# upgrade. `--features embed-image`.
+embed-image = ["dep:image"]
 
 [dependencies]
 tokio.workspace = true
@@ -27,6 +31,11 @@ async-trait.workspace = true
 fastembed = { version = "4", optional = true, default-features = false, features = [
     "ort-download-binaries",
     "hf-hub-rustls-tls",
+] }
+# Optional: basic image decoding for the `embed-image` histogram embedder (pure Rust).
+image = { version = "0.25", optional = true, default-features = false, features = [
+    "png",
+    "jpeg",
 ] }
 
 duckdb.workspace = true

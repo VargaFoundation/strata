@@ -3,7 +3,24 @@ pub mod ollama;
 pub mod openai;
 pub mod provider;
 
+#[cfg(feature = "embed-image")]
+pub mod image_basic;
+
 pub use provider::EmbeddingProvider;
+
+/// Embeds an **image** into a vector for multimodal retrieval — the pluggable hook for CLIP-style or
+/// any image encoder. Wire one into the engine with
+/// [`EcphoriaEngine::set_image_embedding`](crate::EcphoriaEngine::set_image_embedding); attachment
+/// uploads with an `image/*` content-type are then embedded + indexed and become searchable by image.
+#[async_trait::async_trait]
+pub trait ImageEmbeddingProvider: Send + Sync {
+    /// Embed raw image bytes (PNG/JPEG/…) into a fixed-dimension vector.
+    async fn embed_image(&self, bytes: &[u8]) -> crate::Result<Vec<f32>>;
+    /// The vector dimension this provider produces.
+    fn dimension(&self) -> usize;
+    /// A short model identifier.
+    fn model_name(&self) -> &str;
+}
 
 /// Default `(query_prefix, document_prefix)` for a given embedding model, based on the instruction
 /// format the model was trained with. Returns `("", "")` for models that need no prefix

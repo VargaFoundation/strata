@@ -62,6 +62,7 @@ LLM proxy) into calls on `ecphoria_core::EcphoriaEngine`. Also handles authentic
 | POST | `/api/v1/attachments` | upload a multimodal blob (body=bytes; `?memory_id&filename&caption`) | Yes* | **Working** |
 | GET | `/api/v1/attachments` | list attachments (`?memory_id`) | Yes* | **Working** |
 | GET/DELETE | `/api/v1/attachments/{id}` | download bytes (stored Content-Type) / delete | Yes* | **Working** |
+| POST | `/api/v1/attachments/search-image` | image-similarity search (body=query image; needs image embedder) | Yes* | **Working** |
 | POST/GET | `/api/v1/memories/grants` | cross-scope sharing: grant/list read access (grantee→grantor, tenant-strict) | Yes* | **Working** |
 | DELETE | `/api/v1/memories/grants/{id}` | revoke a grant | Yes* | **Working** |
 | GET | `/api/v1/memories/contradictions` | HITL review queue (subjects with >1 active memory) | Yes* | **Working** |

@@ -265,6 +265,10 @@ pub fn router_with_engine_and_auth(
             axum::routing::post(handlers::attachment_upload).get(handlers::attachment_list),
         )
         .route(
+            "/attachments/search-image",
+            axum::routing::post(handlers::attachment_search_image),
+        )
+        .route(
             "/attachments/{id}",
             axum::routing::get(handlers::attachment_download).delete(handlers::attachment_delete),
         )

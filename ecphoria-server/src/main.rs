@@ -38,6 +38,15 @@ async fn main() -> anyhow::Result<()> {
 
     let engine = Arc::new(ecphoria_core::EcphoriaEngine::new(server_config.core).await?);
 
+    // Multimodal: wire the basic image embedder so image/* attachments become searchable by image.
+    #[cfg(feature = "embed-image")]
+    {
+        engine.set_image_embedding(std::sync::Arc::new(
+            ecphoria_core::embedding::image_basic::HistogramImageEmbedding,
+        ));
+        tracing::info!("image embedding enabled (histogram) — image attachments are searchable");
+    }
+
     // Start background tiering manager (retention + TTL cleanup)
     let (tiering_mgr, tiering_handle) = ecphoria_core::storage::tiering::TieringManager::new(3600);
     tokio::spawn(tiering_mgr.run(engine.clone()));

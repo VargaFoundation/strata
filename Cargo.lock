@@ -2118,6 +2118,7 @@ dependencies = [
  "duckdb",
  "fastembed",
  "futures",
+ "image",
  "metrics",
  "parking_lot",
  "proptest",
