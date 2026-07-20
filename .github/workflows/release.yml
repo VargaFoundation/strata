@@ -84,7 +84,7 @@ jobs:
         run: cosign attest --yes --predicate ecphoria-sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ecphoria-sbom
           path: ecphoria-sbom.spdx.json
