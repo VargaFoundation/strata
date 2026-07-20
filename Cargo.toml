@@ -78,6 +78,7 @@ thiserror = { version = "2" }
 anyhow = { version = "1" }
 
 # Observability
+notify = { version = "6" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = { version = "0.24" }

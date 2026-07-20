@@ -58,6 +58,9 @@ pub enum Command {
         /// Scope imported memories to this user id
         #[arg(long)]
         user: Option<String>,
+        /// Keep running and live-import notes as the vault changes (obsidian only)
+        #[arg(long)]
+        watch: bool,
     },
     /// Lint a ecphoria.toml (+ ECPHORIA_* env) for misconfigurations — no server needed
     Doctor {
@@ -190,9 +193,12 @@ pub async fn execute(cmd: Command, url: &str) -> anyhow::Result<()> {
                 None => anyhow::bail!("provide --entity <id> or --to obsidian --path <dir>"),
             },
         },
-        Command::Import { from, path, user } => {
-            import::run(url, &from, &path, user.as_deref()).await
-        }
+        Command::Import {
+            from,
+            path,
+            user,
+            watch,
+        } => import::run(url, &from, &path, user.as_deref(), watch).await,
         Command::Shell => shell::run(url).await,
         Command::Schema => schema::run(url).await,
         Command::Search { text, k } => search::run(url, &text, k).await,

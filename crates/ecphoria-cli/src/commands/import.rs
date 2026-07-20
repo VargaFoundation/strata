@@ -28,9 +28,17 @@ struct MemRecord {
     metadata: serde_json::Value,
 }
 
-pub async fn run(url: &str, from: &str, path: &str, user: Option<&str>) -> anyhow::Result<()> {
+pub async fn run(
+    url: &str,
+    from: &str,
+    path: &str,
+    user: Option<&str>,
+    watch: bool,
+) -> anyhow::Result<()> {
     match from {
+        "obsidian" if watch => import_obsidian_watch(url, path, user).await,
         "obsidian" => import_obsidian(url, path, user).await,
+        "mem0" | "zep" if watch => anyhow::bail!("--watch is only supported for --from obsidian"),
         "mem0" => import_records(url, path, user, "mem0", parse_mem0).await,
         "zep" => import_records(url, path, user, "zep", parse_zep).await,
         other => {
@@ -203,63 +211,119 @@ async fn import_obsidian(url: &str, vault: &str, user: Option<&str>) -> anyhow::
 
     let client = EcphoriaClient::new(url);
     let (mut memories, mut edges, mut errors) = (0u32, 0u32, 0u32);
-
     for file in &files {
-        let content = match std::fs::read_to_string(file) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("  skip {}: {e}", file.display());
-                errors += 1;
-                continue;
-            }
-        };
-        let note = parse_note(file, &content);
-
-        // The note itself → a memory (subject = title, frontmatter + path as metadata).
-        let mut metadata = note.frontmatter.clone();
-        if let serde_json::Value::Object(ref mut m) = metadata {
-            m.insert("source".into(), serde_json::json!("obsidian"));
-            m.insert("path".into(), serde_json::json!(file.display().to_string()));
-        }
-        let mut body = serde_json::json!({
-            "content": if note.body.trim().is_empty() { note.title.clone() } else { note.body.clone() },
-            "subject": note.title,
-            "metadata": metadata,
-            "mem_type": "semantic",
-        });
-        if let Some(u) = user {
-            body["user_id"] = serde_json::json!(u);
-        }
-        match client.post_json("/api/v1/memories", body).await {
-            Ok(_) => memories += 1,
-            Err(e) => {
-                eprintln!("  memory failed for '{}': {e}", note.title);
-                errors += 1;
-                continue;
-            }
-        }
-
-        // Each [[wikilink]] → a graph edge note --links_to--> target.
-        for target in &note.links {
-            let edge = serde_json::json!({
-                "src": note.title,
-                "relation": "links_to",
-                "dst": target,
-            });
-            match client.post_json("/api/v1/memories/link", edge).await {
-                Ok(_) => edges += 1,
-                Err(e) => {
-                    eprintln!("  edge {} -> {} failed: {e}", note.title, target);
-                    errors += 1;
-                }
-            }
-        }
+        let (m, e, err) = import_note(&client, file, user).await;
+        memories += m;
+        edges += e;
+        errors += err;
     }
 
     println!(
         "Imported {} note(s): {memories} memories, {edges} graph edges, {errors} error(s).",
         files.len()
     );
+    Ok(())
+}
+
+/// Import one Obsidian note → a memory (+ a graph edge per `[[wikilink]]`). Returns
+/// `(memories, edges, errors)` so both the batch import and the watcher can reuse it.
+async fn import_note(
+    client: &EcphoriaClient,
+    file: &std::path::Path,
+    user: Option<&str>,
+) -> (u32, u32, u32) {
+    let content = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("  skip {}: {e}", file.display());
+            return (0, 0, 1);
+        }
+    };
+    let note = parse_note(file, &content);
+    let (mut memories, mut edges, mut errors) = (0u32, 0u32, 0u32);
+
+    let mut metadata = note.frontmatter.clone();
+    if let serde_json::Value::Object(ref mut m) = metadata {
+        m.insert("source".into(), serde_json::json!("obsidian"));
+        m.insert("path".into(), serde_json::json!(file.display().to_string()));
+    }
+    let mut body = serde_json::json!({
+        "content": if note.body.trim().is_empty() { note.title.clone() } else { note.body.clone() },
+        "subject": note.title,
+        "metadata": metadata,
+        "mem_type": "semantic",
+    });
+    if let Some(u) = user {
+        body["user_id"] = serde_json::json!(u);
+    }
+    match client.post_json("/api/v1/memories", body).await {
+        Ok(_) => memories += 1,
+        Err(e) => {
+            eprintln!("  memory failed for '{}': {e}", note.title);
+            return (0, 0, 1);
+        }
+    }
+
+    for target in &note.links {
+        let edge = serde_json::json!({ "src": note.title, "relation": "links_to", "dst": target });
+        match client.post_json("/api/v1/memories/link", edge).await {
+            Ok(_) => edges += 1,
+            Err(e) => {
+                eprintln!("  edge {} -> {} failed: {e}", note.title, target);
+                errors += 1;
+            }
+        }
+    }
+    (memories, edges, errors)
+}
+
+/// A vault file that should be synced: a Markdown file not under Obsidian's `.obsidian` config dir.
+fn is_syncable_md(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("md")
+        && !path.components().any(|c| c.as_os_str() == ".obsidian")
+}
+
+/// Live import: do the initial batch, then watch `vault` and re-import each Markdown note as it
+/// changes — the human→agent half of an Obsidian sync (the agent→human half is `export --to
+/// obsidian`). Runs until interrupted.
+async fn import_obsidian_watch(url: &str, vault: &str, user: Option<&str>) -> anyhow::Result<()> {
+    use notify::{RecursiveMode, Watcher};
+
+    import_obsidian(url, vault, user).await?;
+
+    let root = std::path::Path::new(vault).to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            let _ = tx.send(event);
+        }
+    })?;
+    watcher.watch(&root, RecursiveMode::Recursive)?;
+    println!("Watching {vault} for changes (Ctrl-C to stop)…");
+
+    let client = EcphoriaClient::new(url);
+    // Block for the first event, then debounce: drain everything that arrives within a short window
+    // so a burst of saves (Obsidian writes several times) becomes one re-import per file. Ends when
+    // the watcher is dropped (recv errors).
+    while let Ok(first) = rx.recv() {
+        let mut batch = vec![first];
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        while let Ok(ev) = rx.try_recv() {
+            batch.push(ev);
+        }
+        // Unique syncable .md paths that still exist.
+        let mut paths: Vec<std::path::PathBuf> = batch
+            .into_iter()
+            .flat_map(|e| e.paths)
+            .filter(|p| is_syncable_md(p) && p.is_file())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        for p in paths {
+            let (m, e, _) = import_note(&client, &p, user).await;
+            println!("  synced {} ({m} memory, {e} edges)", p.display());
+        }
+    }
     Ok(())
 }
 
@@ -385,6 +449,17 @@ mod tests {
         assert_eq!(note.title, "Some Idea");
         assert!(note.frontmatter.as_object().unwrap().is_empty());
         assert!(note.links.is_empty());
+    }
+
+    #[test]
+    fn syncable_md_filter() {
+        use std::path::Path;
+        assert!(is_syncable_md(Path::new("/vault/note.md")));
+        assert!(is_syncable_md(Path::new("/vault/sub/deep.md")));
+        assert!(!is_syncable_md(Path::new("/vault/note.txt")));
+        assert!(!is_syncable_md(Path::new("/vault/image.png")));
+        // Obsidian config dir is ignored.
+        assert!(!is_syncable_md(Path::new("/vault/.obsidian/workspace.md")));
     }
 
     #[test]

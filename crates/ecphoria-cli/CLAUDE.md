@@ -14,6 +14,7 @@ ecphoria query "SELECT ..."              # execute SQL
 ecphoria ingest --source X --file Y      # bulk ingest
 ecphoria export --entity ID              # GDPR data export (NDJSON)
 ecphoria export --to obsidian --path DIR # export memories → Obsidian markdown vault (round-trip)
+ecphoria import --from obsidian --path DIR [--watch]  # import vault; --watch = live human→agent sync
 ecphoria search "text" -k 5              # semantic search
 ecphoria shell                           # interactive SQL REPL
 ecphoria schema                          # list sources / agent IDs
