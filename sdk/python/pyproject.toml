@@ -22,7 +22,7 @@ Documentation = "https://github.com/VargaFoundation/ecphoria/tree/main/sdk/pytho
 [project.optional-dependencies]
 dev = ["pytest"]
 langchain = ["langchain-core>=0.1"]
-llama-index = ["llama-index-core>=0.10"]
+llama-index = ["llama-index-core>=0.14.23"]
 
 [tool.pytest.ini_options]
 # Make `import ecphoria` work in-repo without an editable install.
