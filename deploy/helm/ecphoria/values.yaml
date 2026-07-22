@@ -47,6 +47,34 @@ config:
     authEnabled: true
     apiKeys: []
     allowInsecure: false
+    # -- Optional gateway tuning. Empty / 0 / false means "use the server default" and emits
+    #    no env var. See ecphoria.toml for the semantics of each key.
+    maxPgConnections: 0                     # PG-wire connection cap (0 = server default, 256)
+    corsOrigins: []                         # e.g. ["https://app.example.com"] (default: reflect none)
+    rateLimitPerKey: 0                      # requests/sec per API key (0 = unlimited)
+    auditDbPath: ""                         # durable audit log, e.g. /data/audit.db
+    requireTenant: false                    # reject requests that resolve to no tenant
+    webhookRequireSignature: false          # fail-closed: reject webhook sources with no configured secret
+    webhookSecrets: []                      # ["github=<hmac>", "slack=<signing-secret>", ...]
+    llmCacheSimilarity: false               # semantic (vs exact-match) LLM-proxy response cache
+    toolGatewayAllowPrivateNetworks: false  # let the MCP tool-gateway reach RFC1918 (disables SSRF guard)
+    cdcSinkUrl: ""                          # outbound CDC: POST every memory change to this URL
+    publishEnabled: false                   # UNAUTH read-only /public + /public/memories
+    publishTenant: "default"                # tenant whose metadata.published=true memories are exposed
+    # JWT HS256 signing secret. Prefer a pre-created Secret over a plaintext value:
+    #   jwtSecretExistingSecret: ecphoria-jwt   # must contain key "jwt-secret"
+    jwtSecret: ""
+    jwtSecretExistingSecret: ""
+    # OIDC (RS256/JWKS). All fields are plain strings — no file mount required.
+    oidc:
+      enabled: false
+      issuerUrl: ""
+      jwksUri: ""
+      audience: ""
+      roleClaim: "roles"
+    # PG-wire TLS (encrypts the password = API key in transit) needs cert+key FILES mounted into the
+    # pod. Create a Secret (keys tls.crt/tls.key) and mount it, then set in ecphoria.toml or via
+    # a values override with an extra volume — not wired here to avoid shipping a half-configured mount.
   cluster:
     enabled: true
     # nodeId is auto-assigned from StatefulSet ordinal

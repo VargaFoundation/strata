@@ -80,6 +80,8 @@ spec:
               value: {{ .Values.config.gateway.grpcListen | quote }}
             - name: ECPHORIA_GATEWAY__MCP_ENABLED
               value: {{ .Values.config.gateway.mcpEnabled | quote }}
+            - name: ECPHORIA_GATEWAY__LLM_PROXY_ENABLED
+              value: {{ .Values.config.gateway.llmProxyEnabled | quote }}
             - name: ECPHORIA_GATEWAY__AUTH_ENABLED
               value: {{ .Values.config.gateway.authEnabled | quote }}
             {{- if .Values.config.gateway.apiKeys }}
@@ -91,6 +93,74 @@ spec:
             # Explicit opt-out of the secure-by-default guard (trusted/isolated networks only).
             - name: ECPHORIA_GATEWAY__ALLOW_INSECURE
               value: "true"
+            {{- end }}
+            {{- if gt (int .Values.config.gateway.maxPgConnections) 0 }}
+            - name: ECPHORIA_GATEWAY__MAX_PG_CONNECTIONS
+              value: {{ .Values.config.gateway.maxPgConnections | quote }}
+            {{- end }}
+            {{- if .Values.config.gateway.corsOrigins }}
+            - name: ECPHORIA_GATEWAY__CORS_ORIGINS
+              value: {{ join "," .Values.config.gateway.corsOrigins | quote }}
+            {{- end }}
+            {{- if gt (int .Values.config.gateway.rateLimitPerKey) 0 }}
+            - name: ECPHORIA_GATEWAY__RATE_LIMIT_PER_KEY
+              value: {{ .Values.config.gateway.rateLimitPerKey | quote }}
+            {{- end }}
+            {{- if .Values.config.gateway.auditDbPath }}
+            - name: ECPHORIA_GATEWAY__AUDIT_DB_PATH
+              value: {{ .Values.config.gateway.auditDbPath | quote }}
+            {{- end }}
+            {{- if .Values.config.gateway.requireTenant }}
+            - name: ECPHORIA_GATEWAY__REQUIRE_TENANT
+              value: "true"
+            {{- end }}
+            {{- if .Values.config.gateway.webhookRequireSignature }}
+            - name: ECPHORIA_GATEWAY__WEBHOOK_REQUIRE_SIGNATURE
+              value: "true"
+            {{- end }}
+            {{- if .Values.config.gateway.webhookSecrets }}
+            - name: ECPHORIA_GATEWAY__WEBHOOK_SECRETS
+              value: {{ join "," .Values.config.gateway.webhookSecrets | quote }}
+            {{- end }}
+            {{- if .Values.config.gateway.llmCacheSimilarity }}
+            - name: ECPHORIA_GATEWAY__LLM_CACHE_SIMILARITY
+              value: "true"
+            {{- end }}
+            {{- if .Values.config.gateway.toolGatewayAllowPrivateNetworks }}
+            - name: ECPHORIA_GATEWAY__TOOL_GATEWAY_ALLOW_PRIVATE_NETWORKS
+              value: "true"
+            {{- end }}
+            {{- if .Values.config.gateway.cdcSinkUrl }}
+            - name: ECPHORIA_GATEWAY__CDC_SINK_URL
+              value: {{ .Values.config.gateway.cdcSinkUrl | quote }}
+            {{- end }}
+            {{- if .Values.config.gateway.publishEnabled }}
+            - name: ECPHORIA_GATEWAY__PUBLISH_ENABLED
+              value: "true"
+            - name: ECPHORIA_GATEWAY__PUBLISH_TENANT
+              value: {{ .Values.config.gateway.publishTenant | default "default" | quote }}
+            {{- end }}
+            {{- if .Values.config.gateway.jwtSecretExistingSecret }}
+            - name: ECPHORIA_GATEWAY__JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.gateway.jwtSecretExistingSecret | quote }}
+                  key: jwt-secret
+            {{- else if .Values.config.gateway.jwtSecret }}
+            - name: ECPHORIA_GATEWAY__JWT_SECRET
+              value: {{ .Values.config.gateway.jwtSecret | quote }}
+            {{- end }}
+            {{- if .Values.config.gateway.oidc.enabled }}
+            - name: ECPHORIA_GATEWAY__OIDC__ENABLED
+              value: "true"
+            - name: ECPHORIA_GATEWAY__OIDC__ISSUER_URL
+              value: {{ .Values.config.gateway.oidc.issuerUrl | quote }}
+            - name: ECPHORIA_GATEWAY__OIDC__JWKS_URI
+              value: {{ .Values.config.gateway.oidc.jwksUri | quote }}
+            - name: ECPHORIA_GATEWAY__OIDC__AUDIENCE
+              value: {{ .Values.config.gateway.oidc.audience | quote }}
+            - name: ECPHORIA_GATEWAY__OIDC__ROLE_CLAIM
+              value: {{ .Values.config.gateway.oidc.roleClaim | quote }}
             {{- end }}
             # Cluster — auto-assign node_id from StatefulSet ordinal
             - name: POD_NAME
