@@ -350,6 +350,223 @@ export class EcphoriaClient {
     }
   }
 
+  // ── Cognition (provenance / feedback / contradictions) ───────────
+
+  /** A memory's source events + supersession chain (the audit trail behind a fact). */
+  async memoryProvenance(id: string): Promise<Record<string, unknown>> {
+    return this.get(`/api/v1/memories/${encodeURIComponent(id)}/provenance`);
+  }
+
+  /** Feedback so ranking learns: 'helpful' reinforces, 'wrong'/'obsolete' retires. */
+  async memoryFeedback(id: string, verdict: string): Promise<Record<string, unknown>> {
+    return this.post(`/api/v1/memories/${encodeURIComponent(id)}/feedback`, { verdict });
+  }
+
+  /** Subjects with more than one active memory (the review queue). */
+  async memoryContradictions(userId?: string): Promise<Record<string, unknown>[]> {
+    const q = userId ? `?user_id=${encodeURIComponent(userId)}` : "";
+    const data = await this.get<{ contradictions: Record<string, unknown>[] }>(
+      `/api/v1/memories/contradictions${q}`,
+    );
+    return data.contradictions ?? [];
+  }
+
+  /** Resolve a contradiction: keep `keepId`, supersede the rest for `subject`. */
+  async memoryResolveContradiction(
+    subject: string,
+    keepId: string,
+    userId?: string,
+  ): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = { subject, keep_id: keepId };
+    if (userId) body.user_id = userId;
+    return this.post("/api/v1/memories/contradictions/resolve", body);
+  }
+
+  // ── Knowledge graph ──────────────────────────────────────────────
+
+  /** Add a graph edge (src -[relation]-> dst). supersede closes the prior (src, relation). */
+  async memoryLink(
+    src: string,
+    relation: string,
+    dst: string,
+    supersede = false,
+  ): Promise<Record<string, unknown>> {
+    return this.post("/api/v1/memories/link", { src, relation, dst, supersede });
+  }
+
+  /** Edges around an entity (depth>1 expands the subgraph). */
+  async graphNeighbors(
+    entity: string,
+    depth = 1,
+    limit = 50,
+  ): Promise<Record<string, unknown>[]> {
+    const p = new URLSearchParams({
+      entity,
+      depth: String(depth),
+      limit: String(limit),
+    });
+    const data = await this.get<{ edges: Record<string, unknown>[] }>(
+      `/api/v1/memories/graph?${p.toString()}`,
+    );
+    return data.edges ?? [];
+  }
+
+  /** All knowledge-graph edges (bulk view). */
+  async graphEdges(limit = 10000): Promise<Record<string, unknown>[]> {
+    const data = await this.get<{ edges: Record<string, unknown>[] }>(
+      `/api/v1/memories/edges?limit=${limit}`,
+    );
+    return data.edges ?? [];
+  }
+
+  /** Degree + PageRank per node, optionally as-of a time. */
+  async graphCentrality(
+    asOf?: string,
+    limit?: number,
+  ): Promise<Record<string, unknown>[]> {
+    const p = new URLSearchParams();
+    if (asOf) p.set("as_of", asOf);
+    if (limit) p.set("limit", String(limit));
+    const qs = p.toString();
+    const data = await this.get<{ nodes: Record<string, unknown>[] }>(
+      `/api/v1/memories/graph/centrality${qs ? `?${qs}` : ""}`,
+    );
+    return data.nodes ?? [];
+  }
+
+  /** Shortest directed path between two entities (null if unreachable). */
+  async graphPath(src: string, dst: string, asOf?: string): Promise<string[] | null> {
+    const p = new URLSearchParams({ src, dst });
+    if (asOf) p.set("as_of", asOf);
+    const data = await this.get<{ path: string[] | null }>(
+      `/api/v1/memories/graph/path?${p.toString()}`,
+    );
+    return data.path ?? null;
+  }
+
+  /** Community detection (connected clusters), optionally as-of a time. */
+  async graphCommunities(asOf?: string): Promise<string[][]> {
+    const qs = asOf ? `?as_of=${encodeURIComponent(asOf)}` : "";
+    const data = await this.get<{ communities: string[][] }>(
+      `/api/v1/memories/graph/communities${qs}`,
+    );
+    return data.communities ?? [];
+  }
+
+  // ── Templates ────────────────────────────────────────────────────
+
+  /** Built-in memory templates. */
+  async memoryTemplates(): Promise<Record<string, unknown>[]> {
+    const data = await this.get<{ templates: Record<string, unknown>[] }>(
+      "/api/v1/memory-templates",
+    );
+    return data.templates ?? [];
+  }
+
+  /** Create a memory from a template + field values. */
+  async memoryFromTemplate(
+    template: string,
+    fields: Record<string, unknown>,
+    userId?: string,
+  ): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = { template, fields };
+    if (userId) body.user_id = userId;
+    return this.post("/api/v1/memories/from-template", body);
+  }
+
+  // ── Attachments (multimodal) ─────────────────────────────────────
+
+  /** Upload a blob (image/PDF/audio). Optional caption stores a searchable memory. */
+  async attachmentUpload(
+    data: Uint8Array,
+    opts: {
+      contentType?: string;
+      filename?: string;
+      memoryId?: string;
+      caption?: string;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    const p = new URLSearchParams();
+    if (opts.filename) p.set("filename", opts.filename);
+    if (opts.memoryId) p.set("memory_id", opts.memoryId);
+    if (opts.caption) p.set("caption", opts.caption);
+    const qs = p.toString();
+    const url = `${this.baseUrl}/api/v1/attachments${qs ? `?${qs}` : ""}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: {
+          ...this.headers,
+          "Content-Type": opts.contentType ?? "application/octet-stream",
+        },
+        // Uint8Array is a valid BodyInit at runtime; the DOM lib's type is narrower here.
+        body: data as unknown as BodyInit,
+        signal: controller.signal,
+      });
+      if (!resp.ok) {
+        throw new EcphoriaError(
+          `HTTP ${resp.status}: ${resp.statusText}`,
+          "HTTP_ERROR",
+          resp.status,
+        );
+      }
+      return (await resp.json()) as Record<string, unknown>;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** List attachments (optionally for one memory). */
+  async attachmentList(memoryId?: string): Promise<Record<string, unknown>[]> {
+    const qs = memoryId ? `?memory_id=${encodeURIComponent(memoryId)}` : "";
+    const data = await this.get<{ attachments: Record<string, unknown>[] }>(
+      `/api/v1/attachments${qs}`,
+    );
+    return data.attachments ?? [];
+  }
+
+  /** Delete an attachment. Returns false if it didn't exist. */
+  async attachmentDelete(id: string): Promise<boolean> {
+    const url = `${this.baseUrl}/api/v1/attachments/${encodeURIComponent(id)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const resp = await fetch(url, {
+        method: "DELETE",
+        headers: this.headers,
+        signal: controller.signal,
+      });
+      if (resp.status === 404) return false;
+      if (!resp.ok) {
+        throw new EcphoriaError(
+          `HTTP ${resp.status}: ${resp.statusText}`,
+          "HTTP_ERROR",
+          resp.status,
+        );
+      }
+      return true;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // ── Admin / sessions extras ──────────────────────────────────────
+
+  /** Re-embed active memories with the current provider (after a model change). */
+  async memoryReembed(limit = 1000): Promise<Record<string, unknown>> {
+    return this.post("/api/v1/admin/memory/reembed", { limit });
+  }
+
+  /** Consolidate a session's events into memory. */
+  async sessionDistill(sessionId: string): Promise<Record<string, unknown>> {
+    return this.post(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/distill`,
+      {},
+    );
+  }
+
   // ── Sessions ─────────────────────────────────────────────────────
 
   /** Start a conversation session. */
