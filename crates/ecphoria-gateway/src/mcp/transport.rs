@@ -519,10 +519,38 @@ async fn call_tool(
 
         "get_memories" => {
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let ts = |k: &str| {
+                args.get(k)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&chrono::Utc))
+            };
+            let filter = ecphoria_core::memory::cognition::MemoryFilter {
+                mem_type: args
+                    .get("mem_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                min_importance: args
+                    .get("min_importance")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32),
+                updated_after: ts("updated_after"),
+                updated_before: ts("updated_before"),
+                metadata: match (
+                    args.get("metadata_key").and_then(|v| v.as_str()),
+                    args.get("metadata_value").and_then(|v| v.as_str()),
+                ) {
+                    (Some(k), Some(v)) => Some((k.to_string(), v.to_string())),
+                    _ => None,
+                },
+            };
             engine
-                .memory_all(&scoped_for(args, tenant), limit)
+                .memory_list(&scoped_for(args, tenant), limit, offset, &filter)
                 .await
-                .map(|mems| serde_json::json!({"memories": mems, "count": mems.len()}))
+                .map(|mems| {
+                    serde_json::json!({"memories": mems, "count": mems.len(), "limit": limit, "offset": offset})
+                })
                 .map_err(|e| e.to_string())
         }
 
@@ -578,6 +606,50 @@ async fn call_tool(
             }
             .map_err(|e| e.to_string())?;
             Ok(serde_json::json!({"id": id, "deleted": deleted}))
+        }
+
+        "update_memory" => {
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'id' parameter")?;
+            let uuid = uuid::Uuid::parse_str(id).map_err(|_| "invalid 'id'".to_string())?;
+            let patch = ecphoria_core::memory::cognition::MemoryPatch {
+                content: args
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                importance: args
+                    .get("importance")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32),
+                mem_type: args
+                    .get("mem_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                metadata: args.get("metadata").cloned(),
+            };
+            if patch.is_empty() {
+                return Err(
+                    "provide at least one of content/importance/mem_type/metadata".to_string(),
+                );
+            }
+            if let Some(coord) = &cluster {
+                // Materialize on the leader, replicate the row through the log (like add_memory).
+                let (updated, rows) = engine
+                    .memory_update_plan(uuid, patch, tenant)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "memory not found".to_string())?;
+                mcp_cluster_write(coord, AppRequest::MemoryUpsert { rows }).await?;
+                return Ok(serde_json::to_value(updated).unwrap_or_default());
+            }
+            engine
+                .memory_update(uuid, patch, tenant)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "memory not found".to_string())
+                .map(|m| serde_json::to_value(m).unwrap_or_default())
         }
 
         "remember" => {

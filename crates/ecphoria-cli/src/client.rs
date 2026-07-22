@@ -64,6 +64,21 @@ impl EcphoriaClient {
             .await?)
     }
 
+    /// PATCH `<path>` with a JSON body → JSON.
+    pub async fn patch_json(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{}{}", self.base_url, path);
+        Ok(self
+            .auth(self.http.patch(url).json(&body))
+            .send()
+            .await?
+            .json()
+            .await?)
+    }
+
     /// DELETE `<path>` → JSON.
     pub async fn delete_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}{}", self.base_url, path);

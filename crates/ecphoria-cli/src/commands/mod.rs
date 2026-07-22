@@ -193,7 +193,7 @@ pub enum MemoryCmd {
         #[arg(short, long, default_value = "10")]
         k: usize,
     },
-    /// List active memories
+    /// List active memories (with optional filters + offset pagination)
     List {
         /// Scope to this user id
         #[arg(long)]
@@ -201,11 +201,49 @@ pub enum MemoryCmd {
         /// Max results
         #[arg(long, default_value = "50")]
         limit: usize,
+        /// Skip this many results (pagination)
+        #[arg(long, default_value = "0")]
+        offset: usize,
+        /// Filter: exact memory type (semantic|episodic|procedural)
+        #[arg(long)]
+        mem_type: Option<String>,
+        /// Filter: keep memories with importance >= this
+        #[arg(long)]
+        min_importance: Option<f32>,
+        /// Filter: RFC3339 — keep memories updated at/after
+        #[arg(long)]
+        updated_after: Option<String>,
+        /// Filter: RFC3339 — keep memories updated strictly before
+        #[arg(long)]
+        updated_before: Option<String>,
+        /// Filter: metadata key (pair with --metadata-value)
+        #[arg(long)]
+        metadata_key: Option<String>,
+        /// Filter: exact value for --metadata-key
+        #[arg(long)]
+        metadata_value: Option<String>,
     },
     /// Show a memory by id
     Get {
         /// Memory id
         id: String,
+    },
+    /// Correct a memory by id — only the given fields change
+    Update {
+        /// Memory id
+        id: String,
+        /// New content (re-embedded)
+        #[arg(long)]
+        content: Option<String>,
+        /// New importance (0.0–1.0)
+        #[arg(long)]
+        importance: Option<f32>,
+        /// New memory type (semantic|episodic|procedural)
+        #[arg(long)]
+        mem_type: Option<String>,
+        /// Replacement metadata as a JSON object string, e.g. '{"tag":"vip"}'
+        #[arg(long)]
+        metadata: Option<String>,
     },
     /// Show a memory's bi-temporal version history
     History {

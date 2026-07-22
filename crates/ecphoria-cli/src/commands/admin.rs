@@ -93,14 +93,68 @@ pub async fn memory(url: &str, action: MemoryCmd) -> anyhow::Result<()> {
             }
             c.post_json("/api/v1/memories/search", body).await?
         }
-        MemoryCmd::List { user, limit } => {
-            let mut path = format!("/api/v1/memories?limit={limit}");
+        MemoryCmd::List {
+            user,
+            limit,
+            offset,
+            mem_type,
+            min_importance,
+            updated_after,
+            updated_before,
+            metadata_key,
+            metadata_value,
+        } => {
+            let mut path = format!("/api/v1/memories?limit={limit}&offset={offset}");
             if let Some(u) = user {
-                path.push_str(&format!("&user_id={u}"));
+                path.push_str(&format!("&user_id={}", urlencode(&u)));
+            }
+            if let Some(mt) = mem_type {
+                path.push_str(&format!("&mem_type={}", urlencode(&mt)));
+            }
+            if let Some(mi) = min_importance {
+                path.push_str(&format!("&min_importance={mi}"));
+            }
+            if let Some(a) = updated_after {
+                path.push_str(&format!("&updated_after={}", urlencode(&a)));
+            }
+            if let Some(b) = updated_before {
+                path.push_str(&format!("&updated_before={}", urlencode(&b)));
+            }
+            if let (Some(k), Some(v)) = (metadata_key, metadata_value) {
+                path.push_str(&format!(
+                    "&metadata_key={}&metadata_value={}",
+                    urlencode(&k),
+                    urlencode(&v)
+                ));
             }
             c.get_json(&path).await?
         }
         MemoryCmd::Get { id } => c.get_json(&format!("/api/v1/memories/{id}")).await?,
+        MemoryCmd::Update {
+            id,
+            content,
+            importance,
+            mem_type,
+            metadata,
+        } => {
+            let mut body = serde_json::json!({});
+            if let Some(c) = content {
+                body["content"] = serde_json::json!(c);
+            }
+            if let Some(i) = importance {
+                body["importance"] = serde_json::json!(i);
+            }
+            if let Some(mt) = mem_type {
+                body["mem_type"] = serde_json::json!(mt);
+            }
+            if let Some(m) = metadata {
+                let parsed: serde_json::Value = serde_json::from_str(&m)
+                    .map_err(|e| anyhow::anyhow!("--metadata must be valid JSON: {e}"))?;
+                body["metadata"] = parsed;
+            }
+            c.patch_json(&format!("/api/v1/memories/{id}"), body)
+                .await?
+        }
         MemoryCmd::History { id } => {
             c.get_json(&format!("/api/v1/memories/{id}/history"))
                 .await?

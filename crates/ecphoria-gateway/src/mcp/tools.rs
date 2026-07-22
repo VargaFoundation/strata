@@ -203,14 +203,21 @@ pub fn list_tools() -> Vec<McpTool> {
         },
         McpTool {
             name: "get_memories".into(),
-            description: "List the active memories in a scope (user/agent/session).".into(),
+            description: "List the active memories in a scope (user/agent/session), with optional filters and offset pagination. Ordered by importance then recency.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "user_id": {"type": "string"},
                     "agent_id": {"type": "string"},
                     "session_id": {"type": "string"},
-                    "limit": {"type": "integer", "description": "Max memories to return (default 50)"}
+                    "limit": {"type": "integer", "description": "Max memories to return (default 50)"},
+                    "offset": {"type": "integer", "description": "Rows to skip for pagination (default 0)"},
+                    "mem_type": {"type": "string", "description": "Filter: exact memory type (semantic|episodic|procedural)"},
+                    "min_importance": {"type": "number", "description": "Filter: keep memories with importance >= this"},
+                    "updated_after": {"type": "string", "description": "Filter: RFC3339 — keep memories updated at/after"},
+                    "updated_before": {"type": "string", "description": "Filter: RFC3339 — keep memories updated strictly before"},
+                    "metadata_key": {"type": "string", "description": "Filter: top-level metadata key (pair with metadata_value)"},
+                    "metadata_value": {"type": "string", "description": "Filter: exact value for metadata_key"}
                 }
             }),
         },
@@ -232,6 +239,21 @@ pub fn list_tools() -> Vec<McpTool> {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "The memory id"}
+                },
+                "required": ["id"]
+            }),
+        },
+        McpTool {
+            name: "update_memory".into(),
+            description: "Correct an existing memory by id — only the provided fields change (content, importance, mem_type, metadata). To change what a memory is about, add a new one instead (subject is not editable).".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "The memory id"},
+                    "content": {"type": "string", "description": "New content (re-embedded)"},
+                    "importance": {"type": "number", "description": "New importance 0.0–1.0"},
+                    "mem_type": {"type": "string", "description": "New memory type (semantic|episodic|procedural)"},
+                    "metadata": {"type": "object", "description": "Replacement metadata object"}
                 },
                 "required": ["id"]
             }),
@@ -362,7 +384,7 @@ mod tests {
         let tools = list_tools();
         // 6 core + 3 session + 6 memory + 2 graph + 6 cognition/graph-analytics (provenance,
         // feedback, contradictions, centrality, path, communities).
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
     }
 
     #[test]

@@ -27,7 +27,9 @@ ecphoria audit [--since ISO] [--tenant T]
 ecphoria tenant delete|export|import --tenant T [--file F]
 ecphoria memory add "<fact>" [--subject S --user U --importance F]
 ecphoria memory search "<query>" [--user U -k N]
-ecphoria memory list|get <id>|history <id> [--user U]
+ecphoria memory list [--user U --limit N --offset N --mem-type T --min-importance F --updated-after RFC3339 --updated-before RFC3339 --metadata-key K --metadata-value V]
+ecphoria memory get <id>|history <id>
+ecphoria memory update <id> [--content C --importance F --mem-type T --metadata '<json>']  # partial correction
 ecphoria memory decay|consolidate|reembed
 ecphoria graph centrality|communities [--as-of RFC3339]
 ecphoria graph path --src A --dst B    # shortest path
