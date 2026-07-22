@@ -28,6 +28,7 @@ service Ecphoria {
   rpc AddMemory(AddMemoryRequest) returns (google.protobuf.Struct);
   rpc SearchMemory(SearchMemoryRequest) returns (MemoryHits);
   rpc GetMemories(GetMemoriesRequest) returns (MemoryList);
+  rpc UpdateMemory(UpdateMemoryRequest) returns (google.protobuf.Struct);
   rpc DeleteMemory(DeleteMemoryRequest) returns (DeleteMemoryResponse);
 
   // ── Sessions ──
@@ -72,10 +73,28 @@ message MemoryHits {
 message GetMemoriesRequest {
   MemoryScope scope = 1;
   uint32 limit = 2;
+  uint32 offset = 3;                     // pagination
+  // Optional conjunctive filters.
+  optional string mem_type = 4;          // exact memory type
+  optional float min_importance = 5;
+  optional string updated_after = 6;     // RFC3339
+  optional string updated_before = 7;    // RFC3339
+  optional string metadata_key = 8;      // exact metadata match (pair with metadata_value)
+  optional string metadata_value = 9;
 }
 
 message MemoryList {
   repeated google.protobuf.Struct memories = 1;
+}
+
+// Partial correction — only the set fields change (subject is not editable). `metadata` replaces
+// the metadata object when present.
+message UpdateMemoryRequest {
+  string id = 1;
+  optional string content = 2;
+  optional float importance = 3;
+  optional string mem_type = 4;
+  google.protobuf.Struct metadata = 5;
 }
 
 message DeleteMemoryRequest {

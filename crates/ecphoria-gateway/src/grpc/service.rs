@@ -328,9 +328,19 @@ impl Ecphoria for EcphoriaGrpcService {
         } else {
             req.limit as usize
         };
+        let filter = ecphoria_core::memory::cognition::MemoryFilter {
+            mem_type: req.mem_type,
+            min_importance: req.min_importance,
+            updated_after: parse_as_of_opt(req.updated_after.as_deref()),
+            updated_before: parse_as_of_opt(req.updated_before.as_deref()),
+            metadata: match (req.metadata_key, req.metadata_value) {
+                (Some(k), Some(v)) => Some((k, v)),
+                _ => None,
+            },
+        };
         let mems = self
             .engine
-            .memory_all(&scope, limit)
+            .memory_list(&scope, limit, req.offset as usize, &filter)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         let memories = mems
@@ -338,6 +348,35 @@ impl Ecphoria for EcphoriaGrpcService {
             .map(|m| super::convert::json_to_struct(serde_json::to_value(m).unwrap_or_default()))
             .collect();
         Ok(Response::new(proto::MemoryList { memories }))
+    }
+
+    async fn update_memory(
+        &self,
+        request: Request<proto::UpdateMemoryRequest>,
+    ) -> Result<Response<prost_types::Struct>, Status> {
+        let tenant = self.tenant_from_write(&request).await?;
+        let req = request.into_inner();
+        let id = uuid::Uuid::parse_str(&req.id)
+            .map_err(|_| Status::invalid_argument("invalid memory id"))?;
+        let patch = ecphoria_core::memory::cognition::MemoryPatch {
+            content: req.content,
+            importance: req.importance,
+            mem_type: req.mem_type,
+            metadata: req.metadata.map(super::convert::struct_to_json),
+        };
+        if patch.is_empty() {
+            return Err(Status::invalid_argument(
+                "provide at least one of content/importance/mem_type/metadata",
+            ));
+        }
+        let updated = self
+            .engine
+            .memory_update(id, patch, tenant.as_deref())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("memory not found"))?;
+        let v = serde_json::to_value(updated).unwrap_or_default();
+        Ok(Response::new(super::convert::json_to_struct(v)))
     }
 
     async fn delete_memory(
@@ -1025,5 +1064,107 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(comms.communities.is_empty());
+    }
+
+    #[tokio::test]
+    async fn grpc_update_memory_and_filtered_list() {
+        let service = svc().await;
+        let scope = || {
+            Some(proto::MemoryScope {
+                user_id: "alice".into(),
+                ..Default::default()
+            })
+        };
+
+        let added = service
+            .add_memory(authed(
+                proto::AddMemoryRequest {
+                    content: "likes tea".into(),
+                    scope: scope(),
+                    subject: None,
+                    importance: Some(0.3),
+                },
+                "t",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        let id = crate::grpc::convert::struct_to_json(added)["memory"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Correct content + importance.
+        let updated = service
+            .update_memory(authed(
+                proto::UpdateMemoryRequest {
+                    id: id.clone(),
+                    content: Some("likes strong tea".into()),
+                    importance: Some(0.9),
+                    mem_type: None,
+                    metadata: None,
+                },
+                "t",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            crate::grpc::convert::struct_to_json(updated)["content"],
+            "likes strong tea"
+        );
+
+        // Cross-tenant update → NotFound.
+        let err = service
+            .update_memory(authed(
+                proto::UpdateMemoryRequest {
+                    id: id.clone(),
+                    content: Some("hijack".into()),
+                    importance: None,
+                    mem_type: None,
+                    metadata: None,
+                },
+                "other",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+
+        // Empty patch → InvalidArgument.
+        let err = service
+            .update_memory(authed(
+                proto::UpdateMemoryRequest {
+                    id: id.clone(),
+                    content: None,
+                    importance: None,
+                    mem_type: None,
+                    metadata: None,
+                },
+                "t",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        // Filtered list: min_importance=0.5 keeps the corrected (0.9) memory.
+        let list = service
+            .get_memories(authed(
+                proto::GetMemoriesRequest {
+                    scope: scope(),
+                    limit: 10,
+                    offset: 0,
+                    mem_type: None,
+                    min_importance: Some(0.5),
+                    updated_after: None,
+                    updated_before: None,
+                    metadata_key: None,
+                    metadata_value: None,
+                },
+                "t",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(list.memories.len(), 1);
     }
 }
