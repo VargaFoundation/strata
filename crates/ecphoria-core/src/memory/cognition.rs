@@ -370,6 +370,46 @@ impl MemoryInput {
     }
 }
 
+/// A partial in-place correction to an existing **active** memory (PATCH semantics — only `Some`
+/// fields change). `subject` is intentionally NOT patchable: it's the contradiction key, so changing
+/// what a memory is *about* means adding a new memory (which re-runs contradiction resolution), not
+/// editing this one. Editing `content` triggers a re-embed on the write path.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryPatch {
+    pub content: Option<String>,
+    pub importance: Option<f32>,
+    pub mem_type: Option<String>,
+    /// Replaces the metadata object wholesale when `Some` (field-level PATCH, not key-level merge).
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl MemoryPatch {
+    /// True when nothing would change — callers should reject an empty patch (400).
+    pub fn is_empty(&self) -> bool {
+        self.content.is_none()
+            && self.importance.is_none()
+            && self.mem_type.is_none()
+            && self.metadata.is_none()
+    }
+}
+
+/// Optional, conjunctive filters for listing memories (`None` = no constraint). Numeric/date bounds
+/// are inlined as validated literals; string fields are bound as parameters, so this stays
+/// injection-safe (see [`MemoryStore::list_paged`]).
+#[derive(Debug, Clone, Default)]
+pub struct MemoryFilter {
+    /// Exact `mem_type` match (`semantic` | `episodic` | `procedural`).
+    pub mem_type: Option<String>,
+    /// Keep memories with importance ≥ this (clamped to 0.0..=1.0).
+    pub min_importance: Option<f32>,
+    /// Keep memories updated at/after this instant.
+    pub updated_after: Option<DateTime<Utc>>,
+    /// Keep memories updated strictly before this instant.
+    pub updated_before: Option<DateTime<Utc>>,
+    /// Exact match on a top-level metadata key: `metadata[key]` stringified equals `value`.
+    pub metadata: Option<(String, String)>,
+}
+
 /// A memory search hit with similarity score (0.0 when ranked by recency fallback).
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryHit {
@@ -1038,6 +1078,61 @@ impl MemoryStore {
             where_sql,
             limit.clamp(1, 10_000)
         );
+        self.query_memories(&sql, &params)
+    }
+
+    /// Active memories for a scope with optional conjunctive filters + offset pagination. Stable
+    /// order (importance, then recency) so paging is consistent. Injection-safe: the scope,
+    /// `mem_type`, and metadata *value* are bound parameters; numeric/date bounds are inlined as
+    /// validated literals; the metadata *key* (which must be a JSON-path string literal, not a bind
+    /// param) is restricted to a safe identifier — an unsafe key returns no rows rather than risk
+    /// injection.
+    pub async fn list_paged(
+        &self,
+        scope: &MemoryScope,
+        limit: usize,
+        offset: usize,
+        filter: &MemoryFilter,
+    ) -> crate::Result<Vec<Memory>> {
+        let (where_sql, mut params) = scope.where_clause();
+        let mut sql = format!(
+            "SELECT {} FROM memories WHERE {} AND state = 'active'",
+            Self::SELECT_COLS,
+            where_sql,
+        );
+        // Order matters: every `?` pushed below must line up positionally with `params`. Inlined
+        // (numeric/date) clauses consume no parameter, so they don't affect that alignment.
+        if let Some(mt) = &filter.mem_type {
+            sql.push_str(" AND mem_type = ?");
+            params.push(mt.clone());
+        }
+        if let Some(imp) = filter.min_importance {
+            sql.push_str(&format!(" AND importance >= {}", imp.clamp(0.0, 1.0)));
+        }
+        if let Some(after) = filter.updated_after {
+            sql.push_str(&format!(" AND updated_at >= '{}'", after.to_rfc3339()));
+        }
+        if let Some(before) = filter.updated_before {
+            sql.push_str(&format!(" AND updated_at < '{}'", before.to_rfc3339()));
+        }
+        if let Some((key, value)) = &filter.metadata {
+            if key.is_empty()
+                || !key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+            {
+                return Ok(vec![]);
+            }
+            sql.push_str(&format!(
+                " AND json_extract_string(metadata, '$.{key}') = ?"
+            ));
+            params.push(value.clone());
+        }
+        sql.push_str(&format!(
+            " ORDER BY importance DESC, valid_from DESC LIMIT {} OFFSET {}",
+            limit.clamp(1, 10_000),
+            offset.min(10_000_000),
+        ));
         self.query_memories(&sql, &params)
     }
 

@@ -2614,6 +2614,22 @@ impl EcphoriaEngine {
         self.memory_store.list_active(scope, limit).await
     }
 
+    /// List active memories for a scope with optional filters (`mem_type`/importance/date-range/
+    /// metadata-key) and offset pagination — the paged, filterable counterpart of
+    /// [`Self::memory_all`]. Read-only, tenant-scoped by the caller's `scope`.
+    pub async fn memory_list(
+        &self,
+        scope: &MemoryScope,
+        limit: usize,
+        offset: usize,
+        filter: &crate::memory::cognition::MemoryFilter,
+    ) -> Result<Vec<Memory>> {
+        let limit = limit.min(self.config.query.max_rows);
+        self.memory_store
+            .list_paged(scope, limit, offset, filter)
+            .await
+    }
+
     /// Memories a tenant has explicitly **published** (`metadata.published == true`) — the read set
     /// behind the opt-in public read-only view. The published predicate is applied in SQL (see
     /// [`MemoryStore::list_published`]) so the `limit` never truncates a published memory in favor of
@@ -2890,6 +2906,93 @@ impl EcphoriaEngine {
             let _ = self.memory_index.delete(id).await;
         }
         Ok(deleted)
+    }
+
+    /// Compute the change-set for a partial in-place correction of an **active** memory WITHOUT
+    /// writing — the plan half of the plan/apply split (mirrors [`Self::memory_plan`]) so a cluster
+    /// leader can replicate the result via `MemoryUpsert` and every node applies the identical row.
+    /// Returns `None` if the id doesn't exist within `tenant`, or the memory isn't active
+    /// (superseded/expired rows are immutable history). Editing `content` re-embeds; other fields
+    /// keep the stored vector.
+    pub async fn memory_update_plan(
+        &self,
+        id: uuid::Uuid,
+        patch: crate::memory::cognition::MemoryPatch,
+        tenant: Option<&str>,
+    ) -> Result<Option<(Memory, Vec<MemoryRow>)>> {
+        let existing = match tenant {
+            Some(t) => self.memory_store.get_scoped(id, t).await?,
+            None => self.memory_store.get(id).await?,
+        };
+        let Some(mut mem) = existing else {
+            return Ok(None);
+        };
+        if mem.state != MemoryState::Active {
+            return Ok(None);
+        }
+
+        let content_changed = patch
+            .content
+            .as_ref()
+            .is_some_and(|c| c.trim() != mem.content.trim());
+        if let Some(c) = patch.content {
+            mem.content = c;
+        }
+        if let Some(imp) = patch.importance {
+            mem.importance = imp.clamp(0.0, 1.0);
+        }
+        if let Some(mt) = patch.mem_type {
+            mem.mem_type = mt;
+        }
+        if let Some(md) = patch.metadata {
+            mem.metadata = md;
+        }
+        mem.version += 1;
+        mem.updated_at = chrono::Utc::now();
+
+        // Re-embed only when the content actually changed. On a re-embed failure, keep the stored
+        // vector (search degrades to BM25 for this row rather than NULLing it — the same convention
+        // as `memory_plan`'s confirmation path, and observable via the metric + warn).
+        let embedding = if content_changed {
+            match self.embedding.as_ref() {
+                Some(_) => match self.embed_document_text(&mem.content).await {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        metrics::counter!("ecphoria_memory_embed_failures_total", "op" => "update")
+                            .increment(1);
+                        tracing::warn!(error = %e, id = %id, "memory re-embed failed on update — kept prior vector (search degraded)");
+                        self.memory_store.get_embedding(id).await?
+                    }
+                },
+                None => None,
+            }
+        } else {
+            self.memory_store.get_embedding(id).await?
+        };
+
+        Ok(Some((
+            mem.clone(),
+            vec![MemoryRow {
+                memory: mem,
+                embedding,
+            }],
+        )))
+    }
+
+    /// Apply a partial correction locally (single-node path). In cluster mode call
+    /// [`Self::memory_update_plan`] and replicate the returned rows via `MemoryUpsert` instead.
+    /// Returns the updated memory, or `None` when it doesn't exist within `tenant` / isn't active.
+    pub async fn memory_update(
+        &self,
+        id: uuid::Uuid,
+        patch: crate::memory::cognition::MemoryPatch,
+        tenant: Option<&str>,
+    ) -> Result<Option<Memory>> {
+        let Some((mem, rows)) = self.memory_update_plan(id, patch, tenant).await? else {
+            return Ok(None);
+        };
+        self.memory_apply_rows(rows).await?;
+        Ok(Some(mem))
     }
 
     /// Total memory count (all states).
@@ -5153,6 +5256,198 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[tokio::test]
+    async fn memory_update_patches_fields_and_is_tenant_scoped() {
+        let engine = EcphoriaEngine::new(inmem_config()).await.unwrap();
+        let scope = MemoryScope::user("alice"); // tenant defaults to "default"
+        let added = engine
+            .memory_add(MemoryInput::new(scope.clone(), "likes tea"))
+            .await
+            .unwrap();
+        let id = added.memory.id;
+        let v0 = added.memory.version;
+
+        // Partial patch: content + importance + mem_type + metadata; subject/scope untouched.
+        let patch = crate::memory::cognition::MemoryPatch {
+            content: Some("likes strong black tea".into()),
+            importance: Some(0.9),
+            mem_type: Some("episodic".into()),
+            metadata: Some(serde_json::json!({ "source": "correction" })),
+        };
+        let updated = engine
+            .memory_update(id, patch, Some("default"))
+            .await
+            .unwrap()
+            .expect("memory should exist");
+        assert_eq!(updated.id, id, "id is stable across an update");
+        assert_eq!(updated.content, "likes strong black tea");
+        assert!((updated.importance - 0.9).abs() < 1e-6);
+        assert_eq!(updated.mem_type, "episodic");
+        assert_eq!(updated.metadata["source"], "correction");
+        assert!(updated.version > v0, "version bumps");
+        // Persisted + visible via a normal read.
+        assert_eq!(
+            engine.memory_get(id).await.unwrap().unwrap().content,
+            "likes strong black tea"
+        );
+
+        // Tenant isolation: another tenant cannot update this memory (None), and it stays unchanged.
+        let none = engine
+            .memory_update(
+                id,
+                crate::memory::cognition::MemoryPatch {
+                    content: Some("hijacked".into()),
+                    ..Default::default()
+                },
+                Some("other-tenant"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            none.is_none(),
+            "cross-tenant update must not find the memory"
+        );
+        assert_eq!(
+            engine.memory_get(id).await.unwrap().unwrap().content,
+            "likes strong black tea"
+        );
+
+        // A missing id → None.
+        assert!(engine
+            .memory_update(
+                uuid::Uuid::new_v4(),
+                crate::memory::cognition::MemoryPatch {
+                    importance: Some(0.1),
+                    ..Default::default()
+                },
+                Some("default"),
+            )
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_list_filters_and_paginates() {
+        use crate::memory::cognition::MemoryFilter;
+        let engine = EcphoriaEngine::new(inmem_config()).await.unwrap();
+        let scope = MemoryScope::user("bob");
+
+        for (i, (content, imp, mt)) in [
+            ("a", 0.9, "semantic"),
+            ("b", 0.7, "semantic"),
+            ("c", 0.5, "episodic"),
+            ("d", 0.3, "semantic"),
+            ("e", 0.1, "episodic"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut input = MemoryInput::new(scope.clone(), *content);
+            input.importance = Some(*imp);
+            input.mem_type = Some((*mt).into());
+            input.subject = Some(format!("s{i}")); // distinct subjects → no dedup/supersession
+            engine.memory_add(input).await.unwrap();
+        }
+
+        // No filter → all 5, ordered by importance desc.
+        let all = engine
+            .memory_list(&scope, 100, 0, &MemoryFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0].content, "a");
+
+        // mem_type exact filter.
+        let sem = engine
+            .memory_list(
+                &scope,
+                100,
+                0,
+                &MemoryFilter {
+                    mem_type: Some("semantic".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(sem.len(), 3);
+        assert!(sem.iter().all(|m| m.mem_type == "semantic"));
+
+        // min_importance filter (>= 0.6 → 0.9, 0.7).
+        let important = engine
+            .memory_list(
+                &scope,
+                100,
+                0,
+                &MemoryFilter {
+                    min_importance: Some(0.6),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(important.len(), 2);
+
+        // Offset pagination: two non-overlapping pages of 2.
+        let page1 = engine
+            .memory_list(&scope, 2, 0, &MemoryFilter::default())
+            .await
+            .unwrap();
+        let page2 = engine
+            .memory_list(&scope, 2, 2, &MemoryFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page2.len(), 2);
+        assert_ne!(page1[0].id, page2[0].id, "pages don't overlap");
+        assert_eq!(page1[0].content, "a");
+        assert_eq!(page2[0].content, "c");
+
+        // metadata exact-key filter: tag one memory, then filter on it.
+        let target = all.iter().find(|m| m.content == "c").unwrap().id;
+        engine
+            .memory_update(
+                target,
+                crate::memory::cognition::MemoryPatch {
+                    metadata: Some(serde_json::json!({ "tag": "vip" })),
+                    ..Default::default()
+                },
+                Some("default"),
+            )
+            .await
+            .unwrap();
+        let vip = engine
+            .memory_list(
+                &scope,
+                100,
+                0,
+                &MemoryFilter {
+                    metadata: Some(("tag".into(), "vip".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(vip.len(), 1);
+        assert_eq!(vip[0].content, "c");
+
+        // An unsafe metadata key is rejected (no rows) rather than risking injection.
+        let inj = engine
+            .memory_list(
+                &scope,
+                100,
+                0,
+                &MemoryFilter {
+                    metadata: Some(("a' OR '1'='1".into(), "x".into())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(inj.is_empty(), "unsafe metadata key must match nothing");
     }
 
     #[tokio::test]
