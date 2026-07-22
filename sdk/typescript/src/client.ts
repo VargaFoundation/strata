@@ -282,18 +282,79 @@ export class EcphoriaClient {
 
   /** List active memories in a scope. */
   async memoryList(
-    opts: MemoryScope & { limit?: number } = {},
+    opts: MemoryScope & {
+      limit?: number;
+      offset?: number;
+      mem_type?: string;
+      min_importance?: number;
+      updated_after?: string;
+      updated_before?: string;
+      metadata_key?: string;
+      metadata_value?: string;
+    } = {},
   ): Promise<Record<string, unknown>[]> {
     const params = new URLSearchParams();
     params.set("limit", String(opts.limit ?? 50));
+    params.set("offset", String(opts.offset ?? 0));
     for (const key of ["tenant_id", "user_id", "agent_id", "session_id"] as const) {
       const v = opts[key];
       if (v !== undefined) params.set(key, v);
+    }
+    for (const key of [
+      "mem_type",
+      "updated_after",
+      "updated_before",
+      "metadata_key",
+      "metadata_value",
+    ] as const) {
+      const v = opts[key];
+      if (v !== undefined) params.set(key, v);
+    }
+    if (opts.min_importance !== undefined) {
+      params.set("min_importance", String(opts.min_importance));
     }
     const data = await this.get<{ memories: Record<string, unknown>[] }>(
       `/api/v1/memories?${params.toString()}`,
     );
     return data.memories ?? [];
+  }
+
+  /**
+   * Partially correct a memory — only the provided fields change (content is re-embedded).
+   * Returns the updated memory, or null if it doesn't exist (or isn't in your tenant). The
+   * subject is not editable: to change what a memory is about, add a new one.
+   */
+  async memoryUpdate(
+    id: string,
+    patch: {
+      content?: string;
+      importance?: number;
+      mem_type?: string;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<Record<string, unknown> | null> {
+    const url = `${this.baseUrl}/api/v1/memories/${encodeURIComponent(id)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    try {
+      const resp = await fetch(url, {
+        method: "PATCH",
+        headers: this.headers,
+        body: JSON.stringify(patch),
+        signal: controller.signal,
+      });
+      if (resp.status === 404) return null;
+      if (!resp.ok) {
+        throw new EcphoriaError(
+          `HTTP ${resp.status}: ${resp.statusText}`,
+          "HTTP_ERROR",
+          resp.status,
+        );
+      }
+      return (await resp.json()) as Record<string, unknown>;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Get a memory by id. Returns null if not found (or not in your tenant). */

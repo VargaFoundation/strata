@@ -406,9 +406,49 @@ func (c *Client) MemorySearch(ctx context.Context, query string, k int, scope Me
 }
 
 // MemoryList lists active memories in a scope.
-func (c *Client) MemoryList(ctx context.Context, limit int, scope MemoryScope) ([]map[string]any, error) {
-	q := scope.query()
+// MemoryFilter narrows a memory listing (all conjunctive; the zero value adds no constraint).
+type MemoryFilter struct {
+	MemType       string   // exact mem_type (semantic|episodic|procedural)
+	MinImportance *float64 // pointer so a 0.0 threshold is expressible
+	UpdatedAfter  string   // RFC3339 — keep memories updated at/after
+	UpdatedBefore string   // RFC3339 — keep memories updated strictly before
+	MetadataKey   string   // exact metadata match (pair with MetadataValue)
+	MetadataValue string
+}
+
+// MemoryListOptions parameterizes MemoryListWith (filters + offset pagination).
+type MemoryListOptions struct {
+	Limit  int
+	Offset int
+	Scope  MemoryScope
+	Filter MemoryFilter
+}
+
+// MemoryListWith lists active memories in a scope with optional filters + offset pagination.
+func (c *Client) MemoryListWith(ctx context.Context, opts MemoryListOptions) ([]map[string]any, error) {
+	q := opts.Scope.query()
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
 	q.Set("limit", fmt.Sprintf("%d", limit))
+	q.Set("offset", fmt.Sprintf("%d", opts.Offset))
+	if opts.Filter.MemType != "" {
+		q.Set("mem_type", opts.Filter.MemType)
+	}
+	if opts.Filter.MinImportance != nil {
+		q.Set("min_importance", strconv.FormatFloat(*opts.Filter.MinImportance, 'g', -1, 64))
+	}
+	if opts.Filter.UpdatedAfter != "" {
+		q.Set("updated_after", opts.Filter.UpdatedAfter)
+	}
+	if opts.Filter.UpdatedBefore != "" {
+		q.Set("updated_before", opts.Filter.UpdatedBefore)
+	}
+	if opts.Filter.MetadataKey != "" && opts.Filter.MetadataValue != "" {
+		q.Set("metadata_key", opts.Filter.MetadataKey)
+		q.Set("metadata_value", opts.Filter.MetadataValue)
+	}
 	data, _, err := c.doRequest(ctx, http.MethodGet, "/api/v1/memories?"+q.Encode(), nil)
 	if err != nil {
 		return nil, err
@@ -420,6 +460,11 @@ func (c *Client) MemoryList(ctx context.Context, limit int, scope MemoryScope) (
 		return nil, fmt.Errorf("ecphoria: decode memory_list: %w", err)
 	}
 	return r.Memories, nil
+}
+
+// MemoryList lists active memories in a scope (unfiltered; see MemoryListWith for filters/paging).
+func (c *Client) MemoryList(ctx context.Context, limit int, scope MemoryScope) ([]map[string]any, error) {
+	return c.MemoryListWith(ctx, MemoryListOptions{Limit: limit, Scope: scope})
 }
 
 // MemoryGet returns a memory by id, or nil if not found (or not in your tenant).
@@ -434,6 +479,32 @@ func (c *Client) MemoryGet(ctx context.Context, id string) (map[string]any, erro
 	var r map[string]any
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("ecphoria: decode memory_get: %w", err)
+	}
+	return r, nil
+}
+
+// MemoryPatch is a partial correction; only the set (non-nil) fields change. Content is re-embedded.
+// The subject is not editable — add a new memory to change what a memory is about.
+type MemoryPatch struct {
+	Content    *string        `json:"content,omitempty"`
+	Importance *float64       `json:"importance,omitempty"`
+	MemType    *string        `json:"mem_type,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
+// MemoryUpdate partially corrects a memory by id. Returns nil if it doesn't exist (or isn't in your
+// tenant).
+func (c *Client) MemoryUpdate(ctx context.Context, id string, patch MemoryPatch) (map[string]any, error) {
+	data, status, err := c.doRequest(ctx, http.MethodPatch, "/api/v1/memories/"+url.PathEscape(id), patch)
+	if status == http.StatusNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var r map[string]any
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("ecphoria: decode memory_update: %w", err)
 	}
 	return r, nil
 }

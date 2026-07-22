@@ -243,3 +243,69 @@ def test_attachment_upload_sends_raw_bytes_with_content_type():
     assert meta["id"] == "att1"
     assert seen["ct"] == "image/png"
     assert seen["body"] == b"\x89PNG"
+
+
+def test_memory_update_patches_via_patch_verb():
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["method"] = req.method
+        seen["path"] = req.url.path
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"id": "m1", "content": "corrected", "importance": 0.9})
+
+    client = make_client(handler)
+    try:
+        out = run(client.memory_update("m1", content="corrected", importance=0.9))
+    finally:
+        run(client.close())
+
+    assert seen["method"] == "PATCH"
+    assert seen["path"] == "/api/v1/memories/m1"
+    assert seen["body"] == {"content": "corrected", "importance": 0.9}
+    assert out["content"] == "corrected"
+
+
+def test_memory_update_returns_none_on_404():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = make_client(handler)
+    try:
+        out = run(client.memory_update("missing", content="x"))
+    finally:
+        run(client.close())
+    assert out is None
+
+
+def test_memory_list_sends_filters_and_offset():
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["params"] = dict(req.url.params)
+        return httpx.Response(200, json={"memories": [], "count": 0})
+
+    client = make_client(handler)
+    try:
+        run(
+            client.memory_list(
+                user_id="alice",
+                limit=10,
+                offset=5,
+                mem_type="semantic",
+                min_importance=0.5,
+                metadata_key="tag",
+                metadata_value="vip",
+            )
+        )
+    finally:
+        run(client.close())
+
+    p = seen["params"]
+    assert p["limit"] == "10"
+    assert p["offset"] == "5"
+    assert p["user_id"] == "alice"
+    assert p["mem_type"] == "semantic"
+    assert p["min_importance"] == "0.5"
+    assert p["metadata_key"] == "tag"
+    assert p["metadata_value"] == "vip"

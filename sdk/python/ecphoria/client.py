@@ -464,18 +464,36 @@ class EcphoriaClient:
         self,
         *,
         limit: int = 50,
+        offset: int = 0,
         user_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         session_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        mem_type: Optional[str] = None,
+        min_importance: Optional[float] = None,
+        updated_after: Optional[str] = None,
+        updated_before: Optional[str] = None,
+        metadata_key: Optional[str] = None,
+        metadata_value: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """List active memories in a scope."""
-        params: dict[str, Any] = {"limit": limit}
+        """List active memories in a scope, with optional filters + offset pagination.
+
+        Filters (all conjunctive): ``mem_type`` (exact), ``min_importance``,
+        ``updated_after``/``updated_before`` (RFC3339), and an exact metadata match via
+        ``metadata_key`` + ``metadata_value``.
+        """
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
         for key, v in (
             ("user_id", user_id),
             ("agent_id", agent_id),
             ("session_id", session_id),
             ("tenant_id", tenant_id),
+            ("mem_type", mem_type),
+            ("min_importance", min_importance),
+            ("updated_after", updated_after),
+            ("updated_before", updated_before),
+            ("metadata_key", metadata_key),
+            ("metadata_value", metadata_value),
         ):
             if v is not None:
                 params[key] = v
@@ -486,6 +504,37 @@ class EcphoriaClient:
     async def memory_get(self, memory_id: str) -> Optional[dict[str, Any]]:
         """Get a memory by id. Returns None if not found (or not in your tenant)."""
         resp = await self._request("GET", f"/api/v1/memories/{memory_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
+    async def memory_update(
+        self,
+        memory_id: str,
+        *,
+        content: Optional[str] = None,
+        importance: Optional[float] = None,
+        mem_type: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Partially correct a memory — only the provided fields change (content is re-embedded).
+
+        Returns the updated memory, or None if it doesn't exist (or isn't in your tenant). The
+        ``subject`` is not editable: to change what a memory is about, add a new one.
+        """
+        body: dict[str, Any] = {}
+        for key, v in (
+            ("content", content),
+            ("importance", importance),
+            ("mem_type", mem_type),
+            ("metadata", metadata),
+        ):
+            if v is not None:
+                body[key] = v
+        if not body:
+            raise EcphoriaError("memory_update requires at least one field to change")
+        resp = await self._request("PATCH", f"/api/v1/memories/{memory_id}", json=body)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
