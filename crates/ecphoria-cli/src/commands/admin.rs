@@ -2,7 +2,7 @@
 //! admin token via `--token` / `ECPHORIA_TOKEN` when the server has auth enabled.
 
 use crate::client::EcphoriaClient;
-use crate::commands::{MemoryCmd, RetentionCmd, TenantCmd};
+use crate::commands::{GraphCmd, MemoryCmd, RetentionCmd, TenantCmd};
 
 fn show(v: &serde_json::Value) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
@@ -68,6 +68,43 @@ pub async fn tenant(url: &str, action: TenantCmd) -> anyhow::Result<()> {
 pub async fn memory(url: &str, action: MemoryCmd) -> anyhow::Result<()> {
     let c = EcphoriaClient::new(url);
     let res = match action {
+        MemoryCmd::Add {
+            content,
+            subject,
+            user,
+            importance,
+        } => {
+            let mut body = serde_json::json!({ "content": content });
+            if let Some(s) = subject {
+                body["subject"] = serde_json::json!(s);
+            }
+            if let Some(u) = user {
+                body["user_id"] = serde_json::json!(u);
+            }
+            if let Some(i) = importance {
+                body["importance"] = serde_json::json!(i);
+            }
+            c.post_json("/api/v1/memories", body).await?
+        }
+        MemoryCmd::Search { query, user, k } => {
+            let mut body = serde_json::json!({ "query": query, "k": k });
+            if let Some(u) = user {
+                body["user_id"] = serde_json::json!(u);
+            }
+            c.post_json("/api/v1/memories/search", body).await?
+        }
+        MemoryCmd::List { user, limit } => {
+            let mut path = format!("/api/v1/memories?limit={limit}");
+            if let Some(u) = user {
+                path.push_str(&format!("&user_id={u}"));
+            }
+            c.get_json(&path).await?
+        }
+        MemoryCmd::Get { id } => c.get_json(&format!("/api/v1/memories/{id}")).await?,
+        MemoryCmd::History { id } => {
+            c.get_json(&format!("/api/v1/memories/{id}/history"))
+                .await?
+        }
         MemoryCmd::Decay => {
             c.post_json("/api/v1/admin/memory/decay", serde_json::json!({}))
                 .await?
@@ -76,8 +113,76 @@ pub async fn memory(url: &str, action: MemoryCmd) -> anyhow::Result<()> {
             c.post_json("/api/v1/admin/memory/consolidate", serde_json::json!({}))
                 .await?
         }
+        MemoryCmd::Reembed => {
+            c.post_json("/api/v1/admin/memory/reembed", serde_json::json!({}))
+                .await?
+        }
     };
     show(&res)
+}
+
+pub async fn graph(url: &str, action: GraphCmd) -> anyhow::Result<()> {
+    let c = EcphoriaClient::new(url);
+    let enc = |s: &str| urlencode(s);
+    let asof = |a: &Option<String>| {
+        a.as_ref()
+            .map(|s| format!("?as_of={}", enc(s)))
+            .unwrap_or_default()
+    };
+    let res = match action {
+        GraphCmd::Centrality { as_of, limit } => {
+            let mut path = format!("/api/v1/memories/graph/centrality{}", asof(&as_of));
+            if let Some(l) = limit {
+                path.push_str(if path.contains('?') { "&" } else { "?" });
+                path.push_str(&format!("limit={l}"));
+            }
+            c.get_json(&path).await?
+        }
+        GraphCmd::Path { src, dst, as_of } => {
+            let mut path = format!(
+                "/api/v1/memories/graph/path?src={}&dst={}",
+                enc(&src),
+                enc(&dst)
+            );
+            if let Some(a) = as_of {
+                path.push_str(&format!("&as_of={}", enc(&a)));
+            }
+            c.get_json(&path).await?
+        }
+        GraphCmd::Communities { as_of } => {
+            c.get_json(&format!(
+                "/api/v1/memories/graph/communities{}",
+                asof(&as_of)
+            ))
+            .await?
+        }
+        GraphCmd::Neighbors {
+            entity,
+            depth,
+            limit,
+        } => {
+            c.get_json(&format!(
+                "/api/v1/memories/graph?entity={}&depth={depth}&limit={limit}",
+                enc(&entity)
+            ))
+            .await?
+        }
+    };
+    show(&res)
+}
+
+/// Minimal percent-encoding for query-string values (space and the reserved chars we might hit).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 pub async fn reindex(url: &str) -> anyhow::Result<()> {
@@ -97,4 +202,14 @@ pub async fn rebalance(url: &str, tenant: &str, target_shard: usize) -> anyhow::
         )
         .await?,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn urlencode_escapes_query_values() {
+        assert_eq!(super::urlencode("Alice Smith"), "Alice%20Smith");
+        assert_eq!(super::urlencode("a/b?c&d"), "a%2Fb%3Fc%26d");
+        assert_eq!(super::urlencode("safe-.~_0"), "safe-.~_0");
+    }
 }

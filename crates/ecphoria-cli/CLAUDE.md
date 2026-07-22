@@ -25,7 +25,13 @@ ecphoria restore --path <dir>            # restore from a backup dir (DESTRUCTIV
 ecphoria retention enforce|list|set --source X --days N
 ecphoria audit [--since ISO] [--tenant T]
 ecphoria tenant delete|export|import --tenant T [--file F]
-ecphoria memory decay|consolidate
+ecphoria memory add "<fact>" [--subject S --user U --importance F]
+ecphoria memory search "<query>" [--user U -k N]
+ecphoria memory list|get <id>|history <id> [--user U]
+ecphoria memory decay|consolidate|reembed
+ecphoria graph centrality|communities [--as-of RFC3339]
+ecphoria graph path --src A --dst B    # shortest path
+ecphoria graph neighbors <entity> [--depth N --limit N]
 ecphoria reindex                         # reindex unembedded events
 ecphoria rebalance --tenant T --target-shard N
 ```

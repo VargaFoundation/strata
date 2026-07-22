@@ -109,10 +109,15 @@ pub enum Command {
         #[command(subcommand)]
         action: TenantCmd,
     },
-    /// Memory maintenance
+    /// Memory operations (add/search/list/get/history + maintenance)
     Memory {
         #[command(subcommand)]
         action: MemoryCmd,
+    },
+    /// Knowledge-graph queries (centrality/path/communities/neighbors)
+    Graph {
+        #[command(subcommand)]
+        action: GraphCmd,
     },
     /// Reindex unembedded events into the semantic store
     Reindex,
@@ -163,10 +168,94 @@ pub enum TenantCmd {
 
 #[derive(Subcommand)]
 pub enum MemoryCmd {
+    /// Add a memory (fact)
+    Add {
+        /// The fact/statement to remember
+        content: String,
+        /// Stable key the memory is about (enables contradiction resolution)
+        #[arg(long)]
+        subject: Option<String>,
+        /// Scope to this user id
+        #[arg(long)]
+        user: Option<String>,
+        /// Importance override (0.0–1.0)
+        #[arg(long)]
+        importance: Option<f32>,
+    },
+    /// Hybrid search over memories
+    Search {
+        /// Query text
+        query: String,
+        /// Scope to this user id
+        #[arg(long)]
+        user: Option<String>,
+        /// Number of results
+        #[arg(short, long, default_value = "10")]
+        k: usize,
+    },
+    /// List active memories
+    List {
+        /// Scope to this user id
+        #[arg(long)]
+        user: Option<String>,
+        /// Max results
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
+    /// Show a memory by id
+    Get {
+        /// Memory id
+        id: String,
+    },
+    /// Show a memory's bi-temporal version history
+    History {
+        /// Memory id
+        id: String,
+    },
     /// Forget low-importance memories (time-decayed)
     Decay,
     /// Consolidate low-importance memories into summaries
     Consolidate,
+    /// Re-embed memories with the current provider (after a model/dimension change)
+    Reembed,
+}
+
+#[derive(Subcommand)]
+pub enum GraphCmd {
+    /// Rank entities by degree + PageRank centrality
+    Centrality {
+        /// Temporal snapshot (RFC3339)
+        #[arg(long)]
+        as_of: Option<String>,
+        /// Max nodes
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Shortest directed path between two entities
+    Path {
+        #[arg(long)]
+        src: String,
+        #[arg(long)]
+        dst: String,
+        #[arg(long)]
+        as_of: Option<String>,
+    },
+    /// Detect communities (connected clusters)
+    Communities {
+        #[arg(long)]
+        as_of: Option<String>,
+    },
+    /// Explore the edges around an entity
+    Neighbors {
+        /// Entity to explore
+        entity: String,
+        /// Hops to expand (default 1)
+        #[arg(long, default_value = "1")]
+        depth: usize,
+        /// Max edges
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
 }
 
 pub async fn execute(cmd: Command, url: &str) -> anyhow::Result<()> {
@@ -210,6 +299,7 @@ pub async fn execute(cmd: Command, url: &str) -> anyhow::Result<()> {
         }
         Command::Tenant { action } => admin::tenant(url, action).await,
         Command::Memory { action } => admin::memory(url, action).await,
+        Command::Graph { action } => admin::graph(url, action).await,
         Command::Reindex => admin::reindex(url).await,
         Command::Rebalance {
             tenant,
